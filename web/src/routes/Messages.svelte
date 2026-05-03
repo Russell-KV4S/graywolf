@@ -25,6 +25,7 @@
   import MessageThread from '../components/messages/MessageThread.svelte';
   import TacticalSettings from '../components/messages/TacticalSettings.svelte';
   import ComposeNewModal from '../components/messages/ComposeNewModal.svelte';
+  import CredentialsModal from '../components/messages/remote_actions/CredentialsModal.svelte';
   import EmptyStates from '../components/messages/EmptyStates.svelte';
   import { messages as store } from '../lib/messagesStore.svelte.js';
   import { sendMessage } from '../api/messages.js';
@@ -401,6 +402,10 @@
   // slide transform; otherwise the grid renders both panes.
   const showList = $derived(!isMobile || !activeThreadId);
   const showThread = $derived(!isMobile || !!activeThreadId);
+
+  // Top-level entry to manage RemoteOTPCredentials (outbound Action
+  // sender). Modal is reused from drawer's "Manage secrets..." link.
+  let credsModalOpen = $state(false);
 </script>
 
 <div class="messages-shell" class:mobile={isMobile} class:has-thread={!!activeThreadId}>
@@ -411,6 +416,18 @@
 
   {#if showList}
     <div class="pane list-pane">
+      <div class="route-toolbar">
+        <button
+          type="button"
+          class="route-toolbar-item"
+          onclick={() => (credsModalOpen = true)}
+          data-testid="manage-otp-secrets"
+          aria-label="Manage OTP Secrets"
+          title="Manage OTP Secrets"
+        >
+          Manage OTP Secrets
+        </button>
+      </div>
       {#if showIgateBanner}
         <div class="igate-banner" role="status" data-testid="igate-banner">
           <span class="banner-text">{igateBannerText}</span>
@@ -456,7 +473,35 @@
   onClose={closeCompose}
 />
 
+<CredentialsModal bind:open={credsModalOpen} />
+
 <style>
+  .route-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
+    flex-shrink: 0;
+  }
+  .route-toolbar-item {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 10px;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .route-toolbar-item:hover {
+    background: var(--color-surface-raised);
+    color: var(--color-primary);
+    border-color: var(--color-border);
+  }
   .messages-shell {
     display: grid;
     grid-template-columns: 340px minmax(0, 1fr);
