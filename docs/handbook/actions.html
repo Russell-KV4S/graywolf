@@ -81,6 +81,11 @@
       of OTP credentials, and a live tail of recent invocations.
     </p>
 
+    <div class="screenshot">
+      <img src="img/actions.png" alt="Actions page showing the Actions table, OTP Credentials table, and Recent Invocations log" />
+      <div class="caption">The Actions page: the top table holds your Actions, the middle table holds OTP credentials, and the bottom panel tails every invocation in real time.</div>
+    </div>
+
     <h2>Message grammar</h2>
 
     <p>
@@ -163,6 +168,11 @@
       depending on whether you pick <strong>command</strong> or
       <strong>webhook</strong>.
     </p>
+
+    <div class="screenshot">
+      <img src="img/actions-edit.png" alt="Edit Action modal for an ECHO command Action, showing name, description, type, command path, timeout, and OTP fields" />
+      <div class="caption">The Edit Action form. Fields below the Type radio change shape for command vs. webhook; OTP, sender allowlist, timeout, and queue settings live further down the same scroll.</div>
+    </div>
 
     <p>
       Common fields:
@@ -482,6 +492,11 @@ https://hass.local:8123/api/services/light/turn_on?room={{arg.room}}
       one-time reveal panel:
     </p>
 
+    <div class="screenshot">
+      <img src="img/actions-new-credential.png" alt="New OTP Credential dialog with a Name field and Create credential button" />
+      <div class="caption">The New OTP Credential dialog. Name is the only field you set; algorithm parameters are fixed at TOTP/SHA1/6 digits/30s in v1.</div>
+    </div>
+
     <p>
       The reveal panel shows the secret only once. After you close it,
       graywolf retains only what it needs to verify codes &mdash; the
@@ -753,6 +768,11 @@ https://hass.local:8123/api/services/light/turn_on?room={{arg.room}}
       dialog warns about the bypass in its subhead so you do not
       conclude an Action is unprotected based on Test results.
     </p>
+
+    <div class="screenshot">
+      <img src="img/actions-test.png" alt="Test ECHO dialog with a banner explaining that OTP and sender-allowlist checks are bypassed for the test fire" />
+      <div class="caption">The Test dialog. The banner reminds you that OTP and the sender allowlist are bypassed; the Fire button still goes through sanitization, the executor, and the audit log.</div>
+    </div>
 
     <h3>Reading invocation rows</h3>
 
