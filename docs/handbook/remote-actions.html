@@ -317,9 +317,12 @@
         name on the receiver.
       </li>
       <li>
-        <strong><code>replay</code>.</strong> You fired the same OTP
-        twice within its 30-second window. Wait for the tile&rsquo;s
-        cooldown countdown to clear and try again.
+        <strong><code>bad_otp</code> on rapid re-fire.</strong> The
+        receiver rejects the same OTP twice within its 30-second
+        window (replay protection). Wait for the tile&rsquo;s cooldown
+        countdown to clear and try again. Distinguishable from a
+        mistyped Secret Key in that it only happens on the second of
+        two fast clicks; a mistyped key fails every time.
       </li>
       <li>
         <strong>SEND disabled with a tooltip.</strong> The assembled
