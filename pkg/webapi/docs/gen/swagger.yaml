@@ -1799,6 +1799,55 @@ definitions:
       schema_version:
         type: integer
     type: object
+  dto.RemoteActionMacro:
+    properties:
+      action_name:
+        type: string
+      args_string:
+        type: string
+      created_at:
+        type: string
+      id:
+        type: integer
+      label:
+        type: string
+      position:
+        type: integer
+      remote_otp_credential_id:
+        type: integer
+      target_call:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  dto.RemoteOTPCode:
+    properties:
+      code:
+        type: string
+      expires_at:
+        type: string
+    type: object
+  dto.RemoteOTPCredential:
+    properties:
+      algorithm:
+        type: string
+      created_at:
+        type: string
+      digits:
+        type: integer
+      id:
+        type: integer
+      last_used_at:
+        type: string
+      name:
+        type: string
+      period:
+        type: integer
+      used_by:
+        items:
+          type: string
+        type: array
+    type: object
   dto.SendMessageRequest:
     properties:
       channel:
@@ -2716,6 +2765,8 @@ tags:
     description: 'Offline PMTiles map downloads: per-state download lifecycle and status.'
   - name: actions
     description: 'On-air remote command/webhook execution: action definitions, OTP credentials, listener addressees, audit log, and operator test-fire.'
+  - name: remote-actions
+    description: 'Outbound Actions: operator-curated macros plus remote-station TOTP credentials used to fire @@<otp>#<action> invocations from inside Messages.'
   - name: auth
     description: Session login, logout, and first-user setup.
   - name: version
@@ -6351,6 +6402,186 @@ paths:
       summary: List unseen release notes for the caller
       tags:
         - release-notes
+  /remote-actions/credentials:
+    get:
+      operationId: listRemoteOTPCredentials
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/dto.RemoteOTPCredential'
+            type: array
+      summary: List remote OTP credentials
+      tags:
+        - remote-actions
+    post:
+      consumes:
+        - application/json
+      operationId: createRemoteOTPCredential
+      produces:
+        - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/dto.RemoteOTPCredential'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      summary: Create remote OTP credential
+      tags:
+        - remote-actions
+  /remote-actions/credentials/{id}:
+    delete:
+      operationId: deleteRemoteOTPCredential
+      responses:
+        "204":
+          description: No Content
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      summary: Delete remote OTP credential
+      tags:
+        - remote-actions
+    put:
+      consumes:
+        - application/json
+      operationId: updateRemoteOTPCredential
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.RemoteOTPCredential'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      summary: Update remote OTP credential
+      tags:
+        - remote-actions
+  /remote-actions/macros:
+    get:
+      operationId: listRemoteActionMacros
+      parameters:
+        - description: Target callsign (uppercased server-side)
+          in: query
+          name: target
+          required: true
+          type: string
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/dto.RemoteActionMacro'
+            type: array
+      summary: List remote action macros for one target
+      tags:
+        - remote-actions
+    post:
+      consumes:
+        - application/json
+      operationId: createRemoteActionMacro
+      produces:
+        - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/dto.RemoteActionMacro'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      summary: Create remote action macro
+      tags:
+        - remote-actions
+  /remote-actions/macros/{id}:
+    delete:
+      operationId: deleteRemoteActionMacro
+      responses:
+        "204":
+          description: No Content
+      summary: Delete remote action macro
+      tags:
+        - remote-actions
+    put:
+      consumes:
+        - application/json
+      operationId: updateRemoteActionMacro
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.RemoteActionMacro'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      summary: Update remote action macro
+      tags:
+        - remote-actions
+  /remote-actions/macros/reorder:
+    post:
+      consumes:
+        - application/json
+      operationId: reorderRemoteActionMacros
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      summary: Reorder remote action macros for one target
+      tags:
+        - remote-actions
+  /remote-actions/otp/{id}:
+    post:
+      operationId: generateRemoteOTPCode
+      parameters:
+        - description: Credential id
+          in: path
+          name: id
+          required: true
+          type: integer
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.RemoteOTPCode'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      summary: Generate one-shot TOTP code for a remote credential
+      tags:
+        - remote-actions
   /smart-beacon:
     get:
       description: |-

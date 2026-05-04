@@ -18,6 +18,7 @@
    *    onBack?: () => void,
    *    onMuteToggle?: (muted: boolean) => void,
    *    onOpenDm?: (callsign: string) => void,
+   *    onActionsToggle?: () => void,
    *  }}
    */
   let {
@@ -27,6 +28,7 @@
     onBack,
     onMuteToggle,
     onOpenDm,
+    onActionsToggle,
   } = $props();
 
   let inviteOpen = $state(false);
@@ -68,6 +70,24 @@
         <span class="sub">Last heard {lastHeard}</span>
       {/if}
     </div>
+    {#if !isTactical && onActionsToggle}
+      <div class="actions">
+        <Tooltip>
+          <Tooltip.Trigger>
+            <button
+              type="button"
+              class="zap-btn"
+              onclick={() => onActionsToggle?.()}
+              aria-label="Toggle remote actions drawer"
+              data-testid="thread-actions-toggle"
+            >
+              <Icon name="zap" size="md" />
+            </button>
+          </Tooltip.Trigger>
+          <Tooltip.Content>Remote Actions</Tooltip.Content>
+        </Tooltip>
+      </div>
+    {/if}
     {#if isTactical}
       <div class="actions">
         <div class="monitor">
@@ -223,6 +243,28 @@
     border-color: var(--color-border);
   }
   .invite-btn:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .zap-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .zap-btn:hover {
+    background: var(--color-surface-raised);
+    color: var(--color-primary);
+    border-color: var(--color-border);
+  }
+  .zap-btn:focus-visible {
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
   }

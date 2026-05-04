@@ -141,6 +141,16 @@ type migration struct {
 //	    AutoMigrate list — this migration is the single source of truth
 //	    for their schema. See
 //	    docs/superpowers/plans/2026-05-02-graywolf-actions.md Phase A.
+//	16 — remote_actions_tables: create the outbound-Actions feature
+//	    tables (remote_otp_credentials, remote_action_macros) via raw
+//	    SQL so remote_action_macros.remote_otp_credential_id can declare
+//	    FOREIGN KEY ... ON DELETE SET NULL and the target_call index can
+//	    be created precisely. The two matching Go models in
+//	    pkg/remoteactions/models.go are intentionally NOT added to the
+//	    AutoMigrate list — this migration is the single source of truth
+//	    for their schema. See
+//	    docs/superpowers/plans/2026-05-03-messages-action-sender.md
+//	    Phase A.
 var schemaMigrations = []migration{
 	{version: 1, name: "beacon_compress_default", phase: postAutoMigrate, run: migrateBeaconCompressDefault},
 	{version: 2, name: "channel_device_fields", phase: preAutoMigrate, run: migrateChannelDeviceFields},
@@ -157,6 +167,7 @@ var schemaMigrations = []migration{
 	{version: 13, name: "messages_config_singleton", phase: postAutoMigrate, run: migrateMessagesConfigCopyFromIgate},
 	{version: 14, name: "ax25_terminal_tables", phase: postAutoMigrate, run: migrateAX25TerminalTables},
 	{version: 15, name: "actions_tables", phase: postAutoMigrate, run: migrateActionsTables},
+	{version: 16, name: "remote_actions_tables", phase: postAutoMigrate, run: migrateRemoteActionsTables},
 }
 
 // runMigrations applies every pending migration in the given phase,

@@ -25,6 +25,11 @@
   import MessageContextMenu from './MessageContextMenu.svelte';
   import MessageMetaPanel from './MessageMetaPanel.svelte';
   import ComposeBar from './ComposeBar.svelte';
+  import RemoteActionsDrawer from './remote_actions/RemoteActionsDrawer.svelte';
+  import {
+    messagesPreferencesState,
+    DEFAULT_MAX_MESSAGE_TEXT,
+  } from '../../lib/settings/messages-preferences-store.svelte.js';
   import { dayHeader, dayKey } from './time.js';
   import { messages as store } from '../../lib/messagesStore.svelte.js';
   import {
@@ -62,6 +67,16 @@
     if (m?.msg_id) return `mid:${m.msg_id}`;
     return `i:${i}`;
   }
+
+  // --- Remote-actions drawer state (DM threads only).
+  let actionsDrawerOpen = $state(false);
+  // Match ComposeBar's per-frame cap so the drawer's wire-length check
+  // tracks the same APRS budget the operator's outbound messages use.
+  const aprsBudget = $derived(
+    messagesPreferencesState.loaded
+      ? messagesPreferencesState.maxMessageText
+      : DEFAULT_MAX_MESSAGE_TEXT,
+  );
 
   // --- Local messages state (per-thread, not part of global store).
   /** @type {Array<any>} */
@@ -367,6 +382,7 @@
       {onBack}
       {onMuteToggle}
       onOpenDm={replyPrivately}
+      onActionsToggle={!isTactical ? () => (actionsDrawerOpen = !actionsDrawerOpen) : undefined}
     />
 
     <div class="scroll-wrap">
@@ -451,6 +467,13 @@
     onReplyPrivate={replyPrivately}
   />
   <MessageMetaPanel bind:open={metaOpen} msg={metaMsg} />
+  {#if !isTactical && thread?.key}
+    <RemoteActionsDrawer
+      bind:open={actionsDrawerOpen}
+      target={thread.key}
+      maxLen={aprsBudget}
+    />
+  {/if}
 {/if}
 
 <style>
