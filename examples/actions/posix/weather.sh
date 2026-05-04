@@ -25,6 +25,10 @@ if [[ -z "$raw" ]]; then
 fi
 
 # Strip leading "METAR " / "SPECI " so the on-air 50-char snippet
-# starts with the ICAO + observation time.
-trimmed="${raw#METAR }"
-echo "${trimmed#SPECI }"
+# starts with the ICAO + observation time. Bash regex captures the
+# tail in BASH_REMATCH[2]; if neither prefix matches, echo raw as-is.
+if [[ "$raw" =~ ^(METAR|SPECI)\ (.+)$ ]]; then
+  echo "${BASH_REMATCH[2]}"
+else
+  echo "$raw"
+fi

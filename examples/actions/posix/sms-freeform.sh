@@ -38,53 +38,36 @@ SENDER="$2"
 OTP_VERIFIED="$3"
 PAYLOAD="$4"
 
-# --- 1. Split number from message body --------------------------------
+# --- 1. Validate + split in one regex ---------------------------------
 #
-# We expect:  +<E.164 digits><single space><message>
+# Bash regex (POSIX ERE flavor under [[ =~ ]]) with capture groups.
+# Pattern:
+#   ^                        anchor at start
+#   (\+[1-9][0-9]{6,14})     group 1: E.164 number
+#                              \+        literal '+'
+#                              [1-9]     leading digit (E.164 forbids 0)
+#                              [0-9]{6,14} 6-14 more digits (8-16 total)
+#   [[:space:]]+             one or more whitespace separators
+#   (.+)                     group 2: message body (non-empty)
+#   $                        anchor at end
 #
-# Bash parameter expansion ${VAR%% PAT} removes the LONGEST suffix
-# matching PAT, so "${PAYLOAD%% *}" yields everything up to the FIRST
-# space (the number). "${PAYLOAD#* }" removes the SHORTEST prefix
-# matching "anything followed by a space", yielding everything after
-# the first space (the message).
+# A single match enforces both the format AND the split atomically.
+# BASH_REMATCH[1] is the number, [2] is the message. A malformed
+# input simply fails the match -- no partial state, no separate
+# "missing separator" branch.
 #
-# Example:
-#   PAYLOAD="+15555551212 hello there"
-#   "${PAYLOAD%% *}" -> "+15555551212"
-#   "${PAYLOAD#* }"  -> "hello there"
-#
-# This is purely string surgery in the shell -- no eval, no subshell,
-# no command substitution. An attacker cannot inject shell commands
-# through this expansion.
+# The match is purely an in-process string operation: no eval, no
+# subshell, no command substitution. An attacker cannot inject shell
+# commands through it.
 
-NUMBER="${PAYLOAD%% *}"
-MESSAGE="${PAYLOAD#* }"
-
-# Edge case: no space in payload means we never split. Reject explicitly.
-if [[ "$NUMBER" == "$PAYLOAD" ]]; then
+if [[ ! "$PAYLOAD" =~ ^(\+[1-9][0-9]{6,14})[[:space:]]+(.+)$ ]]; then
     echo "expected '+<E164> <message>'" >&2
     exit 64
 fi
+NUMBER="${BASH_REMATCH[1]}"
+MESSAGE="${BASH_REMATCH[2]}"
 
-# --- 2. Revalidate the number -----------------------------------------
-#
-# Bash regex (POSIX ERE flavor under [[ =~ ]]). The pattern requires:
-#   ^\+        a literal '+'
-#   [1-9]      a single digit 1..9 (E.164 doesn't allow leading 0)
-#   [0-9]{6,14} 6 to 14 more digits
-#   $          end of string
-# Total length: 8..16 characters.
-#
-# We do this even though the Action's arg_schema regex should already
-# reject malformed numbers -- defense in depth. The script's contract
-# does not depend on the operator picking a strict regex.
-
-if [[ ! "$NUMBER" =~ ^\+[1-9][0-9]{6,14}$ ]]; then
-    echo "invalid E.164: $NUMBER" >&2
-    exit 65
-fi
-
-# --- 3. Revalidate the message ----------------------------------------
+# --- 2. Revalidate the message ----------------------------------------
 #
 # [[:cntrl:]] is the POSIX character class for ASCII control characters
 # (0x00..0x1F plus 0x7F). The graywolf sanitizer already strips these,
@@ -100,12 +83,12 @@ if (( ${#MESSAGE} < 1 || ${#MESSAGE} > 160 )); then
     exit 65
 fi
 
-# --- 4. Verify required env (helpful failure mode) --------------------
+# --- 3. Verify required env (helpful failure mode) --------------------
 : "${TWILIO_ACCOUNT_SID:?TWILIO_ACCOUNT_SID not set}"
 : "${TWILIO_AUTH_TOKEN:?TWILIO_AUTH_TOKEN not set}"
 : "${TWILIO_FROM:?TWILIO_FROM not set}"
 
-# --- 5. Send -----------------------------------------------------------
+# --- 4. Send -----------------------------------------------------------
 #
 # curl is invoked argv-style, every variable quoted, and we use
 # --data-urlencode so curl performs URL-encoding of values (no shell
