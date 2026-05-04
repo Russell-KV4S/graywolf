@@ -288,13 +288,10 @@ func validateAction(in *dto.Action) error {
 	default:
 		return errors.New("arg_mode: must be 'kv' or 'freeform'")
 	}
-	if in.ArgMode == "freeform" {
-		if len(in.ArgSchema) != 1 {
-			return errors.New("arg_mode=freeform requires exactly one arg_schema entry")
-		}
-		if in.ArgSchema[0].MaxLen > actions.FreeformValueCeiling {
-			return fmt.Errorf("arg_schema[0].max_len: cannot exceed %d", actions.FreeformValueCeiling)
-		}
+	// Structural shape check for freeform must come before per-spec
+	// validation: zero specs would silently skip the loop without it.
+	if in.ArgMode == "freeform" && len(in.ArgSchema) != 1 {
+		return errors.New("arg_mode=freeform requires exactly one arg_schema entry")
 	}
 	for i, a := range in.ArgSchema {
 		if a.Key == "" {
@@ -308,6 +305,11 @@ func validateAction(in *dto.Action) error {
 				return fmt.Errorf("arg_schema[%d]: invalid regex: %w", i, err)
 			}
 		}
+	}
+	// Freeform value-ceiling cap applies to the single (now validated)
+	// spec.
+	if in.ArgMode == "freeform" && in.ArgSchema[0].MaxLen > actions.FreeformValueCeiling {
+		return fmt.Errorf("arg_schema[0].max_len: cannot exceed %d", actions.FreeformValueCeiling)
 	}
 	return nil
 }
