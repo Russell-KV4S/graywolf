@@ -172,9 +172,10 @@
     </div>
 
     <p>
-      The <strong>Actions</strong> page shows the exact wire syntax under
-      every Action&rsquo;s name as a copy-paste-ready hint, so you can
-      verify the grammar without referring back to this page.
+      The <strong>Actions</strong> page carries a help banner at the
+      top with a worked example of the wire grammar
+      (<code>@@482910#SetGarageLights state=on</code>), so you can
+      verify the shape without referring back to this page.
     </p>
 
     <h3>Argument mode: <code>kv</code> vs <code>freeform</code></h3>
@@ -272,9 +273,15 @@
         (next section).
       </li>
       <li>
-        <strong>Sender allowlist.</strong> Comma-separated callsigns. When
-        set, only these callsigns may fire the Action. APRS callsigns
-        are spoofable, so treat this as defense-in-depth on top of OTP,
+        <strong>Sender allowlist.</strong> Comma-separated callsigns.
+        When set, only these callsigns may fire the Action. Tokens may
+        be exact matches like <code>NW5W-7</code>, or
+        <code>BASE-*</code> wildcards that match the bare base call
+        and any SSID under it &mdash; e.g. <code>NW5W-*</code> matches
+        <code>NW5W</code>, <code>NW5W-7</code>, <code>NW5W-9</code>,
+        and so on. Useful when one operator roams between mobile, HT,
+        and home stations under different SSIDs. APRS callsigns are
+        spoofable, so treat this as defense-in-depth on top of OTP,
         not a replacement for it. Leave it empty to allow any callsign
         that knows the OTP.
       </li>
@@ -286,9 +293,11 @@
         seconds before <code>SIGKILL</code>.
       </li>
       <li>
-        <strong>Queue depth.</strong> Per-Action FIFO. The default is
-        one in-flight invocation; further inbounds within the queue
-        cap reply <code>busy</code>.
+        <strong>Queue depth.</strong> Per-Action FIFO that absorbs
+        inbounds while a previous invocation is still running. Default
+        8; an inbound that arrives once the queue is full replies
+        <code>busy</code>. Set the depth to 0 to allow parallel runs
+        (only safe for read-only commands).
       </li>
       <li>
         <strong>Rate limit (sec).</strong> Minimum gap between successful
@@ -786,7 +795,7 @@ https://hass.local:8123/api/services/light/turn_on?room={{arg.room}}
       <li>Action name (denormalized so deleted Actions still read sensibly)</li>
       <li>Sender callsign and source (<code>rf</code> or <code>is</code>)</li>
       <li>OTP verification status and credential name used</li>
-      <li>Parsed args (each value capped at 64 characters in the row)</li>
+      <li>Parsed args (kv values capped at 64 characters per row; freeform payloads kept up to the 200-character ceiling)</li>
       <li>Status and a short detail string</li>
       <li>Exit code (commands) or HTTP status (webhooks)</li>
       <li>Output capture (up to 4 KiB of merged stdout/stderr for commands, ~1 KiB of response body for webhooks)</li>
@@ -931,21 +940,28 @@ https://hass.local:8123/api/services/light/turn_on?room={{arg.room}}
     <h3>Listener addressees</h3>
 
     <p>
-      In addition to your primary callsign and tactical aliases, you
-      can register extra Actions-only addressees in the
-      <strong>Listener Addressees</strong> editor on the Actions page.
-      A listener addressee widens the Actions trigger surface so a
-      packet addressed to (say) <code>GW-CMD</code> with an
-      <code>@@</code>-prefixed body fires an Action just like one
-      addressed to your primary callsign would. A packet addressed to
-      a listener that does <strong>not</strong> begin with
-      <code>@@</code> doesn&rsquo;t fire an Action and also doesn&rsquo;t
-      land in your Messaging inbox &mdash; the Messaging router only
-      claims packets addressed to your station call or to a tactical
-      you&rsquo;ve enabled, so listener-targeted chatter without the
-      sentinel falls on the floor. Use listeners when you want a public
-      command surface without overloading your station&rsquo;s primary
-      callsign.
+      In addition to your primary callsign and tactical aliases,
+      graywolf can register extra Actions-only addressees called
+      <strong>listener addressees</strong>. A listener addressee widens
+      the Actions trigger surface so a packet addressed to (say)
+      <code>GW-CMD</code> with an <code>@@</code>-prefixed body fires
+      an Action just like one addressed to your primary callsign would.
+      A packet addressed to a listener that does <strong>not</strong>
+      begin with <code>@@</code> doesn&rsquo;t fire an Action and also
+      doesn&rsquo;t land in your Messaging inbox &mdash; the Messaging
+      router only claims packets addressed to your station call or to
+      a tactical you&rsquo;ve enabled, so listener-targeted chatter
+      without the sentinel falls on the floor. Use listeners when you
+      want a public command surface without overloading your
+      station&rsquo;s primary callsign.
+    </p>
+
+    <p>
+      Listener addressees are managed today via the REST API only
+      (<code>GET</code> / <code>POST</code> / <code>DELETE</code> on
+      <code>/api/v1/actions/listeners</code>); a UI editor on the
+      Actions page is on the roadmap but not present yet. See the
+      <a href="api.html">REST API reference</a> for the request shape.
     </p>
 
     <nav class="page-nav">
