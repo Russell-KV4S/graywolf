@@ -19,6 +19,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # (GENERIC) applies AGC + noise suppression that crushes APRS modulation.
 ndk = { version = "0.9", features = ["audio", "api-level-28"] }
 ndk-sys = "0.6"
+# JNI to call android.hardware.usb.UsbManager so we can issue a USB Audio
+# Class FU_VOLUME control transfer to the Digirig's mixer descriptor.
+# Linux + ALSA does the equivalent via amixer; AAudio doesn't expose it.
+jni = "0.21"
 
 # cargo-apk metadata. cargo-apk reads this to generate AndroidManifest.xml
 # and assemble the APK from the cross-compiled cdylib. Zero hand-written

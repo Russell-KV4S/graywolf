@@ -24,6 +24,8 @@ use ndk::audio::{
     AudioCallbackResult, AudioDirection, AudioFormat, AudioInputPreset, AudioStreamBuilder,
 };
 
+mod usb;
+
 const TARGET_SAMPLE_RATE: u32 = 48_000;
 const LOG_TAG: &str = "poc_a_rxonly";
 
@@ -46,6 +48,10 @@ fn android_main(app: AndroidApp) {
         "poc_a_rxonly {} starting (NativeActivity)",
         graywolf_demod::full_version()
     );
+
+    if let Err(e) = usb::enumerate_and_set_volume(&app, -35.0) {
+        warn!("USB capture-gain setup failed: {}", e);
+    }
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = stop.clone();
