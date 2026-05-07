@@ -23,7 +23,7 @@ use std::time::Duration;
 use android_activity::{AndroidApp, MainEvent, PollEvent};
 use chrono::Utc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, SampleRate, StreamConfig};
+use cpal::{SampleFormat, StreamConfig};
 use graywolf_demod::demod_afsk_multi::{MultiAfskDemodulator, RECOMMENDED_3DEMOD};
 use graywolf_demod::rxonly::{feed_chunk, format_ax25_ui_frame};
 use log::{error, info, warn};
@@ -106,7 +106,7 @@ fn run_demod(stop: Arc<AtomicBool>) -> Result<(), String> {
 
     let config = StreamConfig {
         channels,
-        sample_rate: SampleRate(sample_rate),
+        sample_rate,
         buffer_size: cpal::BufferSize::Default,
     };
 
@@ -199,8 +199,8 @@ fn run_demod(stop: Arc<AtomicBool>) -> Result<(), String> {
 fn pick_sample_rate(device: &cpal::Device, target: u32) -> u32 {
     if let Ok(configs) = device.supported_input_configs() {
         for cfg in configs {
-            let min = cfg.min_sample_rate().0;
-            let max = cfg.max_sample_rate().0;
+            let min = cfg.min_sample_rate();
+            let max = cfg.max_sample_rate();
             if min <= target && target <= max {
                 return target;
             }
@@ -208,6 +208,6 @@ fn pick_sample_rate(device: &cpal::Device, target: u32) -> u32 {
     }
     device
         .default_input_config()
-        .map(|c| c.sample_rate().0)
+        .map(|c| c.sample_rate())
         .unwrap_or(target)
 }
