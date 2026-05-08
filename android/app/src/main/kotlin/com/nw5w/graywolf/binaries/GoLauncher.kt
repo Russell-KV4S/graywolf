@@ -24,24 +24,32 @@ class GoLauncher(
         process = p
 
         Thread({
-            BufferedReader(InputStreamReader(p.errorStream)).useLines { lines ->
-                lines.forEach { Log.w(TAG_STDERR, it) }
+            try {
+                BufferedReader(InputStreamReader(p.errorStream)).useLines { lines ->
+                    lines.forEach { Log.w(TAG_STDERR, it) }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG_STDERR, "stderr drain ended: $t")
             }
         }, "go-stderr").apply { isDaemon = true; start() }
 
         val ready = java.util.concurrent.atomic.AtomicBoolean(false)
         val gate = Object()
         Thread({
-            val r = p.inputStream
-            val first = try { r.read() } catch (_: Throwable) { -1 }
-            if (first == '\n'.code) {
-                synchronized(gate) {
-                    ready.set(true)
-                    gate.notifyAll()
+            try {
+                val r = p.inputStream
+                val first = try { r.read() } catch (_: Throwable) { -1 }
+                if (first == '\n'.code) {
+                    synchronized(gate) {
+                        ready.set(true)
+                        gate.notifyAll()
+                    }
                 }
-            }
-            BufferedReader(InputStreamReader(r)).useLines { lines ->
-                lines.forEach { Log.i(TAG_STDOUT, it) }
+                BufferedReader(InputStreamReader(r)).useLines { lines ->
+                    lines.forEach { Log.i(TAG_STDOUT, it) }
+                }
+            } catch (t: Throwable) {
+                Log.i(TAG_STDOUT, "stdout drain ended: $t")
             }
         }, "go-stdout").apply { isDaemon = true; start() }
 

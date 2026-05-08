@@ -137,13 +137,15 @@ pub extern "system" fn Java_com_nw5w_graywolf_jni_ModemBridge_modemAwaitReady<'l
             None => return JNI_FALSE,
         }
     };
-    while Instant::now() < deadline {
+    loop {
         if ready.load(Ordering::Acquire) {
             return JNI_TRUE;
         }
+        if Instant::now() >= deadline {
+            return JNI_FALSE;
+        }
         thread::sleep(Duration::from_millis(50));
     }
-    JNI_FALSE
 }
 
 #[no_mangle]
