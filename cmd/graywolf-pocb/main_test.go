@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	pb "github.com/chrissnell/graywolf/pkg/ipcproto"
 )
 
 func TestBearerAuthRejectsMissingHeader(t *testing.T) {
@@ -65,5 +68,21 @@ func TestFrameRingCountIsMonotonic(t *testing.T) {
 	}
 	if r.count() != 10 {
 		t.Fatalf("want count=10, got %d", r.count())
+	}
+}
+
+func TestFrameRoundTrip(t *testing.T) {
+	msg := &pb.IpcMessage{Payload: &pb.IpcMessage_ModemReady{ModemReady: &pb.ModemReady{Version: "v0", Pid: 7}}}
+	var buf bytes.Buffer
+	if err := writeFrame(&buf, msg); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := readFrame(&buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	mr := got.GetModemReady()
+	if mr == nil || mr.Pid != 7 || mr.Version != "v0" {
+		t.Fatalf("want ModemReady{v0,7}, got %+v", got)
 	}
 }
