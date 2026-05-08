@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.util.Log
 import com.nw5w.graywolf.audio.AudioPump
 import com.nw5w.graywolf.binaries.GoLauncher
+import com.nw5w.graywolf.binaries.Supervisor
 import com.nw5w.graywolf.jni.ModemBridge
 import java.io.File
 import kotlin.concurrent.thread
@@ -19,6 +20,54 @@ class GraywolfService : Service() {
     private val audioPump = AudioPump()
     private var goLauncher: GoLauncher? = null
     private var gainPoller: Thread? = null
+    private val supervisor = Supervisor(onRestart = ::supervisorRestart)
+
+    private fun socketPath(): String =
+        File(cacheDir, "graywolf-modem.sock").absolutePath
+
+    private fun bootModem(): Boolean {
+        val rc = ModemBridge.modemStart(socketPath(), /* gainDb = */ -6.0f)
+        if (rc != 0) {
+            Log.e(TAG, "modemStart rc=$rc")
+            return false
+        }
+        val ready = ModemBridge.modemAwaitReady(10_000)
+        Log.i(TAG, "modemAwaitReady=$ready")
+        return ready
+    }
+
+    private fun bootGoChild(): Boolean {
+        val bearerToken = (application as GraywolfApp).bearerToken
+        val goPath = File(applicationInfo.nativeLibraryDir, "libgraywolf.so").absolutePath
+        val launcher = GoLauncher(
+            executablePath = goPath,
+            env = mapOf(
+                "GRAYWOLF_MODEM_SOCKET" to socketPath(),
+                "GRAYWOLF_LISTEN" to "127.0.0.1:8080",
+                "GRAYWOLF_LISTEN_TOKEN" to bearerToken,
+            ),
+        )
+        val ok = launcher.startAndAwaitReady(10_000)
+        if (!ok) {
+            Log.e(TAG, "go child did not signal readiness")
+            return false
+        }
+        goLauncher = launcher
+        goListenerReady = true
+        Log.i(TAG, "poc-b: go_child_up")
+        return true
+    }
+
+    private fun supervisorRestart(): Boolean {
+        Log.i(TAG, "poc-b: supervisor_restart_begin")
+        goListenerReady = false
+        audioPump.stop()
+        goLauncher?.stop()
+        ModemBridge.modemStop()
+        if (!bootModem()) return false
+        audioPump.start()
+        return bootGoChild()
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -51,47 +100,20 @@ class GraywolfService : Service() {
         }
         Log.i(TAG, "modem cdylib version=$v")
 
-        val socketPath = File(cacheDir, "graywolf-modem.sock").absolutePath
-        val rc = ModemBridge.modemStart(socketPath, /* gainDb = */ -6.0f)
-        if (rc != 0) {
-            Log.e(TAG, "modemStart rc=$rc; aborting")
-            stopSelf()
-            return
-        }
-        val ready = ModemBridge.modemAwaitReady(10_000)
-        Log.i(TAG, "modemAwaitReady=$ready")
-        if (!ready) {
-            Log.e(TAG, "modem not ready in 10s; aborting")
-            ModemBridge.modemStop()
+        if (!bootModem()) {
             stopSelf()
             return
         }
         audioPump.start()
-
-        val bearerToken = (application as GraywolfApp).bearerToken
-        val goPath = File(applicationInfo.nativeLibraryDir, "libgraywolf.so").absolutePath
-        val launcher = GoLauncher(
-            executablePath = goPath,
-            env = mapOf(
-                "GRAYWOLF_MODEM_SOCKET" to socketPath,
-                "GRAYWOLF_LISTEN" to "127.0.0.1:8080",
-                "GRAYWOLF_LISTEN_TOKEN" to bearerToken,
-            ),
-        )
-        val ok = launcher.startAndAwaitReady(10_000)
-        if (!ok) {
-            Log.e(TAG, "go child did not signal readiness")
+        if (!bootGoChild()) {
             audioPump.stop()
             ModemBridge.modemStop()
             stopSelf()
             return
         }
-        goLauncher = launcher
-        goListenerReady = true
-        Log.i(TAG, "poc-b: go_child_up")
 
         gainPoller = thread(start = true, isDaemon = true, name = "gain-poll") {
-            val token = bearerToken
+            val token = (application as GraywolfApp).bearerToken
             var last = Float.NaN
             val rx = Regex("""\"db\":(-?\d+(?:\.\d+)?)""")
             while (!Thread.currentThread().isInterrupted) {
@@ -107,9 +129,11 @@ class GraywolfService : Service() {
                         last = db
                     }
                 } catch (_: Throwable) { /* swallow */ }
-                Thread.sleep(1000)
+                try { Thread.sleep(1000) } catch (_: InterruptedException) { return@thread }
             }
         }
+
+        supervisor.start { goLauncher?.process }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -117,6 +141,7 @@ class GraywolfService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        supervisor.stop()
         gainPoller?.interrupt()
         gainPoller = null
         goListenerReady = false
