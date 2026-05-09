@@ -1289,22 +1289,55 @@ fn read_sysfs(path: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
-/// On Windows, cpal's deprecated `DeviceTrait::name()` returns the WASAPI
-/// friendly name (e.g. `"Speakers (Realtek(R) Audio)"`) which already
-/// disambiguates multiple devices of the same class. The newer
-/// `description().name()` returns only the device class label
-/// (`"Speakers"` / Hungarian `"Hangszórók"`), making two distinct cards
-/// look identical in the UI. Surfacing the WASAPI friendly name as the
-/// description lets the UI render a disambiguated label without changing
-/// the schema. Issue #100.
-#[cfg(target_os = "windows")]
-fn alsa_card_description(cpal_name: &str) -> String {
-    cpal_name.to_string()
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(target_os = "linux"))]
 fn alsa_card_description(_cpal_name: &str) -> String {
     String::new()
+}
+
+/// On Windows, pull a device-specific friendly string out of cpal's
+/// `DeviceDescription`. `description().name()` itself prefers
+/// `DEVPKEY_Device_DeviceDesc` (the device class label `"Speakers"` /
+/// Hungarian `"Hangszórók"`), which is shared by every endpoint of
+/// that class — so it can't disambiguate two soundcards. We try, in
+/// order:
+///
+/// 1. `extended()[0]` — cpal stores `DEVPKEY_Device_FriendlyName`
+///    there when it differs from the class name (see
+///    `cpal/host/wasapi/device.rs:419-423`), e.g.
+///    `"Speakers (Realtek(R) Audio)"`.
+/// 2. `driver()` — `DEVPKEY_DeviceInterface_FriendlyName`, e.g.
+///    `"USB PnP Sound Device"`.
+/// 3. empty string — caller's UI fallback (`description || name`)
+///    will render the class label.
+///
+/// The result is surfaced as the proto `description` field. Issue #100.
+#[cfg(target_os = "windows")]
+fn windows_friendly_name(dev: &cpal::Device) -> String {
+    use cpal::traits::DeviceTrait;
+    let Ok(desc) = dev.description() else {
+        return String::new();
+    };
+    if let Some(s) = desc.extended().first() {
+        if !s.is_empty() {
+            return s.clone();
+        }
+    }
+    if let Some(driver) = desc.driver() {
+        if !driver.is_empty() {
+            return driver.to_string();
+        }
+    }
+    String::new()
+}
+
+/// On Windows, return the IMMDevice endpoint id (a per-endpoint GUID
+/// string like `{0.0.0.00000000}.{...}`) as the device's stable id.
+/// This is what cpal's `Device::id()` exposes; unlike `name()` it is
+/// guaranteed unique across endpoints of the same class. Issue #100.
+#[cfg(target_os = "windows")]
+fn windows_device_id(dev: &cpal::Device) -> Option<String> {
+    use cpal::traits::DeviceTrait;
+    dev.id().ok().map(|id| id.1)
 }
 
 /// dBFS floor representing silence — the theoretical dynamic range of
@@ -1391,25 +1424,37 @@ where
             continue;
         }
 
-        // Default-device match is keyed on the device class label
-        // (`description().name()`) on every platform except Windows. On
-        // Windows that label is the same shared string for every device
-        // of a class (e.g. `"Speakers"`) so the comparison would flag
-        // every output as default; pcm_id is the WASAPI friendly name
-        // and uniquely identifies the device. Issue #100.
+        // On Windows, key both the stable id and the default-device
+        // match on the IMMDevice endpoint id (cpal `Device::id()`).
+        // `pcm_id` (cpal `name()`) is just the device class label there
+        // and would flag every output of the class as default. The
+        // proto `description` carries the WASAPI FriendlyName so the
+        // UI's `description || name` fallback renders a disambiguated
+        // string; `recommended` is always false on Windows (no plughw).
+        // Issue #100.
         #[cfg(target_os = "windows")]
-        let is_default = default_display_name == Some(pcm_id.as_str());
+        let (stable_id, is_default, description, recommended) = {
+            let id = match windows_device_id(&dev) {
+                Some(id) => id,
+                None => continue,
+            };
+            let is_default = default_display_name == Some(id.as_str());
+            (id, is_default, windows_friendly_name(&dev), false)
+        };
         #[cfg(not(target_os = "windows"))]
-        let is_default = default_display_name == Some(display_name.as_str());
-        let description = alsa_card_description(&pcm_id);
-        // Prefer plughw: devices that use a stable card name (CARD=Foo)
-        // rather than a numeric index (CARD=0) which can change across
-        // reboots if USB devices enumerate in a different order.
-        let recommended = crate::audio::soundcard::is_recommended_pcm_id(&pcm_id);
+        let (stable_id, is_default, description, recommended) = (
+            pcm_id.clone(),
+            default_display_name == Some(display_name.as_str()),
+            alsa_card_description(&pcm_id),
+            // Prefer plughw: devices that use a stable card name (CARD=Foo)
+            // rather than a numeric index (CARD=0) which can change across
+            // reboots if USB devices enumerate in a different order.
+            crate::audio::soundcard::is_recommended_pcm_id(&pcm_id),
+        );
 
         out.push(AudioDeviceInfo {
             name: display_name,
-            stable_id: pcm_id,
+            stable_id,
             kind,
             sample_rates,
             channel_counts,
@@ -1430,14 +1475,15 @@ fn enumerate_audio_devices(include_output: bool) -> Vec<AudioDeviceInfo> {
     let host_name = format!("{:?}", host.id());
 
     // Source the default-device identifier the same way `collect_devices`
-    // keys its `is_default` comparison: pcm_id on Windows (uniquely
-    // identifies the device via the WASAPI friendly name), description
-    // name elsewhere. The function-level `#[allow(deprecated)]` covers
-    // the Windows `d.name()` calls below. Issue #100.
+    // keys its `is_default` comparison: IMMDevice endpoint id on
+    // Windows (uniquely identifies the endpoint), `description().name()`
+    // elsewhere. Issue #100.
     #[cfg(target_os = "windows")]
-    let default_input_name = host.default_input_device().and_then(|d| d.name().ok());
+    let default_input_name = host.default_input_device()
+        .and_then(|d| windows_device_id(&d));
     #[cfg(target_os = "windows")]
-    let default_output_name = host.default_output_device().and_then(|d| d.name().ok());
+    let default_output_name = host.default_output_device()
+        .and_then(|d| windows_device_id(&d));
     #[cfg(not(target_os = "windows"))]
     let default_input_name = host.default_input_device()
         .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()));

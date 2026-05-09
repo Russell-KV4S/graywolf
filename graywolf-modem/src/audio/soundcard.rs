@@ -419,17 +419,24 @@ pub fn resolve_output_device(pcm_id: &str) -> Result<Device, String> {
     }
 }
 
-/// Find a cpal device whose pcm_id (the driver-level identifier returned by
-/// `DeviceTrait::name()`) matches `id`. This is the unique ALSA device
-/// string like `hw:CARD=AllInOneCable,DEV=0` — not the human-friendly
-/// description.
-#[allow(deprecated)] // DeviceTrait::name() gives the raw pcm_id we need
+/// Find a cpal device whose stable id matches `id`.
+///
+/// On Linux/macOS the stable id is the cpal `name()` value (the ALSA
+/// hw identifier like `hw:CARD=AllInOneCable,DEV=0`). On Windows it is
+/// the IMMDevice endpoint id surfaced via cpal `Device::id()`; cpal's
+/// `name()` there returns only the device class label (`"Speakers"` /
+/// Hungarian `"Hangszórók"`) which is shared by every endpoint of that
+/// class, so matching by `name()` would resolve to the wrong card.
+/// Issue #100.
+#[allow(deprecated)] // DeviceTrait::name() gives the raw pcm_id we need on non-Windows
 pub fn find_device_by_id(devices: impl Iterator<Item = Device>, id: &str) -> Option<Device> {
     for d in devices {
-        if let Ok(pcm_id) = d.name() {
-            if pcm_id == id {
-                return Some(d);
-            }
+        #[cfg(target_os = "windows")]
+        let matches = d.id().ok().map(|did| did.1 == id).unwrap_or(false);
+        #[cfg(not(target_os = "windows"))]
+        let matches = d.name().ok().map(|n| n == id).unwrap_or(false);
+        if matches {
+            return Some(d);
         }
     }
     None
@@ -1069,21 +1076,19 @@ pub mod listing {
             //
             // Windows exception: `description().name()` returns only the
             // device class label (e.g. `"Speakers"` / Hungarian
-            // `"Hangszórók"`), shared by every soundcard of that class,
-            // which would tag every output device as the system default.
-            // The deprecated `name()` on WASAPI returns the friendly
-            // `"Speakers (Realtek(R) Audio)"` form which uniquely
-            // identifies the device — use that on Windows so the
-            // `default_*` source matches what `collect_devices` writes
-            // into `name` below. Issue #100.
+            // `"Hangszórók"`), shared by every soundcard of that class.
+            // Source the default-device match key from `Device::id()`
+            // (the IMMDevice endpoint id, unique per endpoint) and have
+            // `collect_devices` key its `is_default` comparison the
+            // same way. Issue #100.
             #[cfg(target_os = "windows")]
             let default_input = host
                 .default_input_device()
-                .and_then(|d| { #[allow(deprecated)] d.name().ok() });
+                .and_then(|d| d.id().ok().map(|id| id.1));
             #[cfg(target_os = "windows")]
             let default_output = host
                 .default_output_device()
-                .and_then(|d| { #[allow(deprecated)] d.name().ok() });
+                .and_then(|d| d.id().ok().map(|id| id.1));
             #[cfg(not(target_os = "windows"))]
             let default_input = host
                 .default_input_device()
@@ -1154,10 +1159,7 @@ pub mod listing {
             // pcm_id (cpal `name()`) is the ALSA hw identifier on Linux
             // (e.g. `plughw:CARD=Foo,DEV=0`). On macOS / Windows the
             // recommendation heuristic does not apply and `recommended`
-            // stays false. On Windows, pcm_id is the WASAPI friendly
-            // name (e.g. `"Speakers (Realtek(R) Audio)"`) which we also
-            // surface as the device `name` so two cards of the same
-            // class are distinguishable in the flare bundle. Issue #100.
+            // stays false.
             //
             // Skip devices that fail to report a pcm_id, matching the
             // modem-side `collect_devices`: a phantom `<unknown>` row
@@ -1167,14 +1169,58 @@ pub mod listing {
                 Ok(id) => id,
                 Err(_) => continue,
             };
+            // Windows: build a unique display `name` from the WASAPI
+            // FriendlyName (`description().extended()[0]`, e.g.
+            // `"Speakers (Realtek(R) Audio)"`) or the interface friendly
+            // name (`description().driver()`, e.g. `"USB PnP Sound
+            // Device"`). cpal's `description().name()` returns only the
+            // class label (`"Speakers"` / `"Hangszórók"`), shared by
+            // every endpoint of that class — two cards of the same
+            // class would otherwise produce identical rows in the
+            // flare bundle. `is_default` is keyed on the IMMDevice
+            // endpoint id surfaced by `Device::id()`, matching the
+            // `default_input`/`default_output` source above. Issue #100.
             #[cfg(target_os = "windows")]
-            let name = pcm_id.clone();
+            let (name, is_default) = {
+                let desc = dev.description().ok();
+                let class = desc.as_ref().map(|d| d.name().to_string());
+                let friendly = desc
+                    .as_ref()
+                    .and_then(|d| d.extended().first().cloned())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        desc.as_ref()
+                            .and_then(|d| d.driver().map(|s| s.to_string()))
+                            .filter(|s| !s.is_empty())
+                    });
+                let endpoint_id = dev.id().ok().map(|id| id.1);
+                let display = friendly
+                    .or_else(|| {
+                        // Fall back to "ClassName (endpoint id)" so two
+                        // identical class labels still differ.
+                        match (class, endpoint_id.as_ref()) {
+                            (Some(c), Some(id)) => Some(format!("{} ({})", c, id)),
+                            (Some(c), None) => Some(c),
+                            (None, Some(id)) => Some(id.clone()),
+                            (None, None) => None,
+                        }
+                    })
+                    .unwrap_or_else(|| pcm_id.clone());
+                let is_default = match (default_name, endpoint_id.as_deref()) {
+                    (Some(d), Some(id)) => d == id,
+                    _ => false,
+                };
+                (display, is_default)
+            };
             #[cfg(not(target_os = "windows"))]
-            let name = dev
-                .description()
-                .map(|d| d.name().to_string())
-                .unwrap_or_else(|_| pcm_id.clone());
-            let is_default = default_name.map(|d| d == name).unwrap_or(false);
+            let (name, is_default) = {
+                let display = dev
+                    .description()
+                    .map(|d| d.name().to_string())
+                    .unwrap_or_else(|_| pcm_id.clone());
+                let is_default = default_name.map(|d| d == display).unwrap_or(false);
+                (display, is_default)
+            };
             let recommended = super::is_recommended_pcm_id(&pcm_id);
 
             let configs = match direction {
