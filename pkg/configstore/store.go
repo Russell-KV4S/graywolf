@@ -782,8 +782,9 @@ func (s *Store) DeletePttConfig(ctx context.Context, channelID uint32) error {
 }
 
 // ErrPttChannelTaken is returned by RekeyPttConfig when the target
-// channel already has a PttConfig. Callers route this to HTTP 409 /
-// validation error rather than a generic 500.
+// channel already has a PttConfig. Callers route this through the
+// webapi validationError wrapper so it lands as HTTP 400 with a real
+// message rather than a generic 500.
 var ErrPttChannelTaken = errors.New("ptt config already exists for target channel")
 
 // RekeyPttConfig moves the PttConfig at oldChannelID onto p.ChannelID
