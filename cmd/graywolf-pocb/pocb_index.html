@@ -49,6 +49,13 @@
     <span class="dev" id="dev-cm108" data-state="missing" aria-live="polite">CM108: —</span>
     <span class="dev" id="dev-vidpid" data-state="missing"></span>
   </div>
+  <div class="ptt-row" data-transport="digirig">
+    <strong>Digirig</strong>
+    <span class="keyed-indicator" id="digirig-keyed" data-keyed="false" aria-live="assertive">UNKEYED</span>
+    <button id="key-digirig" type="button" aria-describedby="digirig-keyed digirig-last" disabled>Key (CP2102N RTS)</button>
+    <button id="unkey-digirig" type="button" aria-describedby="digirig-keyed digirig-last" disabled>Unkey</button>
+    <span id="digirig-last" class="stamp" data-state="idle">— no action yet —</span>
+  </div>
 </section>
 <div class="row">
   <label>gain</label>
@@ -163,6 +170,46 @@
     if (btns.digirig) btns.digirig.forEach(b => b.disabled = !j.cp2102n_open);
     if (btns.aioc)    btns.aioc.forEach(b => b.disabled = !j.cm108_open);
   }
+  // Transport button registry — pollPtt() enables/disables based on the
+  // adapter's status snapshot.
+  window.__pttButtons = window.__pttButtons || { digirig: [], aioc: [] };
+
+  function bindPtt(opts) {
+    const { btnId, fnName, transport, action, keyedId, stampId } = opts;
+    const b = document.getElementById(btnId);
+    if (!b) return;
+    const stamp = document.getElementById(stampId);
+    const keyed = document.getElementById(keyedId);
+    window.__pttButtons[transport].push(b);
+    b.addEventListener("click", () => {
+      const w = window.GraywolfWebInterface;
+      if (!w || !w[fnName]) {
+        stamp.dataset.state = "fail";
+        stamp.textContent = "✗ bridge missing";
+        return;
+      }
+      stamp.dataset.state = "pending";
+      stamp.textContent = "… " + action;
+      try {
+        const ok = w[fnName]();
+        const t = new Date().toISOString().slice(11,19);
+        if (ok) {
+          stamp.dataset.state = "ok";
+          stamp.textContent = "✓ " + action + "  " + t;
+          keyed.dataset.keyed = (action === "key") ? "true" : "false";
+          keyed.textContent = (action === "key") ? "KEYED" : "UNKEYED";
+        } else {
+          stamp.dataset.state = "fail";
+          stamp.textContent = "✗ " + action + " FAIL  " + t;
+        }
+      } catch (e) {
+        stamp.dataset.state = "fail";
+        stamp.textContent = "✗ err: " + e;
+      }
+    });
+  }
+  bindPtt({ btnId: "key-digirig",   fnName: "keyCp2102nRts",   transport: "digirig", action: "key",   keyedId: "digirig-keyed", stampId: "digirig-last" });
+  bindPtt({ btnId: "unkey-digirig", fnName: "unkeyCp2102nRts", transport: "digirig", action: "unkey", keyedId: "digirig-keyed", stampId: "digirig-last" });
   setInterval(pollPtt, 1000);
   pollPtt();
 </script>

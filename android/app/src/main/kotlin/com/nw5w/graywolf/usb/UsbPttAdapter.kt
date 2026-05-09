@@ -12,6 +12,8 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.util.Log
+import com.hoho.android.usbserial.driver.Cp21xxSerialDriver
+import com.hoho.android.usbserial.driver.UsbSerialDriver
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import org.json.JSONObject
 
@@ -197,13 +199,73 @@ object UsbPttAdapter {
     }
 
     /**
-     * Attempt to open a device for which we already hold permission. Task 3
-     * (CP2102N) and Task 4 (CM108) plug into this — for now the function
-     * exists so the permission broadcast has a hook to call.
+     * Attempt to open a device for which we already hold permission.
+     * Branches on classified role; CP2102N opens via usb-serial-for-android,
+     * CM108 claims its HID interface only.
      */
     internal fun tryOpen(dev: UsbDevice) {
         val role = classify(dev)
-        Log.i(TAG, "tryOpen ${dev.deviceName} role=$role (no-op until Task 3/4)")
+        Log.i(TAG, "tryOpen ${dev.deviceName} role=$role")
+        when (role) {
+            DeviceRole.CP2102N -> openCp2102n(dev)
+            DeviceRole.CM108   -> openCm108(dev)
+            DeviceRole.UNKNOWN -> Log.w(TAG, "tryOpen on UNKNOWN device — skipping")
+        }
+    }
+
+    private fun openCp2102n(dev: UsbDevice) = synchronized(cp2102nLock) {
+        if (cp2102n != null) {
+            Log.i(TAG, "openCp2102n: already open, skipping")
+            return@synchronized
+        }
+        try {
+            val driver: UsbSerialDriver = Cp21xxSerialDriver(dev)
+            val conn: UsbDeviceConnection = usbManager.openDevice(dev) ?: run {
+                Log.e(TAG, "openDevice returned null for CP2102N — permission revoked?")
+                return@synchronized
+            }
+            val port = driver.ports.firstOrNull() ?: run {
+                Log.e(TAG, "CP2102N driver returned 0 ports")
+                conn.close()
+                return@synchronized
+            }
+            port.open(conn)
+            // Spec §7 trap: some CP210x variants need setLineEncoding before
+            // RTS toggles take effect. usb-serial-for-android handles this
+            // via setParameters; call once at a benign default.
+            port.setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+            port.rts = false
+            cp2102n = Cp2102nHandle(dev, port)
+            Log.i(TAG, "CP2102N opened ${dev.deviceName}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "openCp2102n failed: $t")
+        }
+    }
+
+    private fun openCm108(dev: UsbDevice) {
+        // Filled in by Task 4. Logged here to make Task 3 runs explicit.
+        Log.i(TAG, "openCm108 stub (Task 4 fills this in)")
+    }
+
+    /** Transport-keyed (not vendor-keyed) so the CM108 HID path can fan out
+     *  to both Digirig and AIOC under the same name. WebView button labels
+     *  retain the vendor name for operator clarity. */
+    fun keyCp2102nRts(): Boolean = setRts(true)
+    fun unkeyCp2102nRts(): Boolean = setRts(false)
+
+    private fun setRts(state: Boolean): Boolean = synchronized(cp2102nLock) {
+        val h = cp2102n ?: run {
+            Log.w(TAG, "setRts($state) but CP2102N not open")
+            return@synchronized false
+        }
+        return@synchronized try {
+            h.port.rts = state
+            Log.i(TAG, "ptt: cp2102n_rts=$state")
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "setRts($state) failed: $t")
+            false
+        }
     }
 
     /** Classify a device by vid/pid + structural fingerprint. */

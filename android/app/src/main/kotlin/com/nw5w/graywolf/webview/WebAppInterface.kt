@@ -36,5 +36,11 @@ class WebAppInterface(
     @JavascriptInterface
     fun pttStatusJson(): String = UsbPttAdapter.status().toString()
 
+    @JavascriptInterface
+    fun keyCp2102nRts(): Boolean = UsbPttAdapter.keyCp2102nRts()
+
+    @JavascriptInterface
+    fun unkeyCp2102nRts(): Boolean = UsbPttAdapter.unkeyCp2102nRts()
+
     companion object { private const val TAG = "WebAppInterface" }
 }
