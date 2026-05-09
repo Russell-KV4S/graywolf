@@ -47,6 +47,7 @@
     <strong id="ptt-heading">PTT</strong>
     <span class="dev" id="dev-cp2102n" data-state="missing" aria-live="polite">CP2102N: —</span>
     <span class="dev" id="dev-cm108" data-state="missing" aria-live="polite">CM108: —</span>
+    <span class="dev" id="dev-aioc" data-state="missing" aria-live="polite">AIOC: —</span>
     <span class="dev" id="dev-vidpid" data-state="missing"></span>
   </div>
   <div class="ptt-row" data-transport="digirig">
@@ -56,17 +57,23 @@
     <button id="unkey-digirig" type="button" aria-describedby="digirig-keyed digirig-last" disabled>Unkey</button>
     <span id="digirig-last" class="stamp" data-state="idle">— no action yet —</span>
   </div>
+  <div class="ptt-row" data-transport="cm108">
+    <strong>Digirig CM108 HID</strong>
+    <span class="keyed-indicator" id="cm108-keyed" data-keyed="false" aria-live="assertive">UNKEYED</span>
+    <button id="key-cm108" type="button" aria-describedby="cm108-keyed cm108-last" disabled>Key (CM108 HID)</button>
+    <button id="unkey-cm108" type="button" aria-describedby="cm108-keyed cm108-last" disabled>Unkey</button>
+    <span id="cm108-last" class="stamp" data-state="idle">— no action yet —</span>
+  </div>
   <div class="ptt-row" data-transport="aioc">
-    <strong>AIOC</strong>
+    <strong>AIOC CDC-ACM</strong>
     <span class="keyed-indicator" id="aioc-keyed" data-keyed="false" aria-live="assertive">UNKEYED</span>
-    <button id="key-aioc" type="button" aria-describedby="aioc-keyed aioc-last" disabled>Key (CM108 HID)</button>
+    <button id="key-aioc" type="button" aria-describedby="aioc-keyed aioc-last" disabled>Key (CDC-ACM RTS)</button>
     <button id="unkey-aioc" type="button" aria-describedby="aioc-keyed aioc-last" disabled>Unkey</button>
     <span id="aioc-last" class="stamp" data-state="idle">— no action yet —</span>
   </div>
   <div class="ptt-row">
-    <label for="cm108-bit">CM108 GPIO bit</label>
+    <label for="cm108-bit">CM108 GPIO pin</label>
     <select id="cm108-bit" aria-describedby="cm108-bit-last">
-      <option value="0">0</option>
       <option value="1">1</option>
       <option value="2">2</option>
       <option value="3" selected>3 (datasheet PTT)</option>
@@ -74,8 +81,9 @@
       <option value="5">5</option>
       <option value="6">6</option>
       <option value="7">7</option>
+      <option value="8">8</option>
     </select>
-    <span id="cm108-bit-last" class="stamp" data-state="idle">— bit=3 (default) —</span>
+    <span id="cm108-bit-last" class="stamp" data-state="idle">— pin=3 (default) —</span>
   </div>
 </section>
 <div class="row">
@@ -171,6 +179,7 @@
     catch (e) { return; }
     const cp = document.getElementById("dev-cp2102n");
     const cm = document.getElementById("dev-cm108");
+    const ai = document.getElementById("dev-aioc");
     const vp = document.getElementById("dev-vidpid");
     setDevState(cp,
       j.cp2102n_open ? "open" : (j.cp2102n_found ? "found" : "missing"),
@@ -178,22 +187,23 @@
     setDevState(cm,
       j.cm108_open ? "open" : (j.cm108_found ? "found" : "missing"),
       j.cm108_open
-        ? "CM108: open  iface=" + j.cm108_hid_iface + "  bit=" + j.cm108_gpio_bit
+        ? "CM108: open  iface=" + j.cm108_hid_iface + "  pin=" + j.cm108_gpio_bit
         : (j.cm108_found ? "CM108: found (no perm)" : "CM108: —"));
-    if (j.cm108_vid) {
-      vp.dataset.state = "open";
-      vp.textContent = j.cm108_vid + ":" + j.cm108_pid;
-    } else {
-      vp.dataset.state = "missing";
-      vp.textContent = "";
-    }
+    setDevState(ai,
+      j.aioc_open ? "open" : (j.aioc_found ? "found" : "missing"),
+      "AIOC: " + (j.aioc_open ? "open (CDC-ACM RTS)" : (j.aioc_found ? "found (no perm)" : "—")));
+    const vidpid = j.aioc_vid ? (j.aioc_vid + ":" + j.aioc_pid)
+                : (j.cm108_vid ? (j.cm108_vid + ":" + j.cm108_pid) : "");
+    if (vidpid) { vp.dataset.state = "open"; vp.textContent = vidpid; }
+    else { vp.dataset.state = "missing"; vp.textContent = ""; }
     const btns = window.__pttButtons || {};
     if (btns.digirig) btns.digirig.forEach(b => b.disabled = !j.cp2102n_open);
-    if (btns.aioc)    btns.aioc.forEach(b => b.disabled = !j.cm108_open);
+    if (btns.cm108)   btns.cm108.forEach(b => b.disabled = !j.cm108_open);
+    if (btns.aioc)    btns.aioc.forEach(b => b.disabled = !j.aioc_open);
   }
   // Transport button registry — pollPtt() enables/disables based on the
   // adapter's status snapshot.
-  window.__pttButtons = window.__pttButtons || { digirig: [], aioc: [] };
+  window.__pttButtons = window.__pttButtons || { digirig: [], aioc: [], cm108: [] };
 
   function bindPtt(opts) {
     const { btnId, fnName, transport, action, keyedId, stampId } = opts;
@@ -231,8 +241,10 @@
   }
   bindPtt({ btnId: "key-digirig",   fnName: "keyCp2102nRts",   transport: "digirig", action: "key",   keyedId: "digirig-keyed", stampId: "digirig-last" });
   bindPtt({ btnId: "unkey-digirig", fnName: "unkeyCp2102nRts", transport: "digirig", action: "unkey", keyedId: "digirig-keyed", stampId: "digirig-last" });
-  bindPtt({ btnId: "key-aioc",   fnName: "keyCm108Hid",   transport: "aioc", action: "key",   keyedId: "aioc-keyed", stampId: "aioc-last" });
-  bindPtt({ btnId: "unkey-aioc", fnName: "unkeyCm108Hid", transport: "aioc", action: "unkey", keyedId: "aioc-keyed", stampId: "aioc-last" });
+  bindPtt({ btnId: "key-cm108",   fnName: "keyCm108Hid",   transport: "cm108", action: "key",   keyedId: "cm108-keyed", stampId: "cm108-last" });
+  bindPtt({ btnId: "unkey-cm108", fnName: "unkeyCm108Hid", transport: "cm108", action: "unkey", keyedId: "cm108-keyed", stampId: "cm108-last" });
+  bindPtt({ btnId: "key-aioc",   fnName: "keyAiocCdcRts",   transport: "aioc", action: "key",   keyedId: "aioc-keyed", stampId: "aioc-last" });
+  bindPtt({ btnId: "unkey-aioc", fnName: "unkeyAiocCdcRts", transport: "aioc", action: "unkey", keyedId: "aioc-keyed", stampId: "aioc-last" });
   const bitSel = document.getElementById("cm108-bit");
   const bitStamp = document.getElementById("cm108-bit-last");
   bitSel.addEventListener("change", () => {
@@ -244,11 +256,11 @@
       return;
     }
     bitStamp.dataset.state = "pending";
-    bitStamp.textContent = "… bit=" + bit;
+    bitStamp.textContent = "… pin=" + bit;
     const ok = w.setCm108Bit(bit);
     bitStamp.dataset.state = ok ? "ok" : "fail";
-    bitStamp.textContent = (ok ? "✓ " : "✗ ") + "bit=" + bit +
-      (ok ? "  (next Key AIOC uses this bit)" : " FAIL");
+    bitStamp.textContent = (ok ? "✓ " : "✗ ") + "pin=" + bit +
+      (ok ? "  (next CM108 HID key uses this pin)" : " FAIL");
   });
   setInterval(pollPtt, 1000);
   pollPtt();

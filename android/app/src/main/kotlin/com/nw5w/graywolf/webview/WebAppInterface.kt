@@ -51,5 +51,11 @@ class WebAppInterface(
     @JavascriptInterface
     fun setCm108Bit(bit: Int): Boolean = UsbPttAdapter.setCm108Bit(bit)
 
+    @JavascriptInterface
+    fun keyAiocCdcRts(): Boolean = UsbPttAdapter.keyAiocCdcRts()
+
+    @JavascriptInterface
+    fun unkeyAiocCdcRts(): Boolean = UsbPttAdapter.unkeyAiocCdcRts()
+
     companion object { private const val TAG = "WebAppInterface" }
 }

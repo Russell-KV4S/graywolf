@@ -12,6 +12,7 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.util.Log
+import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
 import com.hoho.android.usbserial.driver.Cp21xxSerialDriver
 import com.hoho.android.usbserial.driver.UsbSerialDriver
 import com.hoho.android.usbserial.driver.UsbSerialPort
@@ -47,8 +48,16 @@ object UsbPttAdapter {
     private const val CP2102N_PID = 0xEA60
     private const val DIGIRIG_CM108_VID = 0x0D8C
     private const val DIGIRIG_CM108_PID = 0x0012
+    // AIOC (All-in-One-Cable, skuep firmware): STM32 USB composite device.
+    // Exposes CM108-compat HID for backwards software compat, but on this
+    // firmware revision the HID Output Report is accepted (rc=4) without
+    // driving the PTT GPIO. The CDC-ACM RTS line is the actual PTT path.
+    private const val AIOC_VID = 0x1209
+    private const val AIOC_PID = 0x7388
 
-    // CM108 HID Output Report defaults (spec §1 criterion 7).
+    // CM108 HID Output Report defaults. Pin is 1-indexed, matching the CM108
+    // datasheet ("GPIO3") and graywolf-modem's tx/ptt_cm108_unix.rs naming.
+    // Internally mask = 1 shl (pin - 1). Default 3 = datasheet PTT (mask 0x04).
     @Volatile var cm108GpioBit: Int = 3
         private set
 
@@ -65,15 +74,18 @@ object UsbPttAdapter {
         val connection: UsbDeviceConnection,
         val hidIface: Int,
     )
+    internal data class AiocHandle(val device: UsbDevice, val port: UsbSerialPort)
 
-    @Volatile internal var cp2102n: Cp2102nHandle? = null  // populated in Task 3
-    @Volatile internal var cm108: Cm108Handle? = null      // populated in Task 4
+    @Volatile internal var cp2102n: Cp2102nHandle? = null
+    @Volatile internal var cm108: Cm108Handle? = null
+    @Volatile internal var aioc: AiocHandle? = null
 
     // Per-transport locks. setRts / setHidGpio / tryOpen's mutation of the
     // matching handle synchronize on these, so the JS-thread (WebView binder)
     // and the broadcast-receiver thread can't race the open/close path.
     internal val cp2102nLock = Any()
     internal val cm108Lock = Any()
+    internal val aiocLock = Any()
 
     private val permissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -139,6 +151,20 @@ object UsbPttAdapter {
                 "device name=${dev.deviceName} vid=0x${"%04X".format(dev.vendorId)} " +
                     "pid=0x${"%04X".format(dev.productId)} role=$role ifaces=${dev.interfaceCount}"
             )
+            for (i in 0 until dev.interfaceCount) {
+                val iface = dev.getInterface(i)
+                val epDesc = StringBuilder()
+                for (e in 0 until iface.endpointCount) {
+                    val ep = iface.getEndpoint(e)
+                    epDesc.append(" ep[").append(e).append("] addr=0x")
+                        .append("%02X".format(ep.address)).append(" type=").append(ep.type)
+                        .append(" dir=").append(ep.direction)
+                }
+                Log.i(TAG,
+                    "  iface[$i] id=${iface.id} class=${iface.interfaceClass} " +
+                        "subclass=${iface.interfaceSubclass} proto=${iface.interfaceProtocol}" +
+                        " endpoints=${iface.endpointCount}$epDesc")
+            }
             if (role == DeviceRole.UNKNOWN) continue
             // Skip if this transport already has an open handle on this device.
             if (role == DeviceRole.CP2102N && cp2102n?.device?.deviceName == dev.deviceName) {
@@ -147,6 +173,10 @@ object UsbPttAdapter {
             }
             if (role == DeviceRole.CM108 && cm108?.device?.deviceName == dev.deviceName) {
                 Log.i(TAG, "enumerate: CM108 already open, skipping")
+                continue
+            }
+            if (role == DeviceRole.AIOC && aioc?.device?.deviceName == dev.deviceName) {
+                Log.i(TAG, "enumerate: AIOC already open, skipping")
                 continue
             }
             if (usbManager.hasPermission(dev)) {
@@ -184,6 +214,13 @@ object UsbPttAdapter {
             }
             cm108 = null
         }
+        synchronized(aiocLock) {
+            aioc?.let { h ->
+                try { h.port.close() } catch (t: Throwable) { Log.w(TAG, "aioc.close: $t") }
+                Log.i(TAG, "closeAll: aioc released ${h.device.deviceName}")
+            }
+            aioc = null
+        }
     }
 
     private fun requestPermission(dev: UsbDevice) {
@@ -214,14 +251,20 @@ object UsbPttAdapter {
         when (role) {
             DeviceRole.CP2102N -> Thread({ openCp2102n(dev) }, "ptt-open-cp2102n").apply { isDaemon = true }.start()
             DeviceRole.CM108   -> Thread({ openCm108(dev) }, "ptt-open-cm108").apply { isDaemon = true }.start()
+            DeviceRole.AIOC    -> Thread({ openAioc(dev) }, "ptt-open-aioc").apply { isDaemon = true }.start()
             DeviceRole.UNKNOWN -> Log.w(TAG, "tryOpen on UNKNOWN device — skipping")
         }
     }
 
     private fun openCp2102n(dev: UsbDevice) = synchronized(cp2102nLock) {
-        if (cp2102n != null) {
-            Log.i(TAG, "openCp2102n: already open, skipping")
-            return@synchronized
+        cp2102n?.let { prior ->
+            if (prior.device.deviceName == dev.deviceName) {
+                Log.i(TAG, "openCp2102n: already open on ${dev.deviceName}, skipping")
+                return@synchronized
+            }
+            Log.i(TAG, "openCp2102n: replacing stale handle ${prior.device.deviceName} -> ${dev.deviceName}")
+            try { prior.port.close() } catch (t: Throwable) { Log.w(TAG, "stale cp2102n.close: $t") }
+            cp2102n = null
         }
         try {
             Log.i(TAG, "openCp2102n: step=ctor")
@@ -254,9 +297,20 @@ object UsbPttAdapter {
     }
 
     private fun openCm108(dev: UsbDevice) = synchronized(cm108Lock) {
-        if (cm108 != null) {
-            Log.i(TAG, "openCm108: already open, skipping")
-            return@synchronized
+        cm108?.let { prior ->
+            if (prior.device.deviceName == dev.deviceName) {
+                Log.i(TAG, "openCm108: already open on ${dev.deviceName}, skipping")
+                return@synchronized
+            }
+            Log.i(TAG, "openCm108: replacing stale handle ${prior.device.deviceName} -> ${dev.deviceName}")
+            try {
+                val priorIface = (0 until prior.device.interfaceCount)
+                    .map { prior.device.getInterface(it) }
+                    .firstOrNull { it.id == prior.hidIface }
+                if (priorIface != null) prior.connection.releaseInterface(priorIface)
+                prior.connection.close()
+            } catch (t: Throwable) { Log.w(TAG, "stale cm108.close: $t") }
+            cm108 = null
         }
         val ifaceId = findHidInterface(dev)
         if (ifaceId < 0) {
@@ -316,13 +370,13 @@ object UsbPttAdapter {
      * with a warn log. Setting the bit does not key — caller must follow
      * with keyCm108Hid().
      */
-    fun setCm108Bit(bit: Int): Boolean {
-        if (bit < 0 || bit > 7) {
-            Log.w(TAG, "setCm108Bit($bit) out of range")
+    fun setCm108Bit(pin: Int): Boolean {
+        if (pin < 1 || pin > 8) {
+            Log.w(TAG, "setCm108Bit($pin) out of range (1..8)")
             return false
         }
-        cm108GpioBit = bit
-        Log.i(TAG, "cm108_gpio_bit=$bit")
+        cm108GpioBit = pin
+        Log.i(TAG, "cm108_gpio_pin=$pin")
         return true
     }
 
@@ -331,14 +385,22 @@ object UsbPttAdapter {
             Log.w(TAG, "setHidGpio($state) but CM108 not open")
             return@synchronized false
         }
-        val gpioByte: Byte = if (state) (1 shl cm108GpioBit).toByte() else 0
-        // 4-byte CM108 HID Output Report: [0x00, 0x00, gpio, 0x00].
-        val report = byteArrayOf(0x00, 0x00, gpioByte, 0x00)
-        // controlTransfer(requestType, request, value, index, buffer, length, timeout_ms)
-        //   requestType = 0x21 (Class | Interface | Host->Device)
-        //   request     = 0x09 (SET_REPORT)
-        //   value       = 0x0200 (Output Report, ID 0)
-        //   index       = HID interface number
+        // Layout matches graywolf-modem/src/tx/ptt_cm108_unix.rs and
+        // ptt_cm108_macos.rs (which key the AIOC successfully on desktop):
+        //   byte 0 = HID_OR0  GPIO write mode (always 0)
+        //   byte 1 = HID_OR1  GPIO output values
+        //   byte 2 = HID_OR2  GPIO data direction (1=output)
+        //   byte 3 = HID_OR3  SPDIF control (unused)
+        // Pin is 1-indexed (datasheet GPIO3 -> pin 3 -> mask 0x04). Direction
+        // mask MUST be set to put the pin in output mode; leaving it 0 leaves
+        // the pin floating and the HID write is silently a no-op even though
+        // controlTransfer returns rc=4. The HID report ID (0) is encoded in
+        // the wValue (0x0200) of the SET_REPORT control transfer, not the
+        // buffer payload — so the on-the-wire prefix length is 4, not 5.
+        val pin = cm108GpioBit
+        val mask: Byte = (1 shl (pin - 1)).toByte()
+        val value: Byte = if (state) mask else 0
+        val report = byteArrayOf(0x00, value, mask, 0x00)
         val rc = h.connection.controlTransfer(
             /* requestType = */ 0x21,
             /* request     = */ 0x09,
@@ -348,8 +410,75 @@ object UsbPttAdapter {
             /* length      = */ report.size,
             /* timeout_ms  = */ 200,
         )
-        Log.i(TAG, "ptt: cm108_set_report bit=$cm108GpioBit state=$state rc=$rc")
+        Log.i(TAG, "ptt: cm108_set_report pin=$pin mask=0x%02X value=0x%02X state=$state rc=$rc"
+            .format(mask.toInt() and 0xFF, value.toInt() and 0xFF))
         return@synchronized rc == report.size
+    }
+
+    private fun openAioc(dev: UsbDevice) = synchronized(aiocLock) {
+        aioc?.let { prior ->
+            if (prior.device.deviceName == dev.deviceName) {
+                Log.i(TAG, "openAioc: already open on ${dev.deviceName}, skipping")
+                return@synchronized
+            }
+            Log.i(TAG, "openAioc: replacing stale handle ${prior.device.deviceName} -> ${dev.deviceName}")
+            try { prior.port.close() } catch (t: Throwable) { Log.w(TAG, "stale aioc.close: $t") }
+            aioc = null
+        }
+        try {
+            Log.i(TAG, "openAioc: step=ctor")
+            val driver: UsbSerialDriver = CdcAcmSerialDriver(dev)
+            Log.i(TAG, "openAioc: step=openDevice")
+            val conn: UsbDeviceConnection = usbManager.openDevice(dev) ?: run {
+                Log.e(TAG, "openDevice returned null for AIOC — permission revoked?")
+                return@synchronized
+            }
+            Log.i(TAG, "openAioc: step=ports count=${driver.ports.size}")
+            val port = driver.ports.firstOrNull() ?: run {
+                Log.e(TAG, "AIOC driver returned 0 ports")
+                conn.close()
+                return@synchronized
+            }
+            Log.i(TAG, "openAioc: step=port.open")
+            port.open(conn)
+            Log.i(TAG, "openAioc: step=setParameters")
+            port.setParameters(9600, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+            // AIOC firmware >=1.2.0 PTT spec: assert when DTR=1 AND RTS=0.
+            // Pre-set unkeyed (DTR=0). RTS held at 0 because the firmware
+            // wants RTS=0 in the keyed state too; flipping it can be read
+            // as "release" by some firmware revisions.
+            Log.i(TAG, "openAioc: step=dtr=rts=false")
+            port.dtr = false
+            port.rts = false
+            aioc = AiocHandle(dev, port)
+            Log.i(TAG, "AIOC opened ${dev.deviceName}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "openAioc failed: $t")
+        }
+    }
+
+    /** AIOC PTT path is CDC-ACM RTS, NOT CM108 HID GPIO — the AIOC firmware
+     *  accepts HID Set_Report but does not wire it to a GPIO output. */
+    fun keyAiocCdcRts(): Boolean = setAiocRts(true)
+    fun unkeyAiocCdcRts(): Boolean = setAiocRts(false)
+
+    private fun setAiocRts(state: Boolean): Boolean = synchronized(aiocLock) {
+        val h = aioc ?: run {
+            Log.w(TAG, "setAiocRts($state) but AIOC not open")
+            return@synchronized false
+        }
+        return@synchronized try {
+            // AIOC firmware >=1.2.0: PTT asserted on DTR=1 AND RTS=0.
+            // RTS must stay 0 in BOTH key and unkey states — the firmware
+            // releases PTT only when DTR drops to 0.
+            h.port.rts = false
+            h.port.dtr = state
+            Log.i(TAG, "ptt: aioc_cdc dtr=$state rts=0")
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "setAiocRts($state) failed: $t")
+            false
+        }
     }
 
     /** Classify a device by vid/pid + structural fingerprint. */
@@ -357,21 +486,30 @@ object UsbPttAdapter {
         if (dev.vendorId == CP2102N_VID && dev.productId == CP2102N_PID) {
             return DeviceRole.CP2102N
         }
+        if (dev.vendorId == AIOC_VID && dev.productId == AIOC_PID) {
+            return DeviceRole.AIOC
+        }
         if (dev.vendorId == DIGIRIG_CM108_VID && dev.productId == DIGIRIG_CM108_PID) {
             return DeviceRole.CM108
         }
-        // Generic CM108-class fingerprint: composite device with at least one
-        // HID interface and at least one audio-class interface. Catches the
-        // AIOC even though its pid isn't known at plan-write time.
+        // Generic structural fingerprint for unknown vid/pids:
+        //   audio + CDC-ACM   -> AIOC-class (RTS PTT)
+        //   audio + HID only  -> CM108-class (HID GPIO PTT)
         var hasHid = false
         var hasAudio = false
+        var hasCdc = false
         for (i in 0 until dev.interfaceCount) {
             when (dev.getInterface(i).interfaceClass) {
                 UsbConstants.USB_CLASS_HID -> hasHid = true
                 UsbConstants.USB_CLASS_AUDIO -> hasAudio = true
+                UsbConstants.USB_CLASS_COMM -> hasCdc = true
             }
         }
-        return if (hasHid && hasAudio) DeviceRole.CM108 else DeviceRole.UNKNOWN
+        return when {
+            hasAudio && hasCdc -> DeviceRole.AIOC
+            hasAudio && hasHid -> DeviceRole.CM108
+            else -> DeviceRole.UNKNOWN
+        }
     }
 
     /** First HID-class interface number on a CM108 device. -1 if none found. */
@@ -389,31 +527,37 @@ object UsbPttAdapter {
     fun status(): JSONObject = JSONObject().apply {
         val sp = cp2102n
         val cm = cm108
+        val ai = aioc
         put("cp2102n_open", sp != null)
         put("cm108_open", cm != null)
+        put("aioc_open", ai != null)
         put("cm108_hid_iface", cm?.hidIface ?: -1)
         put("cm108_gpio_bit", cm108GpioBit)
         cm?.let {
             put("cm108_vid", "0x%04X".format(it.device.vendorId))
             put("cm108_pid", "0x%04X".format(it.device.productId))
         }
-        // Found-but-not-open state for the status row. Cheap on every poll
-        // since deviceList is a HashMap reference; classify walks interface
-        // counts only on cache miss.
+        ai?.let {
+            put("aioc_vid", "0x%04X".format(it.device.vendorId))
+            put("aioc_pid", "0x%04X".format(it.device.productId))
+        }
         var foundCp = false
         var foundCm = false
+        var foundAioc = false
         if (this@UsbPttAdapter::usbManager.isInitialized) {
             for ((_, dev) in usbManager.deviceList) {
                 when (classify(dev)) {
                     DeviceRole.CP2102N -> foundCp = true
                     DeviceRole.CM108   -> foundCm = true
+                    DeviceRole.AIOC    -> foundAioc = true
                     DeviceRole.UNKNOWN -> {}
                 }
             }
         }
         put("cp2102n_found", foundCp)
         put("cm108_found", foundCm)
+        put("aioc_found", foundAioc)
     }
 
-    enum class DeviceRole { CP2102N, CM108, UNKNOWN }
+    enum class DeviceRole { CP2102N, CM108, AIOC, UNKNOWN }
 }
