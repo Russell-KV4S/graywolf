@@ -127,6 +127,48 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
     )
 }
 
+val goAbiMatrix = mapOf(
+    "arm64-v8a" to "arm64",
+    // armeabi-v7a + x86_64 added in Task 16.
+)
+
+val goCrossCompile by tasks.registering {
+    group = "build"
+    description = "Cross-compile cmd/graywolf-pocb to libgraywolf.so for each Android ABI."
+}
+
+goAbiMatrix.forEach { (abi, goarch) ->
+    val taskName = "goCrossCompile_$abi"
+    val task = tasks.register<Exec>(taskName) {
+        group = "build"
+        workingDir = repoRoot
+        environment("GOOS", "android")
+        environment("GOARCH", goarch)
+        environment("CGO_ENABLED", "0")
+        environment("GOWORK", "off")
+        val outDir = jniLibsDir.resolve(abi)
+        // Inputs: every Go source under cmd/graywolf-pocb + the module files
+        // every package transitively reaches. fileTree("pkg") + go.{mod,sum}
+        // is conservative but cheap to fingerprint, and Gradle's UP-TO-DATE
+        // check then skips the Go process launch on no-op iterations.
+        inputs.files(fileTree(repoRoot.resolve("cmd/graywolf-pocb")) {
+            include("**/*.go")
+        })
+        inputs.files(fileTree(repoRoot.resolve("pkg")) { include("**/*.go") })
+        inputs.file(repoRoot.resolve("go.mod"))
+        inputs.file(repoRoot.resolve("go.sum"))
+        outputs.file(outDir.resolve("libgraywolf.so"))
+        doFirst { outDir.mkdirs() }
+        commandLine = listOf(
+            "go", "build",
+            "-o", outDir.resolve("libgraywolf.so").absolutePath,
+            "./cmd/graywolf-pocb",
+        )
+    }
+    goCrossCompile.configure { dependsOn(task) }
+}
+
 tasks.named("preBuild") {
     dependsOn(cargoNdkBuild)
+    dependsOn(goCrossCompile)
 }
