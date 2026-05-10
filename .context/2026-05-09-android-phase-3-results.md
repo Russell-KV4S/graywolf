@@ -163,6 +163,47 @@ adb shell run-as com.nw5w.graywolf kill -9 <pid>
 # Token rotation: NOT expected mid-session (per phase-3 deviation note above; bearer is per-app-cold-start)
 ```
 
+## Known gaps to address before phase 3 ships clean
+
+These were observed during T865 verification; functionality decode-side works but the
+operator-visible surface is incomplete or confusing.
+
+1. **Audio level meter blank on Android.** `/audio-devices/levels` returns empty; modem
+   cdylib doesn't compute peak/rms from JNI-pushed samples. **Fix:** in
+   `graywolf-modem/src/android.rs` (or wherever `modem_push_samples` lands), maintain
+   a sliding window over inbound shorts; periodically (~10Hz) emit
+   `IpcMessage::InputLevel { device_id: "android-default", peak_dbfs, rms_dbfs }`. Go
+   side already dispatches.
+
+2. **Per-channel `rx_frames` counter stuck at 0.** Modem doesn't tag emitted
+   `ReceivedFrame` with a channel id on Android because there's only one audio source
+   and no per-channel routing. **Fix:** when modem-config arrives, capture the first
+   configured channel's id; tag every emitted `ReceivedFrame` with it. Go dispatcher
+   then attributes correctly.
+
+3. **PositionLog disabled by default → live map empty after restart.** `PositionLogConfig.Enabled`
+   defaults to `false` (rationale: protect SD cards on Pi). On Android the rationale
+   is moot — internal storage handles it fine. **Fix:** either default-on for
+   `Platform == "android"`, or auto-enable on first boot if the configstore is empty.
+   Operator can also flip it manually via SPA sidebar -> Position Log.
+
+4. **No output device / TX path.** Phase 3 is RX-only by design. Phase 5 wires
+   `AudioTrack` for TX plus the proto-driven PTT path.
+
+5. **Audio device path field on AudioDevices form is meaningless on Android.** Android
+   uses `MediaRecorder.AudioSource.MIC` (system default) regardless of stored path.
+   UI should hide / lock the field on Android. (Plan A item: `web/src/lib/platform.js`
+   helper + `{#if !isAndroid()}` guards across AudioDevices, Channels, Ptt routes.)
+
+6. **Updates page meaningless on Android.** updatescheck is gated off (Play Store
+   handles updates), but the SPA still shows the Updates settings card. UI should hide
+   on Android.
+
+7. **Unused FGS types deferred.** `FOREGROUND_SERVICE_CONNECTED_DEVICE` (USB-PTT,
+   phase 5) and `FOREGROUND_SERVICE_LOCATION` (GPS, phase 4) cannot be declared in the
+   manifest until their access perms (USB_DEVICE / ACCESS_*_LOCATION) land alongside.
+   Re-add when those phases bring their access perms.
+
 ## Issues surfaced during plan execution
 
 1. **Phase 2 baseline missing on phase-3 plan branch.** Plan assumed phase-2 commits present; the docs/android-phase-3-plan branch only contained the plan doc itself. Resolved by `git merge --no-ff feature/android-phase-2`.
