@@ -433,3 +433,36 @@ Source: [`../../pkg/kiss/channelstats.go`](../../pkg/kiss/channelstats.go),
 [`../../pkg/webapi/status.go`](../../pkg/webapi/status.go),
 [`../../pkg/webapi/channels.go`](../../pkg/webapi/channels.go)
 (`getChannelStats`).
+
+### 31. `aprs.Weather` holds raw APRS101 integers; unit conversion is the stationcache boundary's job
+
+*Why:* The parser (`pkg/aprs/weather.go`) stores `Rain1Hour`,
+`Rain24Hour`, `RainSinceMid` as raw hundredths-of-an-inch and
+`Pressure` as raw tenths-of-millibar — a deliberate contract the FAP
+conformance corpus enforces (`pkg/aprs/fap_corpus_test.go`, header
+comment). Display-unit conversion happens exactly once, at
+`convertWeather` in `pkg/stationcache/extract.go` (`/100` for rain,
+`/10` for pressure). Snowfall is the lone exception: the parser
+already divides it by 100, so `convertWeather` passes it through.
+Adding a new WX field, or surfacing `RainSinceMid`, means converting
+at that boundary — never assume the parser did it, and never add a
+second `/100` downstream. The converted cache value flows unchanged
+into `historydb` and the `webapi` WeatherDTO, and `historydb` is read
+back into `stationcache.Weather` *without* re-running `convertWeather`
+when the cache is hydrated on restart (`pkg/stationcache/persistent.go`)
+— so persisted rows must already be in display units. Issue #126:
+rain shipped 100x too large because this conversion was missing;
+because legacy rows persisted the raw value, `bootstrap` carries a
+one-time `PRAGMA user_version`-gated backfill
+(`UPDATE weather SET rain_1h = rain_1h/100.0, rain_24h = rain_24h/100.0`,
+`user_version` 0 → 1). `user_version` is the historydb data-migration
+counter; bump it and add a gated block for any future persisted-units
+correction.
+
+Source: [`../../pkg/aprs/weather.go`](../../pkg/aprs/weather.go),
+[`../../pkg/aprs/types.go`](../../pkg/aprs/types.go) (`Weather` field
+docs), [`../../pkg/aprs/fap_corpus_test.go`](../../pkg/aprs/fap_corpus_test.go),
+[`../../pkg/stationcache/extract.go`](../../pkg/stationcache/extract.go)
+(`convertWeather`),
+[`../../pkg/historydb/historydb.go`](../../pkg/historydb/historydb.go)
+(`bootstrap` `user_version` backfill).
