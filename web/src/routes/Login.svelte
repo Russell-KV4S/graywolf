@@ -28,6 +28,9 @@
     if (!username.trim()) e.username = 'Username is required';
     if (!password) e.password = 'Password is required';
     if (password.length < 8) e.password = 'Minimum 8 characters';
+    // bcrypt rejects anything past 72 bytes; measure UTF-8 length so a
+    // multibyte password can't slip past a naive character count.
+    if (new TextEncoder().encode(password).length > 72) e.password = 'Maximum 72 characters';
     if (setupMode && password !== passwordConfirm) e.passwordConfirm = 'Passwords do not match';
     errors = e;
     return Object.keys(e).length === 0;
