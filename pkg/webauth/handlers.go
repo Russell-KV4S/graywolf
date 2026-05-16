@@ -248,9 +248,17 @@ func (h *Handlers) CreateFirstUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "username and password required")
 		return
 	}
+	if len(req.Password) > MaxPasswordBytes {
+		jsonError(w, http.StatusBadRequest, "password must not exceed 72 bytes")
+		return
+	}
 
 	hash, err := HashPassword(req.Password)
 	if err != nil {
+		if errors.Is(err, ErrPasswordTooLong) {
+			jsonError(w, http.StatusBadRequest, "password must not exceed 72 bytes")
+			return
+		}
 		h.logger().ErrorContext(r.Context(), "handler failed", "op", "setup.hash_password", "err", err)
 		jsonError(w, http.StatusInternalServerError, "failed to create user")
 		return

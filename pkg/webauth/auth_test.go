@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -53,6 +54,51 @@ func TestHashAndCheckPassword(t *testing.T) {
 	}
 	if err := CheckPassword(hash, "wrong"); err == nil {
 		t.Fatal("wrong password should not match")
+	}
+}
+
+func TestHashPasswordTooLong(t *testing.T) {
+	// Exactly at the limit must still hash.
+	if _, err := HashPassword(strings.Repeat("a", MaxPasswordBytes)); err != nil {
+		t.Fatalf("%d-byte password should hash, got %v", MaxPasswordBytes, err)
+	}
+	// One byte over must be rejected with the sentinel, not bcrypt's
+	// internal "password length exceeds 72 bytes" message.
+	_, err := HashPassword(strings.Repeat("a", MaxPasswordBytes+1))
+	if !errors.Is(err, ErrPasswordTooLong) {
+		t.Fatalf("expected ErrPasswordTooLong, got %v", err)
+	}
+}
+
+// TestCreateFirstUserPasswordTooLong is the regression for issue #123: an
+// over-long password must come back as a clean 400 with an actionable
+// message, not a 500 "failed to create user".
+func TestCreateFirstUserPasswordTooLong(t *testing.T) {
+	s := testAuthStore(t)
+	h := &Handlers{Auth: s}
+
+	body, _ := json.Marshal(setupRequest{
+		Username: "admin",
+		Password: strings.Repeat("x", 100), // password-manager default
+	})
+	req := httptest.NewRequest("POST", "/api/auth/setup", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.CreateFirstUser(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, rec.Body.String())
+	}
+	if got := resp["error"]; got != "password must not exceed 72 bytes" {
+		t.Fatalf("unexpected error message: %q", got)
+	}
+
+	// No user should have been created.
+	if count, _ := s.UserCount(context.Background()); count != 0 {
+		t.Fatalf("expected 0 users after rejected setup, got %d", count)
 	}
 }
 
