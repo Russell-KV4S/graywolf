@@ -3,7 +3,8 @@
 // .stn-comment, .badge, .b-rx, .b-tx, .b-is, .via-is, .via-rf,
 // .via-rf-hops, .path-link) are defined :global() in LiveMapV2.svelte.
 
-import { esc, timeAgo, fmtLat, fmtLon, viaCls, viaText } from './popup-helpers.js';
+import { esc, timeAgo, fmtLat, fmtLon, viaCls, viaText, formatWeatherRows } from './popup-helpers.js';
+import { unitsState } from '../settings/units-store.svelte.js';
 
 // renderStationPopupHTML(station, { hasStation }) -> HTML string
 //
@@ -49,6 +50,16 @@ export function renderStationPopupHTML(s, { hasStation = null } = {}) {
       })
       .join(',');
     html += `<div class="stn-path">${pathHtml}</div>`;
+  }
+
+  const wxRows = formatWeatherRows(s.weather, unitsState.isMetric);
+  if (wxRows.length) {
+    html += `<div class="stn-sep"></div>`;
+    html += `<div class="stn-weather">`;
+    for (const [label, val] of wxRows) {
+      html += `<div class="stn-weather-row"><span class="stn-weather-label">${esc(label)}</span><span class="stn-weather-val">${esc(val)}</span></div>`;
+    }
+    html += `</div>`;
   }
 
   if (s.comment) {

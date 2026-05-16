@@ -112,7 +112,8 @@
     if (!pos) return;
     closePopup();
 
-    const html = renderStationPopupHTML(station, {
+    const wx = dataStore.weather.get(station.callsign);
+    const html = renderStationPopupHTML(wx ? { ...station, weather: wx } : station, {
       hasStation: (callsign) => dataStore.stations.has(callsign),
     });
 
@@ -876,6 +877,18 @@
   :global(.stn-path .path-link) { color: #6eb5ff; text-decoration: none; cursor: pointer; }
   :global(.stn-path .path-link:hover) { text-decoration: underline; }
   :global(.stn-comment) { color: var(--color-text-dim); font-style: italic; font-size: 12px; }
+  :global(.stn-weather) { font-size: 12px; }
+  :global(.stn-weather-row) {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    line-height: 1.4;
+  }
+  :global(.stn-weather-label) { color: var(--color-text-dim); }
+  :global(.stn-weather-val) {
+    color: var(--color-text);
+    font-variant-numeric: tabular-nums;
+  }
 
   :global(.stn-popup .badge) {
     display: inline-block;

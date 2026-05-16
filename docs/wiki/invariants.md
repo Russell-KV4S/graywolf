@@ -433,3 +433,25 @@ Source: [`../../pkg/kiss/channelstats.go`](../../pkg/kiss/channelstats.go),
 [`../../pkg/webapi/status.go`](../../pkg/webapi/status.go),
 [`../../pkg/webapi/channels.go`](../../pkg/webapi/channels.go)
 (`getChannelStats`).
+
+### 31. `aprs.Weather` holds raw APRS101 integers; unit conversion is the stationcache boundary's job
+
+*Why:* The parser (`pkg/aprs/weather.go`) stores `Rain1Hour`,
+`Rain24Hour`, `RainSinceMid` as raw hundredths-of-an-inch and
+`Pressure` as raw tenths-of-millibar — a deliberate contract the FAP
+conformance corpus enforces (`pkg/aprs/fap_corpus_test.go`, header
+comment). Display-unit conversion happens exactly once, at
+`convertWeather` in `pkg/stationcache/extract.go` (`/100` for rain,
+`/10` for pressure). Snowfall is the lone exception: the parser
+already divides it by 100, so `convertWeather` passes it through.
+Adding a new WX field, or surfacing `RainSinceMid`, means converting
+at that boundary — never assume the parser did it, and never add a
+second `/100` downstream (the cache value flows unchanged into
+`historydb` and the `webapi` WeatherDTO). Issue #126: rain shipped
+100x too large because this conversion was missing.
+
+Source: [`../../pkg/aprs/weather.go`](../../pkg/aprs/weather.go),
+[`../../pkg/aprs/types.go`](../../pkg/aprs/types.go) (`Weather` field
+docs), [`../../pkg/aprs/fap_corpus_test.go`](../../pkg/aprs/fap_corpus_test.go),
+[`../../pkg/stationcache/extract.go`](../../pkg/stationcache/extract.go)
+(`convertWeather`).
