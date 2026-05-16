@@ -1789,7 +1789,7 @@ fn collect_output_devices_linux(
             None => continue,
         };
         let dev = find_dev(&pcm);
-        let (sample_rates, channel_counts) = dev.map(|d| configs_for(d)).unwrap_or_default();
+        let (sample_rates, channel_counts) = dev.map(&configs_for).unwrap_or_default();
         if sample_rates.is_empty() || channel_counts.is_empty() {
             continue;
         }
