@@ -108,7 +108,7 @@
       </div>
     </div>
 
-    <h2>Device Paths</h2>
+    <h2 id="device-paths">Device Paths</h2>
 
     <p>
       When graywolf asks for a device path, enter the operating-system
@@ -207,10 +207,13 @@
     <h3>Step 2 &mdash; Create a serial KISS interface</h3>
 
     <ol class="steps">
-      <li>Open <strong>Interfaces &rarr; KISS TNC</strong>.</li>
-      <li>Click <strong>+ Add Interface</strong>.</li>
-      <li>Choose <strong>Interface Type: Serial</strong>.</li>
-      <li>Enter the <strong>Device</strong> path for your serial port
+      <li>Open <strong>Interfaces &rarr; KISS TNC</strong> (the page
+        is titled <strong>KISS Interfaces</strong>).</li>
+      <li>Click <strong>+ Add KISS</strong>.</li>
+      <li>In the <strong>Type</strong> field, choose
+        <strong>Serial</strong>.</li>
+      <li>In <strong>Serial Device</strong>, enter the operating-system
+        path to the serial port
         (see <a href="#device-paths">Device Paths</a> above).</li>
       <li>Set <strong>Baud Rate</strong> to match the rate configured
         on the device (9600 is the most common starting point).</li>
@@ -218,12 +221,12 @@
         channel you just created.</li>
       <li>Set <strong>Mode</strong> to <strong>TNC</strong>. In TNC
         mode the interface is treated as a radio, not a software
-        client. This also enables the Transmit opt-in checkbox.</li>
-      <li>Check the box labeled <strong>Transmit from
-        digipeater / beacon / iGate to this interface</strong> to
-        allow graywolf's TX pipeline to send frames to the device.
-        Without this checkbox the interface only receives.</li>
-      <li>Click <strong>Save</strong>. Graywolf opens the serial port
+        client. This also reveals the transmit opt-in checkbox.</li>
+      <li>Check the box labeled <strong>Allow digipeater/beacon/iGate
+        to transmit on this interface</strong> to allow graywolf's
+        TX pipeline to send frames to the device. Without this
+        checkbox the interface only receives.</li>
+      <li>Click <strong>Create</strong>. Graywolf opens the serial port
         immediately. The row's status badge shows
         <strong>Connected</strong> if the port opened successfully.
         The channel's backing on the Channels page flips to
@@ -329,7 +332,7 @@
     <ul>
       <li><strong>Transmit checkbox is off.</strong> Open the KISS
         interface, confirm Mode is <code>TNC</code> and the
-        <strong>Transmit from digipeater / beacon / iGate to this
+        <strong>Allow digipeater/beacon/iGate to transmit on this
         interface</strong> box is checked.</li>
       <li><strong>Port is not open.</strong> The status badge on the
         KISS page shows <strong>Reconnecting</strong> if graywolf
