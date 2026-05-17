@@ -11,6 +11,7 @@ pub mod canned;
 mod error;
 pub mod hdlc_encode;
 pub(crate) mod ptt;
+pub mod ptt_android_consts;
 
 pub use error::TxError;
 
