@@ -83,7 +83,9 @@ type Manager struct {
 	// onClientStateChange fires on every tcp-client state transition.
 	onClientStateChange func(ifaceID uint32, name string, st InterfaceStatus)
 	// onClientReconnect fires once per successful dial.
-	onClientReconnect func(ifaceID uint32)
+	onClientReconnect   func(ifaceID uint32)
+	onSerialStateChange func(ifaceID uint32, name string, st InterfaceStatus)
+	onSerialReconnect   func(ifaceID uint32)
 
 	// chanStatsMu guards chanStats. Separate from mu so the RX/TX
 	// counting hot paths never contend with Start/Stop lifecycle.
@@ -175,6 +177,12 @@ type ManagerConfig struct {
 	// tcp-client supervisor. Wired to the Phase 4
 	// graywolf_kiss_client_reconnects_total counter.
 	OnClientReconnect func(ifaceID uint32)
+	// OnSerialStateChange / OnSerialReconnect mirror the client hooks
+	// for serial supervisors. Parallel hooks (D7 option A); a
+	// follow-up may collapse both behind transport-neutral
+	// OnSupervisor* (tracked Out-of-scope in the spec).
+	OnSerialStateChange func(ifaceID uint32, name string, st InterfaceStatus)
+	OnSerialReconnect   func(ifaceID uint32)
 }
 
 // NewManager creates a Manager. Call Start to launch individual servers.
@@ -196,6 +204,8 @@ func NewManager(cfg ManagerConfig) *Manager {
 		onTxQueueDrop:         cfg.OnTxQueueDrop,
 		onClientStateChange:   cfg.OnClientStateChange,
 		onClientReconnect:     cfg.OnClientReconnect,
+		onSerialStateChange:   cfg.OnSerialStateChange,
+		onSerialReconnect:     cfg.OnSerialReconnect,
 		chanStats:             make(map[uint32]*ChannelStat),
 	}
 }
@@ -528,11 +538,35 @@ func (m *Manager) StartSerial(parent context.Context, id uint32, cfg SerialConfi
 	srv := NewServer(scfg)
 	sup := NewSerial(cfg, srv)
 
-	// Chain OnReload. Manager-level serial state-change hook wiring is
-	// added in Task 7 (ManagerConfig.OnSerialStateChange/OnSerialReconnect).
-	// For now, wire only the caller-supplied cfg.OnReload.
-	if cfg.OnReload != nil {
-		sup.onReload = cfg.OnReload
+	// Chain onReload / onReconnect with the manager-level hooks,
+	// mirroring StartClient's onClientStateChange/onClientReconnect
+	// chaining, so manager-level metric hooks fire without the
+	// supervisor knowing about the Manager. The else-if preserves a
+	// caller-supplied OnReload when no manager state-change hook is set.
+	userOnReload := cfg.OnReload
+	if m.onSerialStateChange != nil {
+		managerHook := m.onSerialStateChange
+		ifaceID := id
+		ifaceName := cfg.Name
+		sup.onReload = func() {
+			if userOnReload != nil {
+				userOnReload()
+			}
+			managerHook(ifaceID, ifaceName, sup.Status())
+		}
+		// Deliberate divergence from StartClient, which has no else-if here
+		// because its callers always pair OnReload with OnClientStateChange.
+		// Serial keeps this branch as a regression-guard: Task 6 wired
+		// cfg.OnReload unconditionally, so dropping it when no manager
+		// state-change hook is set would silently regress that behaviour.
+		// Do not "resync" with StartClient by removing this branch.
+	} else if userOnReload != nil {
+		sup.onReload = userOnReload
+	}
+	if m.onSerialReconnect != nil {
+		ifaceID := id
+		reconnectHook := m.onSerialReconnect
+		sup.onReconnect = func() { reconnectHook(ifaceID) }
 	}
 
 	ms := &managedServer{serial: sup, cancel: cancel, channel: scfg.firstChannel()}

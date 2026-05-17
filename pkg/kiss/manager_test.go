@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -263,5 +264,51 @@ func TestManager_StartSerial_Connected(t *testing.T) {
 	m.mu.Unlock()
 	if stillPresent {
 		t.Fatal("interface 9 still present in m.running after Stop")
+	}
+}
+
+func TestManager_OnSerialHooksFire(t *testing.T) {
+	var mu sync.Mutex
+	var states []string
+	var reconnects int
+	m := NewManager(ManagerConfig{
+		Sink: &txSinkRecorder{},
+		OnSerialStateChange: func(id uint32, name string, st InterfaceStatus) {
+			mu.Lock()
+			states = append(states, st.State)
+			mu.Unlock()
+		},
+		OnSerialReconnect: func(id uint32) {
+			mu.Lock()
+			reconnects++
+			mu.Unlock()
+		},
+	})
+	rwc := newFakeRWC()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.StartSerial(ctx, 5, SerialConfig{
+		Name: "ser", Device: "d", BaudRate: 9600, Mode: ModeModem,
+		ChannelMap: map[uint8]uint32{0: 1}, ReconnectInitMs: 10, ReconnectMaxMs: 20,
+		OpenFunc: func(string, uint32) (io.ReadWriteCloser, error) { return rwc, nil },
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		r := reconnects
+		mu.Unlock()
+		if r > 0 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	m.Stop(5)
+	mu.Lock()
+	defer mu.Unlock()
+	if reconnects == 0 {
+		t.Fatal("OnSerialReconnect never fired")
+	}
+	if len(states) == 0 {
+		t.Fatal("OnSerialStateChange never fired")
 	}
 }
