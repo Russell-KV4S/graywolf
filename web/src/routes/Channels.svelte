@@ -815,10 +815,10 @@
           type="button"
           class="test-ptt-btn"
           class:ptt-held={pttHeld}
-          on:pointerdown={startTestPtt}
-          on:pointerup={stopTestPtt}
-          on:pointercancel={stopTestPtt}
-          on:pointerleave={stopTestPtt}
+          onpointerdown={startTestPtt}
+          onpointerup={stopTestPtt}
+          onpointercancel={stopTestPtt}
+          onpointerleave={stopTestPtt}
           disabled={!editing?.id || pttBusy}
           aria-label={pttHeld ? 'PTT keyed — release to unkey' : 'Press and hold to key transmitter'}
         >
@@ -836,7 +836,7 @@
             ({usbDevice.permission_granted ? 'Granted ✓' : 'Not granted'})
           </span>
           {#if !usbDevice.permission_granted}
-            <button type="button" class="grant-btn" on:click={requestGrant}>Grant access</button>
+            <button type="button" class="grant-btn" onclick={requestGrant}>Grant access</button>
           {/if}
         {:else}
           <span class="usb-status-value usb-none">none detected</span>
