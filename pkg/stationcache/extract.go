@@ -179,7 +179,10 @@ func countHops(path []string) int {
 }
 
 // convertWeather converts aprs.Weather to the cache Weather struct.
-// Pressure is converted from tenths of millibar to millibars.
+// Pressure is converted from tenths of millibar to millibars; rain
+// accumulators are converted from hundredths of an inch to inches.
+// (aprs.Weather holds raw APRS101 integers by contract; the display
+// unit conversion is this boundary's job, the same as Pressure.)
 func convertWeather(wx *aprs.Weather) *Weather {
 	if wx == nil {
 		return nil
@@ -197,9 +200,9 @@ func convertWeather(wx *aprs.Weather) *Weather {
 		HasHumidity:   wx.HasHumidity,
 		Pressure:      wx.Pressure / 10, // tenths of mbar → mbar
 		HasPressure:   wx.HasPressure,
-		Rain1h:        wx.Rain1Hour,
+		Rain1h:        wx.Rain1Hour / 100, // hundredths of inch → inches
 		HasRain1h:     wx.HasRain1h,
-		Rain24h:       wx.Rain24Hour,
+		Rain24h:       wx.Rain24Hour / 100, // hundredths of inch → inches
 		HasRain24h:    wx.HasRain24h,
 		Snow24h:       wx.Snowfall24h,
 		HasSnow24h:    wx.HasSnow,

@@ -66,6 +66,28 @@ Source: [`../../graywolf-modem/src/audio/`](../../graywolf-modem/src/audio/);
 no CPAL dep in `pkg/`; control surface is the proto messages
 `ConfigureAudio` / `StartAudio` / `StopAudio` / `EnumerateAudioDevices`.
 
+**8a. Capture-device enumeration never probes in-use hardware.**
+On Linux, `EnumerateAudioDevices` (`collect_input_devices_linux`
+in `modem/mod.rs`) collapses cpal's numeric/symbolic ALSA aliases to one
+entry per physical card (via `/proc/asound/cards`) and *probes* each
+**idle** card — briefly opening it — to badge "Recommended" the PCM form
+that actually streams. A card currently held open by a live capture
+stream is **never** probed (opening a second stream on in-use hardware
+can disrupt the running radio) and is surfaced from the in-use snapshot
+the handler passes in, so a rescan keeps showing it. The
+string-only `is_recommended_pcm_id` heuristic is now used **only** by the
+flare `--list-audio` path and the Linux *output* path; flare
+`recommended` and the live capture picker intentionally diverge (the
+separate `--list-audio` process can't probe safely). The live picker is
+authoritative.
+
+Output side: idle outputs enumerate unchanged (`collect_devices`), but a
+configured/in-use output card (e.g. the AIOC's shared in/out PCM, whose
+`supported_output_configs()` fails once RX holds the card) is re-appended
+from the in-use-output snapshot, one entry per physical card, without
+opening the device — so a configured output never vanishes from
+detection while audio is running.
+
 ### 9. PTT enumeration vs. driving split
 
 *Why:* Go enumerates PTT hardware and Rust drives it, so both sides must agree on the identifier scheme passed via `ConfigurePtt.method` and `ConfigurePtt.device`.
@@ -140,6 +162,14 @@ Source: [`../../pkg/igate/filters/filters.go`](../../pkg/igate/filters/filters.g
 
 Source: [`../../pkg/txgovernor/governor.go`](../../pkg/txgovernor/governor.go)
 (package comment).
+
+### 16b. KISS `tcp-client` defaults to a TX-capable TNC link
+
+*Why:* A `tcp-client` KISS interface dials OUT to a hardware TNC, so its only useful default is `Mode=tnc` + `AllowTxFromGovernor=true` -- otherwise it registers no TX backend and silently transmits nothing while still receiving (issue #128). When `Mode` is **omitted from the request**, both the API boundary (`dto.KissRequest.ToModel`) and the store backstop (`normalizeKissInterface`) apply this default for `tcp-client` only; every other interface type keeps the historical `modem` default. An *explicitly supplied* `Mode` is always honored verbatim. Note `POST`/`PUT /api/kiss` is full-resource replace (`Store.UpdateKissInterface` does `db.Save`, like every DTO in the codebase): a `PUT` that omits `mode` re-applies the default exactly as create does -- it does NOT merge against the persisted row. This is consistent with how every other KISS field default (reconnect bounds, ingress rates) already behaves on `PUT`. The one hazardous case -- silently enabling TX on a `tcp-client` whose channel also has an audio input device (a modem backend), which would double-transmit -- cannot occur on either path: `validateKissInterface` independently rejects `tnc`+`AllowTxFromGovernor` on a modem-backed channel before the row is written. Migration 20 (`kiss_tcp_client_tx_default`) repairs pre-existing `tcp-client` rows stuck at the old `modem`/`false` default, and likewise skips any row whose channel has an audio input device.
+
+Source: [`../../pkg/webapi/dto/kiss.go`](../../pkg/webapi/dto/kiss.go),
+[`../../pkg/configstore/store.go`](../../pkg/configstore/store.go) (`normalizeKissInterface`),
+[`../../pkg/configstore/migrate.go`](../../pkg/configstore/migrate.go) (`migrateKissTcpClientTxDefault`).
 
 ### 17. RX fanout carries provenance via `ingress.Source` (in-process)
 
@@ -352,3 +382,168 @@ Source: [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go)
 [`../../pkg/igate/output.go`](../../pkg/igate/output.go)
 (`IgateOutput.SetIgate`),
 [`../../pkg/app/igate_toggle_test.go`](../../pkg/app/igate_toggle_test.go).
+
+### 29. AX.25 callsigns are uppercased on decode
+
+*Why:* APRS callsigns are uppercase alphanumeric per spec, but
+non-conformant transmitters occasionally ship lowercase shifted bytes
+in the address field. The text parser `ax25.ParseAddress` already
+uppercases, but the binary `decodeAddress` path used for every RF
+frame did not, so lowercase callsigns leaked through `pkt.Source`
+into the station cache and message store. Normalizing at the single
+binary-decode chokepoint keeps every downstream consumer (router,
+station cache, persistInbound, digipeater) working from canonical
+uppercase. Object and Item names are NOT normalized — APRS101 §11
+defines them as case-sensitive free-form names, not callsigns.
+
+Source: [`../../pkg/ax25/address.go`](../../pkg/ax25/address.go)
+(`decodeAddress`),
+[`../../pkg/ax25/frame_test.go`](../../pkg/ax25/frame_test.go)
+(`TestDecodeAddressUppercasesCallsign`).
+
+### 30. Per-channel dashboard stats have two sources by backing
+
+*Why:* The dashboard channel card RX/TX (`GET /api/status`,
+`GET /api/channels/{id}/stats`) reads `modembridge` per-channel
+counters, which are fed *only* by the Rust modem's `StatusUpdate`
+IPC. KISS-TNC-backed channels have no Rust modem, so their card was
+permanently stuck at zero even though the aggregate Prometheus
+tiles incremented (issue #132). Per-channel counts for TNC-mode KISS
+interfaces are therefore tracked separately in `kiss.Manager`: RX
+via the wrapped `RxIngress` (per inbound frame, per interface); TX
+via `txbackend.Dispatcher`'s `OnChannelTx` hook, called once per
+dispatched frame on a KISS-backed channel, co-located with the
+aggregate `ObserveTxFrame` so it stays in lockstep and does NOT
+multiply by fan-out width when a channel has multiple KISS-TNC
+interfaces attached. `webapi` prefers the bridge cache and falls
+back to `kiss.Manager.ChannelStats` only when the bridge has no
+entry. The TX-backend validator forbids a channel being both modem-
+and KISS-backed, so the two sources never overlap and cannot
+double-count (a modem-backed channel carries no KISS backend, so
+`OnChannelTx` never fires for it). Bad-FCS is intentionally absent for KISS-TNC channels:
+a hardware TNC validates the FCS and never forwards a bad frame over
+KISS. Unlike the modem cache, the KISS counters are process-lifetime
+monotonic and are NOT reset on a modem restart.
+
+Source: [`../../pkg/kiss/channelstats.go`](../../pkg/kiss/channelstats.go),
+[`../../pkg/kiss/manager.go`](../../pkg/kiss/manager.go)
+(`wrapRxIngress` wiring in `Start`/`StartClient`),
+[`../../pkg/app/txbackend/dispatcher.go`](../../pkg/app/txbackend/dispatcher.go)
+(`OnChannelTx`),
+[`../../pkg/webapi/status.go`](../../pkg/webapi/status.go),
+[`../../pkg/webapi/channels.go`](../../pkg/webapi/channels.go)
+(`getChannelStats`).
+
+### 31. `aprs.Weather` holds raw APRS101 integers; unit conversion is the stationcache boundary's job
+
+*Why:* The parser (`pkg/aprs/weather.go`) stores `Rain1Hour`,
+`Rain24Hour`, `RainSinceMid` as raw hundredths-of-an-inch and
+`Pressure` as raw tenths-of-millibar — a deliberate contract the FAP
+conformance corpus enforces (`pkg/aprs/fap_corpus_test.go`, header
+comment). Display-unit conversion happens exactly once, at
+`convertWeather` in `pkg/stationcache/extract.go` (`/100` for rain,
+`/10` for pressure). Snowfall is the lone exception: the parser
+already divides it by 100, so `convertWeather` passes it through.
+Adding a new WX field, or surfacing `RainSinceMid`, means converting
+at that boundary — never assume the parser did it, and never add a
+second `/100` downstream. The converted cache value flows unchanged
+into `historydb` and the `webapi` WeatherDTO, and `historydb` is read
+back into `stationcache.Weather` *without* re-running `convertWeather`
+when the cache is hydrated on restart (`pkg/stationcache/persistent.go`)
+— so persisted rows must already be in display units. Issue #126:
+rain shipped 100x too large because this conversion was missing;
+because legacy rows persisted the raw value, `bootstrap` carries a
+one-time `PRAGMA user_version`-gated backfill
+(`UPDATE weather SET rain_1h = rain_1h/100.0, rain_24h = rain_24h/100.0`,
+`user_version` 0 → 1). `user_version` is the historydb data-migration
+counter; bump it and add a gated block for any future persisted-units
+correction.
+
+Source: [`../../pkg/aprs/weather.go`](../../pkg/aprs/weather.go),
+[`../../pkg/aprs/types.go`](../../pkg/aprs/types.go) (`Weather` field
+docs), [`../../pkg/aprs/fap_corpus_test.go`](../../pkg/aprs/fap_corpus_test.go),
+[`../../pkg/stationcache/extract.go`](../../pkg/stationcache/extract.go)
+(`convertWeather`),
+[`../../pkg/historydb/historydb.go`](../../pkg/historydb/historydb.go)
+(`bootstrap` `user_version` backfill).
+### 32. Modem sample rate is capped at 48 kHz
+
+The modem never advertises, defaults to, or opens an audio stream
+above **48 kHz** (`audio::MODEM_MAX_SAMPLE_RATE`). Every Graywolf
+modem mode (AFSK 1200, G3RUH 9600, QPSK/8-PSK) is well served by
+48 kHz.
+
+*Why:* An ALSA `plughw:`/`default` PCM advertises a *synthetic*
+resample range (up to 192 kHz) via cpal `supported_*_configs()`
+even though the USB codec hardware runs at 48 kHz. The Audio
+Devices form used to auto-fill the **highest** advertised rate, so
+operators who ran "Detect Devices" persisted `sample_rate=96000`.
+At runtime the modem opened the stream at the inflated rate while
+the hardware ran 48 kHz; the demodulator clocked AFSK bit timing
+against the wrong rate and **every frame failed FCS -- RX went
+silent with no error** (anguilla.local, 2026-05-16). Defense in
+depth, all three layers required:
+
+1. **Enumeration** never lists >48 kHz: `STANDARD_SAMPLE_RATES`
+   stops at 48000, asserted by `audio::rate_invariants`.
+2. **UI** never defaults to a corrupt/max rate:
+   `pickDefaultSampleRate` prefers 48000 → 44100 → highest ≤48 kHz,
+   never above; the manual rate `<Select>` offers no 96000.
+3. **Runtime backstop**: `soundcard::choose_stream_rate` honors the
+   requested rate only when ≤48 kHz *and* covered by a real
+   supported range, else falls back to the device native rate
+   clamped to the ceiling. `AudioSource.sample_rate` reports the
+   rate **actually opened**, so the demod can never be silently
+   desynced by a bad config again.
+
+Migration 21 (`audio_devices_clamp_sample_rate`) repairs
+already-corrupted field databases (`sample_rate > 48000 → 48000`).
+
+Source:
+[`../../graywolf-modem/src/audio/mod.rs`](../../graywolf-modem/src/audio/mod.rs)
+(`MODEM_MAX_SAMPLE_RATE`, `STANDARD_SAMPLE_RATES`),
+[`../../graywolf-modem/src/audio/soundcard.rs`](../../graywolf-modem/src/audio/soundcard.rs)
+(`choose_stream_rate`, `spawn`),
+[`../../web/src/lib/sampleRate.js`](../../web/src/lib/sampleRate.js),
+[`../../pkg/configstore/migrate_audio_devices_clamp_sample_rate.go`](../../pkg/configstore/migrate_audio_devices_clamp_sample_rate.go).
+
+### 33. Capture stream format is device-advertised, never `default_input_config()`
+
+`soundcard::spawn` picks the input `SampleFormat` from the device's
+*advertised* supported configs at the chosen rate, preferring native
+`I16` (`pick_input_sample_format`). It must **never** open a capture
+stream using `device.default_input_config().sample_format()`.
+
+*Why:* On an ALSA `plughw:`/`default` PCM, cpal's
+`default_input_config()` returns **`F32`**. Opening an `F32` capture
+stream on a full-speed USB radio codec (AIOC and similar) makes cpal
+`alsa::poll()` return `POLLERR` on essentially every period -- the
+holding thread rebuilds, POLLERRs again, and loops forever (observed:
+24,344 errors in one session, RX stuck at zero with no fatal error).
+The *same hardware* streams the native `I16` config cleanly (`arecord
+-f S16_LE` and the detection probe both work). The detection probe
+(`pick_input_probe_config`) already selected I16; the runtime
+`spawn()` did not, so the probe verified a config the runtime never
+used. `pick_input_sample_format` and the probe now share
+`input_format_rank` so detection and runtime cannot drift. The
+sample-*rate* clamp (invariant 32) is necessary but independent: a
+clipping analog input or an `F32` plughw stream each kill RX on their
+own.
+
+Source:
+[`../../graywolf-modem/src/audio/soundcard.rs`](../../graywolf-modem/src/audio/soundcard.rs)
+(`pick_input_sample_format`, `input_format_rank`, `pick_input_probe_config`, `spawn`).
+
+### 34. KISS InterfaceType dispatch must be updated in two independent places
+
+Adding or changing a KISS InterfaceType (e.g. `KissTypeSerial`) requires updating the `switch ki.InterfaceType` in **both**:
+
+1. `pkg/app/wiring.go` -- `kissComponent().start` (startup dispatch)
+2. `pkg/webapi/kiss.go` -- `notifyKissManager` (hot-reload / config-write dispatch)
+
+The two switches are independent; omitting #2 means a config write calls `Stop()` on a running interface and silently leaves it stopped with no error.
+
+*Why:* There is no shared dispatch table -- each switch is a separate match on the stored `InterfaceType` string, so a new type added to one switch must be consciously added to the other.
+
+Source: [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`kissComponent`),
+[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`notifyKissManager`).

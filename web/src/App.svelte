@@ -29,6 +29,7 @@
   import About from './routes/About.svelte';
   import Preferences from './routes/Preferences.svelte';
   import MapsSettings from './routes/MapsSettings.svelte';
+  import MessagesSettings from './routes/MessagesSettings.svelte';
   import Messages from './routes/Messages.svelte';
   import Terminal from './routes/Terminal.svelte';
   import TerminalTranscripts from './routes/TerminalTranscripts.svelte';
@@ -58,6 +59,7 @@
     '/logs': Logs,
     '/preferences': Preferences,
     '/preferences/maps': MapsSettings,
+    '/preferences/messages': MessagesSettings,
     '/about': About,
   };
   const routes = (() => {
