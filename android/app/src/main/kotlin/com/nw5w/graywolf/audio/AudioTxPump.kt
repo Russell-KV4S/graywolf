@@ -32,9 +32,18 @@ class AudioTxPump(
         appContext.getSystemService(AudioManager::class.java)
     }
 
+    /** USB audio dongles enumerate as one of three AudioDeviceInfo types
+     *  depending on their descriptor (raw class-1 device, USB-Audio headset,
+     *  USB-Audio accessory). Match all three — Digirig presents as
+     *  TYPE_USB_HEADSET, AIOC as TYPE_USB_DEVICE. */
+    private fun isUsbAudioOutput(d: AudioDeviceInfo): Boolean =
+        d.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
+        d.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+        d.type == AudioDeviceInfo.TYPE_USB_ACCESSORY
+
     private val deviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
-            val usbOut = addedDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_USB_DEVICE }
+            val usbOut = addedDevices.firstOrNull { it.isSink && isUsbAudioOutput(it) }
                 ?: return
             val t = track ?: return
             t.setPreferredDevice(usbOut)
@@ -88,9 +97,10 @@ class AudioTxPump(
                 .build()
         }
 
-        // Auto-route to first USB audio output.
+        // Auto-route to first USB audio output (TYPE_USB_DEVICE / USB_HEADSET /
+        // USB_ACCESSORY — see isUsbAudioOutput).
         val usbOut = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-            .firstOrNull { it.type == AudioDeviceInfo.TYPE_USB_DEVICE }
+            .firstOrNull { isUsbAudioOutput(it) }
         if (usbOut != null) {
             t.setPreferredDevice(usbOut)
             routedDevice = usbOut.productName?.toString() ?: "USB device"
