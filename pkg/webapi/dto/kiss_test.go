@@ -93,6 +93,60 @@ func TestKissFromModel_AllowTxFromGovernor_Roundtrip(t *testing.T) {
 	}
 }
 
+// TestKissRequest_Validate_BaudRate verifies that a serial/bluetooth
+// interface with baud_rate == 0 is rejected, a valid baud_rate is
+// accepted, and non-serial types are unaffected by the baud_rate check.
+func TestKissRequest_Validate_BaudRate(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     KissRequest
+		wantErr string
+	}{
+		{
+			name: "serial with zero baud_rate is rejected",
+			req: KissRequest{
+				Type: configstore.KissTypeSerial, SerialDevice: "/dev/ttyUSB0", BaudRate: 0,
+			},
+			wantErr: "baud_rate is required for serial/bluetooth interfaces",
+		},
+		{
+			name: "serial with non-zero baud_rate is accepted",
+			req: KissRequest{
+				Type: configstore.KissTypeSerial, SerialDevice: "/dev/ttyUSB0", BaudRate: 9600,
+			},
+		},
+		{
+			name: "tcp with zero baud_rate is accepted (baud_rate irrelevant for tcp)",
+			req: KissRequest{
+				Type: configstore.KissTypeTCP, TcpPort: 8001, BaudRate: 0,
+			},
+		},
+		{
+			name: "tcp-client with zero baud_rate is accepted (baud_rate irrelevant for tcp-client)",
+			req: KissRequest{
+				Type: configstore.KissTypeTCPClient, RemoteHost: "tnc.example", RemotePort: 8001, BaudRate: 0,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.req.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err=%v, want contains %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestKissRequest_Validate_TcpClient exercises the tcp-client branch
 // of the validator: RemoteHost + RemotePort are required, reconnect
 // bounds are sanity-checked, and init <= max is enforced.
@@ -217,6 +271,78 @@ func TestKissRequest_ToModel_TcpClient(t *testing.T) {
 	if !strings.Contains(m.Name, "lora.example.com") {
 		t.Errorf("Name=%q, expected to contain remote host", m.Name)
 	}
+}
+
+// TestKissRequest_ToModel_TcpClientModeDefault verifies the Phase 4
+// contract: a tcp-client with no explicit Mode defaults to a TX-capable
+// TNC link (mode=tnc + allow_tx_from_governor), while every other
+// interface type keeps the historical modem default and an explicit
+// Mode is always preserved as-is. This is the API-boundary half of the
+// issue #128 fix; normalizeKissInterface is the store-side backstop.
+func TestKissRequest_ToModel_TcpClientModeDefault(t *testing.T) {
+	t.Run("tcp-client empty mode defaults to tnc + governor TX", func(t *testing.T) {
+		m := KissRequest{Type: "tcp-client", RemoteHost: "tnc.example", RemotePort: 8001}.ToModel()
+		if m.Mode != configstore.KissModeTnc {
+			t.Errorf("Mode=%q, want %q", m.Mode, configstore.KissModeTnc)
+		}
+		if !m.AllowTxFromGovernor {
+			t.Errorf("AllowTxFromGovernor=false, want true for a defaulted tcp-client")
+		}
+	})
+	t.Run("tcp server empty mode keeps modem default", func(t *testing.T) {
+		m := KissRequest{Type: "tcp", TcpPort: 8001}.ToModel()
+		if m.Mode != configstore.KissModeModem {
+			t.Errorf("Mode=%q, want %q", m.Mode, configstore.KissModeModem)
+		}
+		if m.AllowTxFromGovernor {
+			t.Errorf("AllowTxFromGovernor=true, want false for a modem-default tcp server")
+		}
+	})
+	t.Run("explicit modem mode on tcp-client is preserved", func(t *testing.T) {
+		m := KissRequest{
+			Type: "tcp-client", RemoteHost: "tnc.example", RemotePort: 8001,
+			Mode: configstore.KissModeModem,
+		}.ToModel()
+		if m.Mode != configstore.KissModeModem {
+			t.Errorf("Mode=%q, want explicit %q preserved", m.Mode, configstore.KissModeModem)
+		}
+		if m.AllowTxFromGovernor {
+			t.Errorf("AllowTxFromGovernor=true, want false when caller pinned modem mode")
+		}
+	})
+}
+
+// TestKissRequest_ToUpdate_TcpClientFullResourceReplace pins the
+// update-path contract: KISS PUT is full-resource replace (ToUpdate
+// feeds the same ToModel that create uses, and Store.UpdateKissInterface
+// does db.Save), so a PUT that OMITS mode re-applies the tcp-client TX
+// default exactly as create does — it does not merge against the
+// persisted row. An explicitly supplied mode is still honored verbatim.
+// This is intentional and consistent with every other KISS field
+// default (reconnect bounds, ingress rates) on PUT; the only hazardous
+// outcome (tnc+governor TX on a modem-backed channel) is independently
+// rejected by validateKissInterface, not by this layer.
+func TestKissRequest_ToUpdate_TcpClientFullResourceReplace(t *testing.T) {
+	t.Run("PUT omitting mode re-applies the tcp-client TX default", func(t *testing.T) {
+		m := KissRequest{Type: "tcp-client", RemoteHost: "tnc.example", RemotePort: 8001}.ToUpdate(7)
+		if m.ID != 7 {
+			t.Errorf("ID=%d, want 7", m.ID)
+		}
+		if m.Mode != configstore.KissModeTnc || !m.AllowTxFromGovernor {
+			t.Errorf("Mode=%q Allow=%v, want tnc+true (default re-applied on update)",
+				m.Mode, m.AllowTxFromGovernor)
+		}
+	})
+	t.Run("PUT with explicit modem keeps the interface passive", func(t *testing.T) {
+		m := KissRequest{
+			Type: "tcp-client", RemoteHost: "tnc.example", RemotePort: 8001,
+			Mode: configstore.KissModeModem,
+		}.ToUpdate(7)
+		if m.Mode != configstore.KissModeModem || m.AllowTxFromGovernor {
+			t.Errorf("Mode=%q Allow=%v, want explicit modem preserved (passive)",
+				m.Mode, m.AllowTxFromGovernor)
+		}
+	})
 }
 
 // TestKissFromModel_TcpClient_Roundtrip ensures response mapping

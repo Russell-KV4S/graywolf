@@ -4,6 +4,7 @@
   import { api } from '../lib/api.js';
   import { toasts } from '../lib/stores.js';
   import { Platform } from '../lib/platform.js';
+  import { pickDefaultSampleRate } from '../lib/sampleRate.js';
   import PageHeader from '../components/PageHeader.svelte';
   import Modal from '../components/Modal.svelte';
   import FormField from '../components/FormField.svelte';
@@ -172,7 +173,7 @@
     form = {
       name: dev.description || dev.name,
       device_path: dev.path,
-      sample_rate: String((dev.sample_rates || [48000]).at(-1)),
+      sample_rate: String(pickDefaultSampleRate(dev.sample_rates)),
       source_type: 'soundcard',
       direction: dev.is_input ? 'input' : 'output',
     };
@@ -510,7 +511,6 @@
       { value: '16000', label: '16000 Hz' },
       { value: '44100', label: '44100 Hz' },
       { value: '48000', label: '48000 Hz' },
-      { value: '96000', label: '96000 Hz' },
     ]} />
   </FormField>
   <div class="modal-actions">

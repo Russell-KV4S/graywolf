@@ -307,6 +307,15 @@ func (a *App) wireServicesInner(ctx context.Context) error {
 	a.txDispatcher = txbackend.New(txbackend.Config{
 		Metrics: a.metrics, // *metrics.Metrics satisfies the txbackend.Metrics interface.
 		Logger:  a.logger,
+		// Per-channel KISS-TNC TX counter for the dashboard (issue
+		// #132). Lazy a.kissMgr read: same closure-capture rationale
+		// as the snapshot builder above — the manager is constructed
+		// later in the wiring order but exists before any TX flows.
+		OnChannelTx: func(ch uint32) {
+			if a.kissMgr != nil {
+				a.kissMgr.RecordChannelTx(ch)
+			}
+		},
 	})
 	a.txBackendReload = make(chan struct{}, 1)
 
@@ -417,6 +426,10 @@ func (a *App) wireServicesInner(ctx context.Context) error {
 			a.metrics.SetKissClientBackoffSeconds(ifaceID, st.BackoffSeconds)
 		},
 		OnClientReconnect: a.metrics.ObserveKissClientReconnect,
+		OnSerialStateChange: func(ifaceID uint32, name string, st kiss.InterfaceStatus) {
+			a.metrics.ObserveKissSerialState(ifaceID, name, st)
+		},
+		OnSerialReconnect: a.metrics.ObserveKissSerialReconnect,
 	})
 
 	// --- AX.25 connected-mode session manager --------------------------
@@ -937,15 +950,15 @@ func (a *App) wireMessages(ctx context.Context) error {
 	var igSender messages.IGateLineSender = a.igateLineSender
 
 	svc, err := messages.NewService(messages.ServiceConfig{
-		Store:         a.msgStore,
-		ConfigStore:   a.store,
-		TxSink:        a.gov,
-		TxHookReg:     a.gov,
-		IGate:         igSender,
-		Bridge:        a.rfAvailability(),
-		StationCache:  a.stationCache,
-		Logger:        a.logger.With("component", "messages"),
-		TxChannel:     txChannel,
+		Store:        a.msgStore,
+		ConfigStore:  a.store,
+		TxSink:       a.gov,
+		TxHookReg:    a.gov,
+		IGate:        igSender,
+		Bridge:       a.rfAvailability(),
+		StationCache: a.stationCache,
+		Logger:       a.logger.With("component", "messages"),
+		TxChannel:    txChannel,
 		TxChannelResolver: func(rctx context.Context) uint32 {
 			var configured uint32
 			if mc, _ := a.store.GetMessagesConfig(rctx); mc != nil {
@@ -1712,9 +1725,27 @@ func (a *App) kissComponent() namedComponent {
 					if ki.ListenAddr == "" {
 						continue
 					}
+				case configstore.KissTypeSerial:
+					if ki.Device == "" || ki.BaudRate == 0 {
+						continue
+					}
+					a.kissMgr.StartSerial(ctx, ki.ID, kiss.SerialConfig{
+						Name:                name,
+						Device:              ki.Device,
+						BaudRate:            ki.BaudRate,
+						Mode:                mode,
+						ChannelMap:          map[uint8]uint32{0: ch},
+						ReconnectInitMs:     ki.ReconnectInitMs,
+						ReconnectMaxMs:      ki.ReconnectMaxMs,
+						Logger:              a.logger,
+						TncIngressRateHz:    ki.TncIngressRateHz,
+						TncIngressBurst:     ki.TncIngressBurst,
+						AllowTxFromGovernor: ki.AllowTxFromGovernor,
+						OnReload:            a.notifyTxBackendReload,
+					})
+					continue
 				default:
-					// serial / bluetooth not wired through the
-					// manager today; skip.
+					// bluetooth not wired yet; skip.
 					continue
 				}
 				a.kissMgr.Start(ctx, ki.ID, kiss.ServerConfig{

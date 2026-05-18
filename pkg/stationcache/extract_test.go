@@ -321,7 +321,8 @@ func TestExtractEntry_Weather(t *testing.T) {
 	assertFloat(t, "WindSpeed", wx.WindSpeed, 15.0)
 	assertEqual(t, "WindDir", wx.WindDir, 180)
 	assertFloat(t, "Pressure", wx.Pressure, 1013.2)
-	assertFloat(t, "Rain1h", wx.Rain1h, 5)
+	assertFloat(t, "Rain1h", wx.Rain1h, 0.05)   // 5 hundredths → 0.05"
+	assertFloat(t, "Rain24h", wx.Rain24h, 0.20) // 20 hundredths → 0.20"
 	assertFloat(t, "Snow24h", wx.Snow24h, 0.5)
 	assertEqual(t, "Luminosity", wx.Luminosity, 800)
 }

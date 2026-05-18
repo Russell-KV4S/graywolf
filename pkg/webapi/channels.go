@@ -8,6 +8,7 @@ import (
 
 	"github.com/chrissnell/graywolf/pkg/configstore"
 	"github.com/chrissnell/graywolf/pkg/kiss"
+	"github.com/chrissnell/graywolf/pkg/modembridge"
 	"github.com/chrissnell/graywolf/pkg/webapi/dto"
 	"github.com/chrissnell/graywolf/pkg/webtypes"
 	"gorm.io/gorm"
@@ -235,9 +236,11 @@ func computeChannelBacking(
 	// rejecting zero; the pointer check is the authoritative signal.
 	hasModem := ch.InputDeviceID != nil
 	modem := dto.ChannelModemBacking{Active: hasModem && modemRunning}
-	if !hasModem {
-		modem.Reason = "no audio input device"
-	} else if !modemRunning {
+	// A channel with no audio input device has no modem at all; the
+	// modem sub-object is dead state. Leaving Reason empty stops it
+	// leaking through the channel-picker tooltip on KISS-only and
+	// unbound channels (the summary already conveys the real state).
+	if hasModem && !modemRunning {
 		modem.Reason = "modem subprocess not running"
 	}
 
@@ -590,16 +593,31 @@ func (s *Server) getChannelStats(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "invalid channel id")
 		return
 	}
+	if s.bridge != nil {
+		if stats, ok := s.bridge.GetChannelStats(id); ok {
+			writeJSON(w, http.StatusOK, stats)
+			return
+		}
+	}
+	// KISS-TNC-backed channels have no Rust modem feeding the bridge
+	// cache; surface the KISS manager's per-channel counters instead
+	// so the dashboard and this endpoint stop reporting a stuck zero
+	// (issue #132). RxBadFCS is omitted (always 0 for a hardware TNC).
+	if s.kissManager != nil {
+		if ks, ok := s.kissManager.ChannelStats(id); ok {
+			writeJSON(w, http.StatusOK, &modembridge.ChannelStats{
+				Channel:  id,
+				RxFrames: ks.RxFrames,
+				TxFrames: ks.TxFrames,
+			})
+			return
+		}
+	}
 	if s.bridge == nil {
 		writeJSON(w, http.StatusServiceUnavailable, webtypes.ErrorResponse{Error: "bridge not available"})
 		return
 	}
-	stats, ok := s.bridge.GetChannelStats(id)
-	if !ok {
-		notFound(w)
-		return
-	}
-	writeJSON(w, http.StatusOK, stats)
+	notFound(w)
 }
 
 // manualPtt keys or unkeys the radio on the given channel for SPA testing.
