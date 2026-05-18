@@ -483,6 +483,18 @@ fn run_demod(
                             }
                         }
                     }
+                    Some(ipc_message::Payload::SetDeviceGain(sg)) => {
+                        // Live gain from the operator slider. Without this
+                        // arm it was a silent no-op on Android (gain frozen
+                        // at the modemStart boot value). Parity with the JNI
+                        // modemSetGainDb path; single global GAIN_Q15 so
+                        // device_id is informational.
+                        audio::set_gain_db(sg.gain_db);
+                        info!(
+                            "gain set to {:.1} dB (device_id={})",
+                            sg.gain_db, sg.device_id
+                        );
+                    }
                     _ => {}
                 }
             }
