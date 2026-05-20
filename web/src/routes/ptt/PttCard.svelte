@@ -40,52 +40,48 @@
 <div class="device-card">
   <div class="device-header">
     <span class="device-name">{channelName || `Channel ${item.channel_id}`}</span>
-    <div class="device-badges">
-      <Badge variant={item.method === 'none' ? 'default' : 'success'}>
-        {methodLabel}
-      </Badge>
-    </div>
+    <Badge variant={item.method === 'none' ? 'default' : 'success'}>
+      {methodLabel}
+    </Badge>
   </div>
-  <div class="device-details">
+
+  <dl class="device-details">
     {#if item.method !== 'none'}
-      <div class="detail-row">
-        <span class="detail-label">Device</span>
-        <span class="detail-value" title={item.device_path}>{truncatePath(item.device_path)}</span>
-      </div>
+      <dt>Device</dt>
+      <dd title={item.device_path}>{truncatePath(item.device_path)}</dd>
     {/if}
     {#if item.method === 'cm108'}
-      <div class="detail-row">
-        <span class="detail-label">GPIO Pin</span>
-        <span class="detail-value">GPIO {item.gpio_pin} (pin {item.gpio_pin + 10})</span>
-      </div>
+      <dt>GPIO Pin</dt>
+      <dd>GPIO {item.gpio_pin} (pin {item.gpio_pin + 10})</dd>
     {/if}
     {#if item.method === 'gpio'}
-      <div class="detail-row">
-        <span class="detail-label">GPIO Line</span>
-        <span class="detail-value">Line {item.gpio_line ?? 0}</span>
-      </div>
+      <dt>GPIO Line</dt>
+      <dd>Line {item.gpio_line ?? 0}</dd>
     {/if}
     {#if item.method === 'none'}
-      <div class="detail-row">
-        <span class="detail-label">Status</span>
-        <span class="detail-value muted">No PTT method set</span>
-      </div>
+      <dt>Status</dt>
+      <dd class="muted">No PTT method set</dd>
     {/if}
-  </div>
-  <div class="device-actions">
-    <Button variant="ghost" onclick={() => onChangeMethod(item)}>Change Method ›</Button>
-    <Button variant="ghost" onclick={() => onChangeDevice(item)}>Change Device ›</Button>
-    <Button variant="danger" onclick={() => onDelete(item)}>Delete</Button>
-  </div>
-  <div class="device-footer">
-    <Button disabled={testing || item.method === 'none'} onclick={testPtt}>
-      {testing ? 'Keying…' : 'Test PTT (1s)'}
+  </dl>
+
+  <div class="device-test">
+    <Button
+      variant="primary"
+      disabled={testing || item.method === 'none'}
+      onclick={testPtt}
+    >
+      {testing ? 'Keying…' : 'Test PTT (1 sec)'}
     </Button>
+  </div>
+
+  <div class="device-actions">
+    <Button size="sm" onclick={() => onChangeMethod(item)}>Change Method</Button>
+    <Button size="sm" onclick={() => onChangeDevice(item)}>Change Device</Button>
+    <Button size="sm" variant="danger" onclick={() => onDelete(item)}>Delete</Button>
   </div>
 </div>
 
 <style>
-  /* Card styles copied verbatim from Ptt.svelte to preserve visual parity. */
   .device-card {
     display: flex;
     flex-direction: column;
@@ -94,12 +90,15 @@
     border: 1px solid var(--border-color);
     border-radius: var(--radius);
   }
+
   .device-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 12px;
+    padding-bottom: 12px;
     margin-bottom: 12px;
-    gap: 8px;
+    border-bottom: 1px solid var(--border-color);
   }
   .device-name {
     font-weight: 600;
@@ -109,28 +108,21 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .device-badges {
-    display: flex;
-    gap: 4px;
-    flex-shrink: 0;
-  }
+
   .device-details {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    flex: 1;
-  }
-  .detail-row {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    column-gap: 16px;
+    row-gap: 6px;
+    margin: 0 0 14px;
     font-size: 13px;
-    gap: 12px;
   }
-  .detail-label {
+  .device-details dt {
     color: var(--text-secondary);
-    flex-shrink: 0;
+    font-weight: 500;
   }
-  .detail-value {
+  .device-details dd {
+    margin: 0;
     font-family: var(--font-mono);
     color: var(--text-primary);
     text-align: right;
@@ -139,24 +131,26 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .detail-value.muted {
+  .device-details dd.muted {
     color: var(--text-muted);
     font-style: italic;
     font-family: inherit;
+    text-align: left;
   }
+
+  .device-test {
+    margin-bottom: 12px;
+  }
+  .device-test :global(.btn) {
+    width: 100%;
+    justify-content: center;
+  }
+
   .device-actions {
     display: flex;
     gap: 8px;
-    justify-content: flex-end;
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border-color);
   }
-  .device-footer {
-    display: flex;
-    justify-content: flex-end;
-    margin-top: 6px;
-    padding-top: 6px;
-    border-top: 1px solid var(--border-color);
+  .device-actions :global(.btn) {
+    flex: 1;
   }
 </style>
