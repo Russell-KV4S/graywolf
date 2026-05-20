@@ -1228,6 +1228,12 @@ func (a *App) wireHTTP(ctx context.Context) error {
 	apiSrv.SetAX25Manager(a.ax25Mgr)
 	apiSrv.SetPacketLog(a.plog)
 
+	// Bluetooth bonded-devices source. Android returns a live adapter
+	// backed by the platformsvc client (see btsource_android.go);
+	// desktop builds return nil so GET /api/kiss/bonded-bt-devices
+	// responds 501 Not Implemented (see btsource_default.go).
+	apiSrv.SetBtSource(a.btSourceForWebapi())
+
 	// Actions service runs the listener-addressee reload + test-fire
 	// path the REST handlers reach for. Skipped when wireActions
 	// declined to construct one (e.g. headless RF-only mode without a
