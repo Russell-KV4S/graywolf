@@ -45,6 +45,48 @@
   let portValid = $derived(Number.isInteger(Number(rigctldPort)) && Number(rigctldPort) >= 1 && Number(rigctldPort) <= 65535);
   let canSave = $derived(!!selected && (!isRigctld || (hostValid && portValid)));
 
+  let testState = $state({ kind: 'idle' });
+
+  async function testConnection() {
+    if (testState.kind === 'testing') return;
+    if (!hostValid || !portValid) return;
+    testState = { kind: 'testing' };
+    try {
+      const res = await fetch('/api/ptt/test-rigctld', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: rigctldHost.trim(), port: Number(rigctldPort) }),
+      });
+      if (!res.ok) {
+        let msg = res.statusText || `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body?.message) msg = body.message;
+          else if (body?.error) msg = body.error;
+        } catch { /* non-JSON body */ }
+        testState = { kind: 'error', message: msg };
+        return;
+      }
+      const body = await res.json();
+      if (body?.ok) {
+        const latency = Number.isFinite(body.latency_ms) ? body.latency_ms : 0;
+        testState = { kind: 'success', latencyMs: latency };
+      } else {
+        testState = { kind: 'error', message: body?.message || 'rigctld reported failure' };
+      }
+    } catch (err) {
+      testState = { kind: 'error', message: err?.message || 'Network error' };
+    }
+  }
+
+  // Reset test result when the rigctld fields change.
+  $effect(() => {
+    void rigctldHost;
+    void rigctldPort;
+    if (testState.kind !== 'idle' && testState.kind !== 'testing') testState = { kind: 'idle' };
+  });
+
   function handleSaveAndNext() {
     if (!canSave) return;
     if (isRigctld) {
@@ -69,6 +111,18 @@
       <FormField label="rigctld Port" id="dlg-rigctld-port">
         <Input id="dlg-rigctld-port" type="number" min={1} max={65535} bind:value={rigctldPort} />
       </FormField>
+      <div class="rigctld-test-row">
+        <Button onclick={testConnection} disabled={!hostValid || !portValid || testState.kind === 'testing'}>
+          {#if testState.kind === 'testing'}Testing…{:else}Test Connection{/if}
+        </Button>
+      </div>
+      <div class="rigctld-result" role="status" aria-live="polite">
+        {#if testState.kind === 'success'}
+          <span class="rigctld-badge ok">Success: Connected ({testState.latencyMs} ms)</span>
+        {:else if testState.kind === 'error'}
+          <span class="rigctld-badge err">Failed: {testState.message}</span>
+        {/if}
+      </div>
     </div>
   {/if}
   <div class="modal-actions">
@@ -83,4 +137,9 @@
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
   .rigctld-extras { display: flex; gap: 8px; margin-top: 12px; }
   .rigctld-extras :global(.form-field) { flex: 1; }
+  .rigctld-test-row { display: flex; justify-content: flex-end; margin-top: 8px; }
+  .rigctld-result { margin-top: 6px; font-size: 13px; }
+  .rigctld-badge { padding: 2px 8px; border-radius: 4px; }
+  .rigctld-badge.ok { background: #ecfdf5; color: #047857; }
+  .rigctld-badge.err { background: #fef2f2; color: #b91c1c; }
 </style>
