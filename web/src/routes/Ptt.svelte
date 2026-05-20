@@ -161,13 +161,18 @@
     if (!method) return false;
     const w = method.wire.method;
     if (w === 'none') return false;
+    if (w === 'rigctld') return false;
     if (w === 'android' && method.wire.ppt_method === 4) return false;
     return true;
   }
 
-  function handleMethodSaveAndNext(method) {
+  function handleMethodSaveAndNext(method, extras) {
     dialogMethodChosen = method;
     dialogMethodOpen = false;
+    if (extras?.rigctld) {
+      void persistFromDialogs({ device: { path: `${extras.rigctld.host}:${extras.rigctld.port}` } });
+      return;
+    }
     if (needsDevice(method)) {
       dialogDeviceOpen = true;
     } else {
@@ -363,6 +368,7 @@
   bind:open={dialogMethodOpen}
   methods={methodOptionsForPlatform}
   initialWireKey={dialogMethodChosen ? methodKey(dialogMethodChosen) : null}
+  initialDevicePath={dialogContext?.item?.device_path || null}
   onSaveAndNext={handleMethodSaveAndNext}
   onCancel={() => { dialogMethodOpen = false; dialogContext = null; }}
 />
