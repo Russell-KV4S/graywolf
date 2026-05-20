@@ -1742,10 +1742,33 @@ func (a *App) kissComponent() namedComponent {
 						TncIngressBurst:     ki.TncIngressBurst,
 						AllowTxFromGovernor: ki.AllowTxFromGovernor,
 						OnReload:            a.notifyTxBackendReload,
+						OpenFunc:            a.kissSerialOpenFunc(),
+					})
+					continue
+				case configstore.KissTypeBluetooth:
+					// Bluetooth RFCOMM has no baud and the SPP TNC always
+					// owns the modem, so force BaudRate=0 and Mode=ModeTnc
+					// regardless of DTO input. The MAC lives in ki.Device.
+					if ki.Device == "" {
+						continue
+					}
+					a.kissMgr.StartSerial(ctx, ki.ID, kiss.SerialConfig{
+						Name:                name,
+						Device:              ki.Device,
+						BaudRate:            0,
+						Mode:                kiss.ModeTnc,
+						ChannelMap:          map[uint8]uint32{0: ch},
+						ReconnectInitMs:     ki.ReconnectInitMs,
+						ReconnectMaxMs:      ki.ReconnectMaxMs,
+						Logger:              a.logger,
+						TncIngressRateHz:    ki.TncIngressRateHz,
+						TncIngressBurst:     ki.TncIngressBurst,
+						AllowTxFromGovernor: ki.AllowTxFromGovernor,
+						OnReload:            a.notifyTxBackendReload,
+						OpenFunc:            a.kissSerialOpenFunc(),
 					})
 					continue
 				default:
-					// bluetooth not wired yet; skip.
 					continue
 				}
 				a.kissMgr.Start(ctx, ki.ID, kiss.ServerConfig{
