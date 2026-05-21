@@ -106,10 +106,16 @@ jobs:
           # hidapi crate's bundled-source cc-rs compile needs libudev.h.
           # libudev-dev:<arch> installs the header at /usr/include/libudev.h
           # (Multi-Arch: same), but the cross-compiler's sysroot doesn't
-          # include /usr/include by default. Add it via cc-rs's
-          # CFLAGS_<triple> env (underscores in the triple).
-          CFLAGS_aarch64_unknown_linux_gnu: '-I/usr/include'
-          CFLAGS_arm_unknown_linux_gnueabihf: '-I/usr/include'
+          # include /usr/include by default.
+          #
+          # Use -idirafter (not -I): -I would put /usr/include AHEAD of
+          # the cross sysroot's headers and pull in amd64-arch stdio.h
+          # bits like bits/libc-header-start.h, which then breaks the
+          # compile. -idirafter only consults /usr/include as a fallback,
+          # so arch-specific headers stay sourced from the sysroot and
+          # only the arch-independent libudev.h falls through.
+          CFLAGS_aarch64_unknown_linux_gnu: '-idirafter /usr/include'
+          CFLAGS_arm_unknown_linux_gnueabihf: '-idirafter /usr/include'
         run: cross build --release --target ${{ matrix.target }} --bin graywolf-modem
 
       - name: Build with cargo
