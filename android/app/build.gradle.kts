@@ -8,12 +8,12 @@ plugins {
 
 android {
     namespace = "com.nw5w.graywolf"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.nw5w.graywolf"
         minSdk = 28
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "0.0.1-pocb"
     }
