@@ -117,6 +117,50 @@ object UsbPttAdapter : UsbPttCallback {
         }
     }
 
+    /**
+     * System-broadcast hotplug watcher. Receives USB_DEVICE_ATTACHED whenever
+     * a USB device is plugged in (regardless of whether the app is foreground)
+     * and USB_DEVICE_DETACHED on unplug. ATTACHED → classify; if recognized,
+     * request permission (if missing) or tryOpen (if granted). DETACHED →
+     * release any handle whose deviceName matches the unplugged device so a
+     * subsequent re-attach gets a fresh open instead of inheriting a stale
+     * UsbDeviceConnection.
+     *
+     * This closes the gap onResume() can't cover: when MainActivity is already
+     * resumed (PTT page visible) and the operator swaps adapters, onResume
+     * never re-fires, so the swap-in device would otherwise sit unrecognized.
+     */
+    private val hotPlugReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            val device: UsbDevice? = if (Build.VERSION.SDK_INT >= 33) {
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            }
+            if (device == null) {
+                Log.w(TAG, "hotplug broadcast with null device (action=${intent.action})")
+                return
+            }
+            when (intent.action) {
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    val role = classify(device)
+                    Log.i(TAG, "hotplug ATTACHED ${device.deviceName} vid=0x${"%04X".format(device.vendorId)} pid=0x${"%04X".format(device.productId)} role=$role")
+                    if (role == DeviceRole.UNKNOWN) return
+                    if (usbManager.hasPermission(device)) {
+                        tryOpen(device)
+                    } else {
+                        requestPermission(device)
+                    }
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    Log.i(TAG, "hotplug DETACHED ${device.deviceName}")
+                    closeForDevice(device)
+                }
+            }
+        }
+    }
+
     fun init(ctx: Context) {
         if (this::appContext.isInitialized) return
         appContext = ctx.applicationContext
@@ -127,12 +171,19 @@ object UsbPttAdapter : UsbPttCallback {
 
     private fun registerReceiverIfNeeded() {
         if (receiverRegistered) return
-        val filter = IntentFilter(ACTION_USB_PERMISSION)
+        val permFilter = IntentFilter(ACTION_USB_PERMISSION)
+        val hotPlugFilter = IntentFilter().apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
         if (Build.VERSION.SDK_INT >= 33) {
-            appContext.registerReceiver(permissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            appContext.registerReceiver(permissionReceiver, permFilter, Context.RECEIVER_NOT_EXPORTED)
+            appContext.registerReceiver(hotPlugReceiver, hotPlugFilter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
-            appContext.registerReceiver(permissionReceiver, filter)
+            appContext.registerReceiver(permissionReceiver, permFilter)
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            appContext.registerReceiver(hotPlugReceiver, hotPlugFilter)
         }
         receiverRegistered = true
     }
@@ -149,7 +200,8 @@ object UsbPttAdapter : UsbPttCallback {
      * what lets `requestPermission` surface its system dialog; calling this
      * from a backgrounded Service silently no-ops the prompt.
      *
-     * No hot-plug watcher; phase 5.
+     * Hot-plug is handled separately by hotPlugReceiver (USB_DEVICE_ATTACHED
+     * / DETACHED), so this is primarily an at-startup / on-resume sweep.
      */
     fun enumerate() {
         check(this::appContext.isInitialized) { "init(context) must be called first" }
@@ -231,6 +283,48 @@ object UsbPttAdapter : UsbPttCallback {
                 Log.i(TAG, "closeAll: aioc released ${h.device.deviceName}")
             }
             aioc = null
+        }
+    }
+
+    /**
+     * Release any open handle whose deviceName matches the supplied device,
+     * leaving the other transports untouched. Called from the DETACHED
+     * hot-plug broadcast so a re-attach gets a fresh open instead of using
+     * a stale UsbDeviceConnection backed by an unplugged device.
+     */
+    private fun closeForDevice(dev: UsbDevice) {
+        synchronized(cp2102nLock) {
+            cp2102n?.let { h ->
+                if (h.device.deviceName == dev.deviceName) {
+                    try { h.port.close() } catch (t: Throwable) { Log.w(TAG, "cp2102n.close on detach: $t") }
+                    Log.i(TAG, "closeForDevice: cp2102n released ${dev.deviceName}")
+                    cp2102n = null
+                }
+            }
+        }
+        synchronized(cm108Lock) {
+            cm108?.let { h ->
+                if (h.device.deviceName == dev.deviceName) {
+                    try {
+                        val iface = (0 until h.device.interfaceCount)
+                            .map { h.device.getInterface(it) }
+                            .firstOrNull { it.id == h.hidIface }
+                        if (iface != null) h.connection.releaseInterface(iface)
+                        h.connection.close()
+                    } catch (t: Throwable) { Log.w(TAG, "cm108.close on detach: $t") }
+                    Log.i(TAG, "closeForDevice: cm108 released ${dev.deviceName}")
+                    cm108 = null
+                }
+            }
+        }
+        synchronized(aiocLock) {
+            aioc?.let { h ->
+                if (h.device.deviceName == dev.deviceName) {
+                    try { h.port.close() } catch (t: Throwable) { Log.w(TAG, "aioc.close on detach: $t") }
+                    Log.i(TAG, "closeForDevice: aioc released ${dev.deviceName}")
+                    aioc = null
+                }
+            }
         }
     }
 
