@@ -1,6 +1,23 @@
 import com.google.protobuf.gradle.proto
 import java.util.Base64
 
+// Read version metadata from the repo-root VERSION file so Android stays
+// in sync with `make bump-point`/`bump-minor`. Format: "X.Y.Z" with an
+// optional "-pre" suffix that we drop for versionCode (Play needs a pure
+// integer) but keep for versionName.
+val graywolfVersionName: String = run {
+    val versionFile = rootProject.projectDir.parentFile.resolve("VERSION")
+    require(versionFile.exists()) { "VERSION file not found at ${versionFile.absolutePath}" }
+    versionFile.readText().trim()
+}
+val graywolfVersionCode: Int = run {
+    val core = graywolfVersionName.substringBefore('-')
+    val parts = core.split(".")
+    require(parts.size == 3) { "VERSION must be X.Y.Z; got '$graywolfVersionName'" }
+    val (major, minor, patch) = parts.map { it.toInt() }
+    major * 1_000_000 + minor * 10_000 + patch * 100
+}
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -15,8 +32,8 @@ android {
         applicationId = "com.nw5w.graywolf"
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.0.1-pocb"
+        versionCode = graywolfVersionCode
+        versionName = graywolfVersionName
     }
 
     sourceSets {
