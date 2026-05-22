@@ -289,6 +289,7 @@ func (a *App) wireServicesInner(ctx context.Context) error {
 		}
 		if chs, err := a.store.ListChannels(ctx); err == nil && len(chs) == 0 {
 			ch := &configstore.Channel{
+				ID:        2,
 				Name:      "VHF APRS",
 				ModemType: "afsk",
 				BitRate:   1200,
