@@ -301,6 +301,25 @@ func (a *App) wireServicesInner(ctx context.Context) error {
 				a.logger.Info("demo: seeded channel", "id", ch.ID, "name", ch.Name)
 			}
 		}
+		if bcns, err := a.store.ListBeacons(ctx); err == nil && len(bcns) == 0 {
+			b := &configstore.Beacon{
+				Type:        "position",
+				Channel:     2,
+				Callsign:    "NW5W-8",
+				Enabled:     true,
+				UseGps:      false,
+				Latitude:    40.47624,
+				Longitude:   -111.84587,
+				SymbolTable: "/",
+				Symbol:      "-",
+				Comment:     "Graywolf demo station",
+			}
+			if err := a.store.CreateBeacon(ctx, b); err != nil {
+				a.logger.Warn("demo: seed beacon failed", "err", err)
+			} else {
+				a.logger.Info("demo: seeded fixed-position beacon", "id", b.ID, "callsign", b.Callsign)
+			}
+		}
 	}
 
 	if plCfg != nil && plCfg.Enabled && a.cfg.HistoryDBPath != "" {
