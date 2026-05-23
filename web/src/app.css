@@ -112,6 +112,15 @@ input, select, textarea, button {
   line-height: 1;
 }
 
+/* chonky-ui's Select dropdown (bits-ui [data-select-content]) sets no
+   max-height, so a long option list (e.g. SymbolPicker's 37-entry
+   overlay-character menu) grows past the viewport. Cap it at roughly
+   seven rows and scroll the rest. */
+[data-select-content] {
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
