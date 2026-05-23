@@ -630,6 +630,27 @@ cannot outlive the app, because no single mechanism covers both cases.
   detection, stdout carries readiness; different fds, no conflict. The modem
   cdylib is in-process JNI, so it always dies with the app -- no separate
   handling needed.
+- **Single backend, serialized startup:** the platformsvc socket
+  (`<cacheDir>/platform.sock`, Linux abstract namespace) is effectively the
+  station's single-instance lock. A new instance must not start its backend
+  while a previous one is still tearing down. `MainActivity.waitForPredecessorThenStart`
+  probes the socket on a background thread (a live predecessor still accepts a
+  `LocalSocket` connect) and shows a "waiting" page until it is free, then starts
+  the foreground service. `PlatformServer.start()` additionally retries the bind
+  for `BIND_WAIT_MS` and, on timeout, throws `BindContendedException` so
+  `GraywolfService.onCreate` `stopSelf()`s cleanly -- it never lets
+  `Address already in use` crash the process, because that crash relaunches and
+  re-collides, a loop that re-enumerates the USB bus fast enough to wedge devices
+  off a powered hub.
+- **No blocking HAL calls on the main thread in `onCreate`:** `AudioTxPump.start()`
+  (AudioTrack build + `setPreferredDevice`) and `UsbPttAdapter.enumerate()` (USB
+  device opens) are synchronous HAL/binder calls that block for seconds when a USB
+  audio dongle is wedged, ANR'ing the process within ~5s. `GraywolfService.onCreate`
+  runs them on a `graywolf-io-init` worker thread (the modem TX/PTT callbacks are
+  installed first and tolerate the brief gap); `onDestroy` joins that worker
+  (bounded) before tearing the same resources down. The cheap `UsbPttAdapter.init()`
+  stays on the main thread so `MainActivity.onResume`'s `enumerate()` never races an
+  uninitialized adapter.
 
 Source: [`../../android/app/src/main/kotlin/com/nw5w/graywolf/GraywolfService.kt`](../../android/app/src/main/kotlin/com/nw5w/graywolf/GraywolfService.kt),
 [`../../cmd/graywolf/parentwatch.go`](../../cmd/graywolf/parentwatch.go),
