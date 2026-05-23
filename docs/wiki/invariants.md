@@ -607,6 +607,19 @@ cannot outlive the app, because no single mechanism covers both cases.
   **unset** (default false) so `onTaskRemoved` is delivered; do NOT set
   `android:stopWithTask="true"` -- the implicit stop is historically flaky
   across OEMs and skips the deterministic log line.
+  - **USB auto-relaunch suppression:** `MainActivity` declares a
+    `USB_DEVICE_ATTACHED` intent-filter so plugging in a radio launches the app.
+    Tearing down on swipe releases the radio's USB interfaces, which physically
+    re-enumerate (~2s later, new bus device numbers) -- indistinguishable from a
+    fresh plug-in, so Android would auto-relaunch and revive the station the
+    operator just dismissed. To prevent that, `onTaskRemoved` records a
+    deliberate-stop timestamp (`MainActivity.markUserStopped`, in `graywolf-prefs`)
+    and `MainActivity.onCreate` `finish()`es immediately if the launch action is
+    `USB_DEVICE_ATTACHED` within `STOP_RELAUNCH_SUPPRESS_WINDOW_MS` (15s) of that
+    stop. A launcher tap (action `MAIN`) or a genuine re-plug after the window is
+    NOT suppressed; the marker is cleared in `startEverything()`. The window
+    (not a one-shot) is required because re-enumeration fires one attach per
+    interface (e.g. CP2102N serial + C-Media audio).
 - **Layer 2 (hard-kill safety net):** `watchParentDeath` in
   `cmd/graywolf/parentwatch.go` cancels the app context when the parent dies,
   via two triggers -- stdin EOF (the JVM holds the write end of the child's

@@ -338,6 +338,11 @@ class GraywolfService : Service() {
     // also exactly what hot-swap recovery needs.
     override fun onTaskRemoved(rootIntent: Intent?) {
         Log.i(TAG, "onTaskRemoved: task swiped away, stopping service")
+        // Mark this as a deliberate stop so the USB_DEVICE_ATTACHED relaunch
+        // caused by our own teardown releasing the radio (the interfaces
+        // re-enumerate ~2s later) is suppressed in MainActivity rather than
+        // silently reviving the station the operator just dismissed.
+        MainActivity.markUserStopped(this)
         stopSelf()
         super.onTaskRemoved(rootIntent)
     }
