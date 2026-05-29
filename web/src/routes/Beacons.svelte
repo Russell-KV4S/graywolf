@@ -94,6 +94,7 @@
     channel: '', callsign: '', callsign_override: false,
     destination: 'APGRWO', path: 'WIDE1-1,WIDE2-1',
     symbol_table: '/', symbol: '-', overlay: '',
+    position_format: 'compressed', ambiguity: 0,
     pos_source: 'gps', latitude: '', longitude: '', alt_ft: '',
     comment: '', interval: '600', send_to_aprs_is: false, enabled: true,
   });
@@ -135,6 +136,16 @@
     !!editing && form.enabled === false,
   );
   let saveBlocked = $derived(!!txBlock && !txBlockAllowsSave);
+  // The format radio + ambiguity sub-block apply only to types that
+  // carry an APRS101 ch 6/9/10 position field. Object and custom
+  // beacons hide the whole section. The Beacons UI today only exposes
+  // 'position' and 'object', so the practical gate is "show on position".
+  let showFormat = $derived(form.type === 'position');
+  let showAmbiguity = $derived(
+    showFormat &&
+    (form.position_format === 'uncompressed' || form.position_format === 'mic_e'),
+  );
+  let useAmbiguity = $derived(form.ambiguity > 0);
   const TX_CALLOUT_ID = 'bcn-tx-callout';
   let calloutEl = $state(null);
   // Scroll the callout into view on modal open when it's already
@@ -271,6 +282,8 @@
     form.symbol_table = '/';
     form.symbol = '-';
     form.overlay = '';
+    form.position_format = 'compressed';
+    form.ambiguity = 0;
     form.pos_source = 'gps';
     form.latitude = '';
     form.longitude = '';
@@ -303,6 +316,8 @@
       symbol_table: row.symbol_table || '/',
       symbol: row.symbol || '-',
       overlay: row.overlay || '',
+      position_format: row.position_format || 'compressed',
+      ambiguity: row.ambiguity ?? 0,
       pos_source: row.use_gps ? 'gps' : 'fixed',
       latitude: row.latitude != null ? String(row.latitude) : '',
       longitude: row.longitude != null ? String(row.longitude) : '',
@@ -693,10 +708,17 @@
           </label>
         </div>
       </FormField>
-      <FormField label="Destination" id="bcn-dest"
-        hint="APRS tocall identifying the originating software. Leave as APGRWO unless you know you need to change it.">
-        <Input id="bcn-dest" bind:value={form.destination} placeholder="APGRWO" />
-      </FormField>
+      {#if showFormat && form.position_format === 'mic_e'}
+        <FormField label="Destination" id="bcn-dest"
+          hint="Auto-computed from latitude for Mic-E. Not editable.">
+          <div class="bcn-dest-autocomp">Auto-computed for Mic-E</div>
+        </FormField>
+      {:else}
+        <FormField label="Destination" id="bcn-dest"
+          hint="APRS tocall identifying the originating software. Leave as APGRWO unless you know you need to change it.">
+          <Input id="bcn-dest" bind:value={form.destination} placeholder="APGRWO" />
+        </FormField>
+      {/if}
       <FormField label="Path" id="bcn-path">
         <Input id="bcn-path" bind:value={form.path} placeholder="WIDE1-1,WIDE2-1" />
       </FormField>
@@ -718,6 +740,36 @@
           <Button onclick={() => pickerOpen = true}>Choose&hellip;</Button>
         </div>
       </FormField>
+      {#if showFormat}
+        <FormField label="Position report format" id="bcn-pos-fmt"
+          hint="How this beacon's position is encoded on the air. Compressed is shortest and most precise. Uncompressed and Mic-E can carry deliberately coarse positions via ambiguity.">
+          <RadioGroup bind:value={form.position_format}>
+            <div class="pos-source-row">
+              <Radio value="compressed" label="Compressed (highest precision)" />
+              <Radio value="uncompressed" label="Uncompressed (standard precision)" />
+              <Radio value="mic_e" label="Mic-E (most efficient)" />
+            </div>
+          </RadioGroup>
+        </FormField>
+        {#if showAmbiguity}
+          <FormField label="Position ambiguity" id="bcn-ambiguity"
+            hint="Blank trailing digits so the position is published deliberately coarsely. Useful for QTH privacy or group meetups.">
+            <label class="callsign-override-label" for="bcn-amb-toggle">
+              <Checkbox id="bcn-amb-toggle" checked={useAmbiguity}
+                onCheckedChange={(v) => { form.ambiguity = v ? Math.max(1, form.ambiguity) : 0; }} />
+              <span>Use position ambiguity</span>
+            </label>
+            {#if useAmbiguity}
+              <select bind:value={form.ambiguity} class="bcn-amb-select">
+                <option value={1}>Block ({altUnit === 'feet' ? '~600 ft' : '~185 m'})</option>
+                <option value={2}>Neighborhood ({altUnit === 'feet' ? '~1 mi' : '~1.85 km'})</option>
+                <option value={3}>Town ({altUnit === 'feet' ? '~11 mi' : '~18.5 km'})</option>
+                <option value={4}>Region ({altUnit === 'feet' ? '~69 mi' : '~111 km'})</option>
+              </select>
+            {/if}
+          </FormField>
+        {/if}
+      {/if}
       <FormField label="Comment" id="bcn-comment"
         hint={"Tip: use {{version}} to insert the running graywolf version."}>
         <Input id="bcn-comment" bind:value={form.comment} placeholder={defaultComment} />
@@ -1023,6 +1075,25 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+  .bcn-amb-select {
+    margin-top: 0.5rem;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background: var(--color-bg);
+    color: var(--color-text);
+    width: 100%;
+    max-width: 360px;
+    font: inherit;
+  }
+  .bcn-dest-autocomp {
+    padding: 0.4rem 0.6rem;
+    background: var(--color-surface);
+    border: 1px dashed var(--color-border);
+    border-radius: 4px;
+    color: var(--color-text-muted);
+    font-style: italic;
   }
   .type-hint {
     display: flex;
