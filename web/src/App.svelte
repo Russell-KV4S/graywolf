@@ -76,11 +76,13 @@
     return r;
   })();
 
-  let currentPath = $state('');
-  $effect(() => {
-    const unsub = location.subscribe((v) => { currentPath = v; });
-    return unsub;
-  });
+  // Derive the path straight from the router's own `location` store so it
+  // stays in lockstep with the rendered route. A hand-rolled subscription
+  // into a separate $state copy can lag a tick behind <Router>, and when
+  // leaving a full-bleed route (/map, /messages) that stale value kept
+  // `full-bleed` (padding:0) on the next page, rendering it flush against
+  // the sidebar with no gap.
+  let currentPath = $derived($location);
 
   let isLoginPage = $derived(currentPath === '/login' && Platform.kind !== 'android');
 
@@ -96,6 +98,7 @@
 
   let version = $state('');
   let authChecked = $state(false);
+  let authValid = $state(false);
 
   $effect(() => {
     // Probe auth state before rendering protected routes.
@@ -120,11 +123,12 @@
         // Fetch version (public endpoint) in parallel with auth probe.
         fetch('/api/version').then(r => r.json()).then(d => { version = d.version; }).catch(() => {});
         return fetch('/api/status', { credentials: 'same-origin' }).then(r => {
+          authValid = r.status !== 401;
           if (r.status === 401 && !isAndroid) window.location.hash = '#/login';
           authChecked = true;
         });
       })
-      .catch(() => { authChecked = true; });
+      .catch(() => { authChecked = true; authValid = false; });
   });
 
   // Start the messages transport once we know the user is authenticated.
@@ -133,7 +137,7 @@
   // every 5 s is cheap enough to be always-on; SSE is opt-in via `?sse=1`.
   let messagesTransportStarted = false;
   $effect(() => {
-    if (authChecked && !isLoginPage && !messagesTransportStarted) {
+    if (authChecked && authValid && currentPath !== '' && !isLoginPage && !messagesTransportStarted) {
       messagesTransportStarted = true;
       startMessagesTransport();
       // Pull release notes the user hasn't acknowledged yet. App.svelte

@@ -826,6 +826,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/kiss/available-serial-ports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List available host serial ports */
+        get: operations["listAvailableKissSerialPorts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/kiss/available-usb-serial-devices": {
         parameters: {
             query?: never;
@@ -874,6 +891,23 @@ export interface paths {
         post?: never;
         /** Delete KISS interface */
         delete: operations["deleteKiss"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/kiss/{id}/enabled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Enable or disable a KISS interface */
+        put: operations["setKissEnabled"];
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2592,6 +2626,9 @@ export interface components {
             priority?: number;
             type?: string;
         };
+        "dto.KissEnabledRequest": {
+            enabled?: boolean;
+        };
         "dto.KissRequest": {
             /**
              * @description AllowTxFromGovernor opts this TNC-mode interface in to receive
@@ -2605,6 +2642,17 @@ export interface components {
             allow_tx_from_governor?: boolean;
             baud_rate?: number;
             channel?: number;
+            /**
+             * @description Enabled gates whether graywolf runs this interface. When false the
+             *     manager stops the supervisor and releases the underlying device
+             *     (closing the fd / socket) instead of looping reconnect attempts,
+             *     while the row's configuration is preserved for a later re-enable.
+             *     A pointer so an omitted field means "leave at the default" (true)
+             *     rather than "disable": older clients and partial callers that never
+             *     send the key keep their interfaces running. ToModel substitutes
+             *     true when nil.
+             */
+            enabled?: boolean;
             /**
              * @description GateTxToIs opts a Mode=modem KISS interface in to gating frames
              *     submitted by connected KISS clients to APRS-IS, after the TX
@@ -2648,6 +2696,13 @@ export interface components {
             baud_rate?: number;
             channel?: number;
             connected_since?: number;
+            /**
+             * @description Enabled mirrors KissInterface.Enabled so the Kiss page can show a
+             *     "Disabled" state and offer a re-enable action. A disabled interface
+             *     is not running, so the live status fields below stay zero-valued
+             *     for it.
+             */
+            enabled?: boolean;
             gate_tx_to_is?: boolean;
             id?: number;
             last_error?: string;
@@ -2681,7 +2736,11 @@ export interface components {
             type?: string;
         };
         "dto.LocalBounds": {
-            [key: string]: number[];
+            [key: string]: components["schemas"]["dto.LocalBoundsEntry"];
+        };
+        "dto.LocalBoundsEntry": {
+            bbox?: number[];
+            maxZoom?: number;
         };
         "dto.MapsConfigRequest": {
             source?: string;
@@ -3264,6 +3323,12 @@ export interface components {
             name?: string;
             peak_dbfs?: number;
         };
+        "packetlog.AudioLevel": {
+            /** @description Mark is the mark-tone amplitude, scaled to ~0-100. */
+            mark?: number;
+            /** @description Space is the space-tone amplitude, scaled to ~0-100. */
+            space?: number;
+        };
         /** @enum {string} */
         "packetlog.Direction": "RX" | "TX" | "IS";
         "pttdevice.AvailableDevice": {
@@ -3376,6 +3441,8 @@ export interface components {
             comment?: string;
             /** @description Direction indicates the source of the most recent packet: "RX" (heard on air), "TX" (sent by us), or "IS" (APRS-IS). */
             direction?: string;
+            /** @description Gated is true when the most recent packet reached us as Internet-to-RF gated traffic (the inner packet of a third-party gate) rather than heard directly on RF. */
+            gated?: boolean;
             /** @description Hops is the APRS digipeater hop count (number of H-bit entries in Path). */
             hops?: number;
             /** @description IsObject is true for APRS objects and items; false for regular stations. */
@@ -3408,6 +3475,8 @@ export interface components {
             course?: number;
             /** @description Direction indicates the source of this position packet: "RX", "TX", or "IS". */
             direction?: string;
+            /** @description Gated is true when this position fix reached us as Internet-to-RF gated traffic (the inner packet of a third-party gate) rather than heard directly on RF. */
+            gated?: boolean;
             /** @description HasAlt is true when the originating packet reported an altitude. */
             has_alt?: boolean;
             /** @description Hops is the APRS digipeater hop count (number of H-bit entries in Path) for this fix. */
@@ -3524,6 +3593,13 @@ export interface components {
             wind_mph?: number;
         };
         "webapi.packetDTO": {
+            /**
+             * @description AudioLevel is the demodulator's per-packet received audio level
+             *     (Direwolf-style mark/space tone amplitudes). Present only for frames
+             *     heard off-air via the modem; nil for TX, APRS-IS, and hardware KISS-TNC
+             *     entries, which carry no soundcard-domain level.
+             */
+            audio_level?: components["schemas"]["packetlog.AudioLevel"];
             /** @description Channel is the graywolf channel ID that observed or transmitted the packet. */
             channel?: number;
             /**
@@ -6751,6 +6827,26 @@ export interface operations {
             };
         };
     };
+    listAvailableKissSerialPorts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["gps.SerialPortInfo"][];
+                };
+            };
+        };
+    };
     getAvailableUsbSerialDevices: {
         parameters: {
             query?: never;
@@ -6944,6 +7040,61 @@ export interface operations {
                 };
                 content: {
                     "*/*": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    setKissEnabled: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description KISS interface id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        /** @description Enabled flag */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["dto.KissEnabledRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.KissResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
                 };
             };
         };

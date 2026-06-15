@@ -1384,6 +1384,11 @@ definitions:
       type:
         type: string
     type: object
+  dto.KissEnabledRequest:
+    properties:
+      enabled:
+        type: boolean
+    type: object
   dto.KissRequest:
     properties:
       allow_tx_from_governor:
@@ -1400,6 +1405,17 @@ definitions:
         type: integer
       channel:
         type: integer
+      enabled:
+        description: |-
+          Enabled gates whether graywolf runs this interface. When false the
+          manager stops the supervisor and releases the underlying device
+          (closing the fd / socket) instead of looping reconnect attempts,
+          while the row's configuration is preserved for a later re-enable.
+          A pointer so an omitted field means "leave at the default" (true)
+          rather than "disable": older clients and partial callers that never
+          send the key keep their interfaces running. ToModel substitutes
+          true when nil.
+        type: boolean
       gate_tx_to_is:
         description: |-
           GateTxToIs opts a Mode=modem KISS interface in to gating frames
@@ -1458,6 +1474,13 @@ definitions:
         type: integer
       connected_since:
         type: integer
+      enabled:
+        description: |-
+          Enabled mirrors KissInterface.Enabled so the Kiss page can show a
+          "Disabled" state and offer a re-enable action. A disabled interface
+          is not running, so the live status fields below stay zero-valued
+          for it.
+        type: boolean
       gate_tx_to_is:
         type: boolean
       id:
@@ -1509,9 +1532,16 @@ definitions:
     type: object
   dto.LocalBounds:
     additionalProperties:
-      items:
-        type: number
-      type: array
+      $ref: '#/definitions/dto.LocalBoundsEntry'
+    type: object
+  dto.LocalBoundsEntry:
+    properties:
+      bbox:
+        items:
+          type: number
+        type: array
+      maxZoom:
+        type: integer
     type: object
   dto.MapsConfigRequest:
     properties:
@@ -2402,6 +2432,15 @@ definitions:
       peak_dbfs:
         type: number
     type: object
+  packetlog.AudioLevel:
+    properties:
+      mark:
+        description: Mark is the mark-tone amplitude, scaled to ~0-100.
+        type: integer
+      space:
+        description: Space is the space-tone amplitude, scaled to ~0-100.
+        type: integer
+    type: object
   packetlog.Direction:
     enum:
       - RX
@@ -2605,6 +2644,9 @@ definitions:
       direction:
         description: 'Direction indicates the source of the most recent packet: "RX" (heard on air), "TX" (sent by us), or "IS" (APRS-IS).'
         type: string
+      gated:
+        description: Gated is true when the most recent packet reached us as Internet-to-RF gated traffic (the inner packet of a third-party gate) rather than heard directly on RF.
+        type: boolean
       hops:
         description: Hops is the APRS digipeater hop count (number of H-bit entries in Path).
         type: integer
@@ -2662,6 +2704,9 @@ definitions:
       direction:
         description: 'Direction indicates the source of this position packet: "RX", "TX", or "IS".'
         type: string
+      gated:
+        description: Gated is true when this position fix reached us as Internet-to-RF gated traffic (the inner packet of a third-party gate) rather than heard directly on RF.
+        type: boolean
       has_alt:
         description: HasAlt is true when the originating packet reported an altitude.
         type: boolean
@@ -2849,6 +2894,14 @@ definitions:
     type: object
   webapi.packetDTO:
     properties:
+      audio_level:
+        allOf:
+          - $ref: '#/definitions/packetlog.AudioLevel'
+        description: |-
+          AudioLevel is the demodulator's per-packet received audio level
+          (Direwolf-style mark/space tone amplitudes). Present only for frames
+          heard off-air via the modem; nil for TX, APRS-IS, and hardware KISS-TNC
+          entries, which carry no soundcard-domain level.
       channel:
         description: Channel is the graywolf channel ID that observed or transmitted the packet.
         type: integer
@@ -5322,6 +5375,47 @@ paths:
       summary: Update KISS interface
       tags:
         - kiss
+  /kiss/{id}/enabled:
+    put:
+      consumes:
+        - application/json
+      operationId: setKissEnabled
+      parameters:
+        - description: KISS interface id
+          in: path
+          name: id
+          required: true
+          type: integer
+        - description: Enabled flag
+          in: body
+          name: body
+          required: true
+          schema:
+            $ref: '#/definitions/dto.KissEnabledRequest'
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.KissResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      security:
+        - CookieAuth: []
+      summary: Enable or disable a KISS interface
+      tags:
+        - kiss
   /kiss/{id}/reconnect:
     post:
       operationId: reconnectKiss
@@ -5349,6 +5443,23 @@ paths:
       security:
         - CookieAuth: []
       summary: Reconnect a KISS tcp-client interface now
+      tags:
+        - kiss
+  /kiss/available-serial-ports:
+    get:
+      operationId: listAvailableKissSerialPorts
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/gps.SerialPortInfo'
+            type: array
+      security:
+        - CookieAuth: []
+      summary: List available host serial ports
       tags:
         - kiss
   /kiss/available-usb-serial-devices:

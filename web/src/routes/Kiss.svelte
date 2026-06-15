@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { Button, Input, Select, Badge, Checkbox } from '@chrissnell/chonky-ui';
-  import { api, kissBt, kissUsb } from '../lib/api.js';
+  import { Button, Input, Select, Badge, Checkbox, Toggle } from '@chrissnell/chonky-ui';
+  import { api, kissBt, kissUsb, kissSerial } from '../lib/api.js';
   import { Platform } from '../lib/platform.js';
   import { toasts } from '../lib/stores.js';
   import PageHeader from '../components/PageHeader.svelte';
@@ -31,6 +31,13 @@
   const TNC_INGRESS_RATE_DEFAULT = '50';
   const TNC_INGRESS_BURST_DEFAULT = '100';
   const BAUD_RATE_DEFAULT = '9600';
+  // Standard serial line speeds offered in the Baud Rate dropdown. Covers
+  // the rates real KISS TNCs use (1200 for classic AFSK packet, 9600 for
+  // G3RUH and most USB TNCs, up to 115200 for high-speed links). A free-form
+  // input previously accepted any value with no validation (issue #249); the
+  // dropdown removes that footgun while still preserving a non-standard rate
+  // already saved on an interface (see baudRateOptions).
+  const STANDARD_BAUD_RATES = ['1200', '2400', '4800', '9600', '19200', '38400', '57600', '115200', '230400'];
   // Show a "stale" indicator if the 2 s poller has failed this many
   // consecutive times. At 2 s cadence, five consecutive failures ≈
   // 10 s of silence — long enough to be a real problem, short enough
@@ -70,12 +77,19 @@
   let pollTimer = null;
   let clockTimer = null;
 
+  // Type and Mode cells render a <Badge>, whose 1px border + 0.4rem padding
+  // insets its text from the cell's left edge. Indent those headers by the
+  // same amount so the column label lines up with the badge below it. The
+  // toggle cell gets vertical-align:middle so the switch centers in the row
+  // instead of sitting on the baseline.
+  const BADGE_HEAD_INDENT = 'padding-left: calc(0.4rem + 1px);';
   const columns = [
-    { key: 'type', label: 'Type' },
+    { key: 'type', label: 'Type', headStyle: BADGE_HEAD_INDENT },
     { key: 'endpoint', label: 'Endpoint' },
     { key: 'channel', label: 'Channel' },
-    { key: 'mode', label: 'Mode' },
+    { key: 'mode', label: 'Mode', headStyle: BADGE_HEAD_INDENT },
     { key: 'status', label: 'Status' },
+    { key: 'enabled', label: 'Enabled', tdStyle: 'vertical-align: middle;' },
   ];
 
   // Platform-conditional type menu. On Android, operators see the
@@ -205,6 +219,44 @@
       (selectedUsbDevice ? !selectedUsbDevice.has_permission : usbDevices.length > 0 ? false : true),
   );
 
+  // Host serial ports for the desktop "serial" interface type, loaded
+  // lazily the first time the operator opens the modal with type=serial
+  // (mirrors the bluetooth / usbserial lazy-loaders). Shape per entry:
+  // {path, name, description, is_usb, recommended, warning}. Enumeration
+  // is best-effort — on failure the operator falls back to typing the
+  // port path manually in the Serial Device input below the dropdown.
+  let serialPorts = $state([]);
+  let serialPortsLoading = $state(false);
+  let serialPortsError = $state('');
+
+  let serialPortOptions = $derived(
+    serialPorts.map((p) => ({
+      value: p.path,
+      label: p.description && p.description !== p.name ? `${p.description} (${p.path})` : p.path,
+    })),
+  );
+
+  let serialPortsHint = $derived(
+    serialPortsError
+      ? serialPortsError
+      : !serialPortsLoading && serialPorts.length === 0
+        ? 'No serial ports detected. Plug in the KISS TNC and click Refresh, or type the port path manually below.'
+        : 'Pick a detected port to fill in the device path, or type it manually below.',
+  );
+
+  // Baud-rate dropdown options. Built from STANDARD_BAUD_RATES, with the
+  // current form value prepended when it isn't one of the standards so
+  // editing an interface saved with a non-standard rate doesn't silently
+  // drop or rewrite it.
+  let baudRateOptions = $derived.by(() => {
+    const opts = STANDARD_BAUD_RATES.map((r) => ({ value: r, label: r }));
+    const cur = form.baud_rate;
+    if (cur && !STANDARD_BAUD_RATES.includes(String(cur))) {
+      opts.unshift({ value: String(cur), label: `${cur} (custom)` });
+    }
+    return opts;
+  });
+
   const modeOptions = [
     { value: 'modem', label: 'Modem' },
     { value: 'tnc', label: 'TNC' },
@@ -250,6 +302,10 @@
       // offered to the iGate's RF->IS gate after the TX governor
       // accepts them. Default off — operator opts in.
       gate_tx_to_is: false,
+      // Whether graywolf runs this interface. New rows start enabled;
+      // the operator can disable an existing one to release its device
+      // (e.g. a Bluetooth rfcomm tty) without losing the config.
+      enabled: true,
     };
   }
 
@@ -331,6 +387,11 @@
       tnc_ingress_burst: String(row.tnc_ingress_burst || 100),
       allow_tx_from_governor: !!row.allow_tx_from_governor,
       gate_tx_to_is: !!row.gate_tx_to_is,
+      // Carry the persisted enabled state forward. KISS PUT is a
+      // full-resource replace, so echoing it keeps a disabled interface
+      // disabled across edits to unrelated fields. Default true for
+      // legacy rows whose response predates the field.
+      enabled: row.enabled !== false,
     };
     modalOpen = true;
   }
@@ -466,6 +527,30 @@
     }
   }
 
+  // Lazy-load host serial ports the first time the operator opens the modal
+  // with the "serial" type selected. Unlike bluetooth/usbserial this works
+  // on every desktop platform (the ports are enumerated on the host running
+  // graywolf), so there's no Platform gate. Re-runs only when the gate flips
+  // back to satisfied — the operator can clear an error and click Refresh.
+  $effect(() => {
+    if (form.type !== 'serial' || !modalOpen) return;
+    if (serialPorts.length === 0 && !serialPortsLoading && !serialPortsError) {
+      loadSerialPorts();
+    }
+  });
+
+  async function loadSerialPorts() {
+    serialPortsLoading = true;
+    serialPortsError = '';
+    try {
+      serialPorts = (await kissSerial.availablePorts()) ?? [];
+    } catch (err) {
+      serialPortsError = err?.message ?? 'Failed to load serial ports';
+    } finally {
+      serialPortsLoading = false;
+    }
+  }
+
   // Grant USB permission for the selected device via the Android JS bridge.
   // Uses the shared __usbResult / __usbCallbacks dispatcher pattern (same
   // one the PTT picker uses in androidDeviceSource.js). The dispatcher is
@@ -554,6 +639,10 @@
       // iGate via the RX fanout). Force false outside that mode so
       // the persisted value matches the UI's visibility rule.
       gate_tx_to_is: form.mode === 'modem' ? !!form.gate_tx_to_is : false,
+      // Full-resource replace: always send enabled so a PUT never
+      // silently re-enables a disabled interface (the backend defaults a
+      // missing flag to true). Default true for new rows.
+      enabled: form.enabled !== false,
     };
     switch (form.type) {
       case 'tcp':
@@ -718,6 +807,22 @@
     }
   }
 
+  // Enable/disable an interface in one click. Disabling stops the
+  // supervisor and releases the device (closing the serial fd / socket)
+  // instead of looping reconnect attempts; enabling restarts it. The
+  // saved channel and config are preserved either way. Uses the focused
+  // /enabled endpoint so we don't have to round-trip the whole form.
+  async function handleToggleEnabled(row) {
+    const next = row.enabled === false; // disabled -> enable, else disable
+    try {
+      await api.put(`/kiss/${row.id}/enabled`, { enabled: next });
+      toasts.success(next ? 'Interface enabled' : 'Interface disabled — device released');
+      await refreshItems();
+    } catch (err) {
+      toasts.error(err.message);
+    }
+  }
+
   // Healthglyph: live / down based on state. Client-only rows (never
   // server-listen) are what really benefit from this; server-listen
   // reports StateListening which is always "live" (the listener bound
@@ -763,7 +868,7 @@
   rows={items}
   onEdit={openEdit}
   onDelete={handleDelete}
-  cells={{ type: typeCell, endpoint: endpointCell, mode: modeCell, status: statusCell }}
+  cells={{ type: typeCell, endpoint: endpointCell, mode: modeCell, status: statusCell, enabled: enabledCell }}
 />
 
 {#snippet modeCell(value, _row)}
@@ -791,50 +896,73 @@
 {/snippet}
 
 {#snippet statusCell(_value, row)}
+  {@const disabled = row.enabled === false}
+  <!-- Only tcp-client rows carry live connection diagnostics worth an
+       expandable panel (peer, reconnect count, backoff, last error,
+       Retry now). For server / serial / disabled rows the status is a
+       plain badge — the old expand popped a gray box that just echoed
+       the Endpoint column and buried the disable action (GRA-85). -->
+  {@const expandable = !disabled && row.type === 'tcp-client'}
   <div class="status-cell" data-tick={clockTick}>
     <!-- clockTick is in data-tick so any change triggers snippet
          re-render; that propagates to the countdownText call below. -->
-    <button
-      type="button"
-      class="status-btn"
-      aria-expanded={expandedId === row.id}
-      aria-controls={`status-detail-${row.id}`}
-      aria-label={`Status for KISS interface ${row.id}: ${stateLabel(row.state)}`}
-      onclick={(e) => { e.stopPropagation(); toggleExpanded(row.id); }}
-    >
-      <span class={healthClass(row.state)} aria-hidden="true">{healthGlyph(row.state)}</span>
-      <Badge variant={stateBadgeVariant(row.state)}>{stateLabel(row.state)}</Badge>
-      {#if row.state === 'backoff'}
-        <span class="countdown">{countdownText(row.retry_at_unix_ms)}</span>
-      {/if}
-    </button>
-    {#if expandedId === row.id}
+    {#if disabled}
+      <!-- A disabled interface is not running, so live supervisor
+           state is meaningless. Show a neutral "Disabled" pill. -->
+      <span class="status-static">
+        <span class="health-disabled" aria-hidden="true">○</span>
+        <Badge>Disabled</Badge>
+      </span>
+    {:else if expandable}
+      <button
+        type="button"
+        class="status-btn"
+        aria-expanded={expandedId === row.id}
+        aria-controls={`status-detail-${row.id}`}
+        aria-label={`Connection detail for KISS interface ${row.id}: ${stateLabel(row.state)}`}
+        onclick={(e) => { e.stopPropagation(); toggleExpanded(row.id); }}
+      >
+        {@render liveStatus(row)}
+      </button>
+    {:else}
+      <span class="status-static">{@render liveStatus(row)}</span>
+    {/if}
+    {#if expandable && expandedId === row.id}
       <div id={`status-detail-${row.id}`} class="status-detail" role="region" aria-label="Status detail">
-        {#if row.type === 'tcp-client'}
-          <div class="detail-row"><span class="detail-label">Peer:</span> <span>{row.peer_addr || `${row.remote_host}:${row.remote_port}`}</span></div>
-          <div class="detail-row"><span class="detail-label">Connected since:</span> <span>{formatLocalTime(row.connected_since) || '—'}</span></div>
-          <div class="detail-row"><span class="detail-label">Reconnect count:</span> <span>{row.reconnect_count || 0}</span></div>
-          <div class="detail-row"><span class="detail-label">Backoff:</span> <span>{row.backoff_seconds || 0}s</span></div>
-          {#if row.last_error}
-            <div class="detail-row detail-err"><span class="detail-label">Last error:</span> <span>{row.last_error}</span></div>
-          {/if}
-          {#if canRetryNow(row.state)}
-            <div class="detail-actions">
-              <Button variant="primary" onclick={(e) => { e.stopPropagation?.(); handleRetryNow(row); }}>Retry now</Button>
-            </div>
-          {/if}
-        {:else if row.type === 'tcp'}
-          <div class="detail-row"><span class="detail-label">Listening:</span> <span>{row.local_only ? `127.0.0.1:${row.tcp_port} (local only)` : `:${row.tcp_port}`}</span></div>
-        {:else if row.type === 'bluetooth'}
-          <div class="detail-row"><span class="detail-label">Device:</span> <span>{friendlyDevice(row) || '—'}</span></div>
-        {:else if row.type === 'usbserial'}
-          <div class="detail-row"><span class="detail-label">Device:</span> <span>{row.serial_device || '—'}</span></div>
-        {:else}
-          <div class="detail-row"><span class="detail-label">Device:</span> <span>{row.serial_device || '—'}</span></div>
+        <div class="detail-row"><span class="detail-label">Peer:</span> <span>{row.peer_addr || `${row.remote_host}:${row.remote_port}`}</span></div>
+        <div class="detail-row"><span class="detail-label">Connected since:</span> <span>{formatLocalTime(row.connected_since) || '—'}</span></div>
+        <div class="detail-row"><span class="detail-label">Reconnect count:</span> <span>{row.reconnect_count || 0}</span></div>
+        <div class="detail-row"><span class="detail-label">Backoff:</span> <span>{row.backoff_seconds || 0}s</span></div>
+        {#if row.last_error}
+          <div class="detail-row detail-err"><span class="detail-label">Last error:</span> <span>{row.last_error}</span></div>
+        {/if}
+        {#if canRetryNow(row.state)}
+          <div class="detail-actions">
+            <Button variant="primary" onclick={(e) => { e.stopPropagation?.(); handleRetryNow(row); }}>Retry now</Button>
+          </div>
         {/if}
       </div>
     {/if}
   </div>
+{/snippet}
+
+{#snippet liveStatus(row)}
+  <span class={healthClass(row.state)} aria-hidden="true">{healthGlyph(row.state)}</span>
+  <Badge variant={stateBadgeVariant(row.state)}>{stateLabel(row.state)}</Badge>
+  {#if row.state === 'backoff'}
+    <span class="countdown">{countdownText(row.retry_at_unix_ms)}</span>
+  {/if}
+{/snippet}
+
+{#snippet enabledCell(_value, row)}
+  <!-- Dedicated enable/disable toggle (GRA-85). Disabling stops the
+       supervisor and releases the device; enabling restarts it. The
+       saved config is preserved either way. -->
+  <Toggle
+    checked={row.enabled !== false}
+    onCheckedChange={() => handleToggleEnabled(row)}
+    aria-label={`${row.enabled === false ? 'Enable' : 'Disable'} KISS interface ${row.id}`}
+  />
 {/snippet}
 
 <Modal bind:open={modalOpen} title={editing ? 'Edit KISS' : 'New KISS Interface'}>
@@ -954,22 +1082,42 @@
         id="kiss-usb-baud"
         hint="Serial line speed. Must match the TNC's configured baud rate. Default 9600."
       >
-        <Input id="kiss-usb-baud" bind:value={form.baud_rate} type="number" placeholder="9600" />
+        <Select id="kiss-usb-baud" bind:value={form.baud_rate} options={baudRateOptions} />
       </FormField>
     {:else if form.type === 'serial'}
       <FormField
+        label="Detected ports"
+        id="kiss-serial-detected"
+        hint={serialPortsHint}
+      >
+        {#snippet children(describedBy)}
+          <div class="bt-picker">
+            <Select
+              id="kiss-serial-detected"
+              bind:value={form.serial_device}
+              options={serialPortOptions}
+              placeholder={serialPortsLoading ? 'Loading…' : 'Select a detected port'}
+              aria-describedby={describedBy}
+            />
+            <Button variant="secondary" onclick={loadSerialPorts} disabled={serialPortsLoading}>
+              Refresh
+            </Button>
+          </div>
+        {/snippet}
+      </FormField>
+      <FormField
         label="Serial Device"
         id="kiss-serial"
-        hint="Serial port the KISS TNC is attached to, e.g. /dev/ttyUSB0 or /dev/ttyACM0."
+        hint="Port the KISS TNC is attached to. Linux: /dev/ttyUSB0 or /dev/ttyACM0. macOS: /dev/cu.usbserial-*. Windows: COM1, COM3. Pick from Detected ports above, or type it here."
       >
-        <Input id="kiss-serial" bind:value={form.serial_device} placeholder="/dev/ttyUSB0" />
+        <Input id="kiss-serial" bind:value={form.serial_device} placeholder="/dev/ttyUSB0 or COM3" />
       </FormField>
       <FormField
         label="Baud Rate"
         id="kiss-baud"
         hint="Serial line speed. Must match the TNC's configured baud rate. Default 9600."
       >
-        <Input id="kiss-baud" bind:value={form.baud_rate} type="number" placeholder="9600" />
+        <Select id="kiss-baud" bind:value={form.baud_rate} options={baudRateOptions} />
       </FormField>
     {/if}
     <FormField label="Channel" id="kiss-channel">
@@ -1141,8 +1289,18 @@
     border-color: var(--border-color);
     outline: none;
   }
+  /* Non-interactive status (server / serial / disabled rows). Mirrors
+     the button's inline layout/padding so badges line up whether or not
+     the row is expandable, but without the hover affordance. */
+  .status-static {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 6px;
+  }
   .health-live { color: var(--color-success, #4caf50); font-size: 14px; }
   .health-down { color: var(--color-warning, #ffa000); font-size: 14px; }
+  .health-disabled { color: var(--text-secondary, #9e9e9e); font-size: 14px; }
   .countdown {
     font-size: 12px;
     color: var(--text-secondary);

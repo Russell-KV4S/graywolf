@@ -116,6 +116,8 @@ func (m *Manager) urlForSlug(slug, token string) (string, error) {
 		raw = fmt.Sprintf("%s/download/country/%s.pmtiles", base, a)
 	case "province":
 		raw = fmt.Sprintf("%s/download/province/%s/%s.pmtiles", base, a, b)
+	case "world":
+		raw = fmt.Sprintf("%s/download/world.pmtiles", base)
 	}
 	if token == "" {
 		return raw, nil
@@ -200,7 +202,7 @@ func (m *Manager) List(ctx context.Context) ([]Status, error) {
 // path can serve offline tiles without consulting the remote catalog
 // after a reboot. Pass nil only when no bbox is available; the startup
 // backfill will fill it in from the pmtiles header later.
-func (m *Manager) Start(ctx context.Context, slug string, bbox *[4]float64) error {
+func (m *Manager) Start(ctx context.Context, slug string, bbox *[4]float64, maxZoom int) error {
 	m.mu.Lock()
 	if _, busy := m.inflight[slug]; busy {
 		m.mu.Unlock()
@@ -215,8 +217,9 @@ func (m *Manager) Start(ctx context.Context, slug string, bbox *[4]float64) erro
 	// returns the right state even before the goroutine grabs the
 	// semaphore.
 	row := configstore.MapsDownload{
-		Slug:   slug,
-		Status: "downloading",
+		Slug:    slug,
+		Status:  "downloading",
+		MaxZoom: maxZoom,
 	}
 	if bbox != nil {
 		encoded := encodeBBox(*bbox)

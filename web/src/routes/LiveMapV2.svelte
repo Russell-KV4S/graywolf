@@ -17,13 +17,26 @@
   import { mountWindBarbsLayer } from '../lib/map/layers/wind-barbs.js';
   import { mountHoverPathLayer } from '../lib/map/layers/hover-path.js';
   import { mountMyPositionLayer } from '../lib/map/layers/my-position.js';
+  import { mountRadarLayer } from '../lib/map/layers/radar.js';
+  import {
+    radarManifestUrlForRegion,
+    parseManifestFramesForRegion,
+    RADAR_REGION_WORLD,
+  } from '../lib/map/sources/radar-source.js';
+  import { createRadarFrames } from '../lib/map/radar-frames.svelte.js';
+  import { mapsState } from '../lib/settings/maps-store.svelte.js';
+  import { mountFixedPointsLayer } from '../lib/map/layers/fixed-points.js';
+  import { fixedPointsStore } from '../lib/map/fixed-points-store.svelte.js';
+  import FixedPointDialog from '../lib/map/fixed-point-dialog.svelte';
   import { renderStationPopupHTML } from '../lib/map/popup.js';
   import { unitsState } from '../lib/settings/units-store.svelte.js';
   import { mapState, MY_POSITION_ZOOM } from '../lib/map/map-store.svelte.js';
   import { toMaidenhead } from '../lib/map/maidenhead.js';
   import { fmtLat, fmtLon, timeAgo } from '../lib/map/popup-helpers.js';
+  import { clockOffset, formatOffsetMagnitude } from '../lib/map/clock-offset.svelte.js';
   import { toasts } from '../lib/stores.js';
   import MapPinPlus from 'lucide-svelte/icons/map-pin-plus';
+  import MapPinned from 'lucide-svelte/icons/map-pinned';
   import Copy from 'lucide-svelte/icons/copy';
 
   // Values are seconds (data store wants ms; multiplied at dispatch).
@@ -54,6 +67,103 @@
   let windBarbsLayer = null;
   let hoverPathLayer = null;
   let myPositionLayer = null;
+  let radarLayer = null;
+  let fixedPointsLayer = null;
+
+  // Radar overlay settings -- persisted per browser (not per account).
+  const radarSettings = $state({
+    visible: localStorage.getItem('gw_radar_visible') === '1',
+    opacity: parseFloat(localStorage.getItem('gw_radar_opacity') ?? '0.6'),
+  });
+  // Coverage region ('us' = NEXRAD, 'world' = RainViewer) lives in the shared
+  // map store so the maps settings tab owns the selector; the live map only
+  // reflects the operator's choice here.
+
+  // Radar loop animation. The frame store polls the worker's loop manifest and
+  // drives Play/Reset + the frame slider; loadRadarFrames() fetches it with the
+  // same bearer token as the basemap (a plain fetch, so transformRequest does
+  // not see it -- we append ?t= here). The token is revealed once and cached.
+  let radarToken = null;
+  // De-dupe diagnostics: the manifest poll runs every ~15s while radar is on, so
+  // a persistent failure (e.g. the Worker/generator not yet deployed) would warn
+  // forever. Only log when the failure stage changes; clear on success so a
+  // later regression logs again.
+  let lastRadarLoadStatus = null;
+  function warnRadar(status, ...args) {
+    if (lastRadarLoadStatus === status) return;
+    lastRadarLoadStatus = status;
+    console.warn(...args);
+  }
+  async function loadRadarFrames() {
+    if (!mapsState.registered) return [];
+    if (!radarToken) radarToken = await mapsState.revealToken();
+    if (!radarToken) return [];
+    // Region-aware: US polls the NEXRAD contour manifest, world polls the
+    // RainViewer loop manifest. Read at call time so the next poll after a
+    // region switch fetches the right loop.
+    const region = mapState.radarRegion;
+    const isWorld = region === RADAR_REGION_WORLD;
+    const url = `${radarManifestUrlForRegion(region)}?t=${encodeURIComponent(radarToken)}`;
+    let resp;
+    try {
+      resp = await fetch(url);
+    } catch (e) {
+      warnRadar('network', '[radar] manifest fetch failed (network/CORS)', e);
+      return [];
+    }
+    if (resp.status === 401) {
+      radarToken = null; // stale token -- re-reveal next poll
+      warnRadar(401, '[radar] manifest 401 -- token rejected; will re-reveal');
+      return [];
+    }
+    if (resp.status === 404) {
+      // The origin Worker has no manifest route for this region -- it predates
+      // the animated-loop deploy. Update the worker (wrangler deploy) so the
+      // overlay can load frames. Logged because the overlay otherwise sits on
+      // "waiting for frames…" with no other signal.
+      warnRadar(
+        404,
+        `[radar] manifest 404 -- origin Worker is missing the ${
+          isWorld ? '/radar/rainviewer/manifest.json' : '/radar/manifest.json'
+        } route. Deploy the animated-loop Worker (cd worker && npx wrangler deploy).`,
+      );
+      return [];
+    }
+    if (resp.status === 503) {
+      warnRadar(
+        503,
+        isWorld
+          ? '[radar] RainViewer manifest 503 -- Worker is up but RainViewer upstream returned no usable frames; will retry.'
+          : '[radar] manifest 503 -- Worker is up but radar/manifest.json is not in R2 yet. ' +
+              'Deploy/run the radar-contour generator so it publishes the manifest.',
+      );
+      return [];
+    }
+    if (!resp.ok) {
+      warnRadar(resp.status, `[radar] manifest fetch HTTP ${resp.status}`);
+      return [];
+    }
+    try {
+      const frames = parseManifestFramesForRegion(region, await resp.json());
+      if (frames.length === 0) warnRadar('empty', '[radar] manifest parsed but has 0 frames');
+      else lastRadarLoadStatus = null; // recovered -- a later failure logs again
+      return frames;
+    } catch (e) {
+      warnRadar('parse', '[radar] manifest JSON parse failed', e);
+      return [];
+    }
+  }
+  const radarFrames = createRadarFrames({ load: loadRadarFrames });
+  // Slider label: the current frame's local time + position (e.g. "6:05 PM · 34/37").
+  // No "Radar frame:" prefix -- it pushed the line to wrap, and the slider it
+  // sits above already makes the context clear.
+  const radarFrameLabel = $derived.by(() => {
+    const f = radarFrames.current;
+    if (!f) return 'Waiting for frames…';
+    const t = new Date(f.ts * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return `${t} · ${radarFrames.index + 1}/${radarFrames.count}`;
+  });
+
   let mapRef = null;
   let activePopup = null;
 
@@ -68,8 +178,14 @@
     trails: true,
     weather: true,
     myPosition: true,
+    fixedPoints: true,
     directRxOnly: false,
+    rfOnly: false,
   });
+
+  // Add-fixed-point dialog state. Opened from the context menu with the
+  // clicked coordinates; onConfirm drops the point into the store.
+  let fpDialog = $state({ open: false, lat: 0, lon: 0 });
 
   // Direct RX predicate: a station qualifies if at least one of its
   // accumulated positions arrived directly on RF (RX direction with
@@ -79,6 +195,20 @@
     if (!Array.isArray(pts) || pts.length === 0) return false;
     for (const p of pts) {
       if (p.direction === 'RX' && (p.hops ?? 0) === 0) return true;
+    }
+    return false;
+  }
+
+  // RF Only predicate: a station qualifies if at least one position was
+  // heard over the air (RX) and did not arrive via Internet-to-RF gating
+  // (the `gated` flag, set on the inner packet of a third-party gate).
+  // Unlike Direct RX this keeps RF-digipeated stations; it only drops
+  // points that are merely Internet traffic some iGate pushed onto RF.
+  function isRfOnly(station) {
+    const pts = station?.positions;
+    if (!Array.isArray(pts) || pts.length === 0) return false;
+    for (const p of pts) {
+      if (p.direction === 'RX' && !p.gated) return true;
     }
     return false;
   }
@@ -122,6 +252,13 @@
         onSelect: () => {
           const q = `lat=${lat.toFixed(6)}&lon=${lon.toFixed(6)}`;
           window.location.hash = `#/beacons?${q}`;
+        },
+      },
+      {
+        label: 'Add fixed point here',
+        icon: MapPinned,
+        onSelect: () => {
+          fpDialog = { open: true, lat, lon };
         },
       },
       { divider: true },
@@ -218,6 +355,46 @@
     }
   }
 
+  // Clicking a fixed point opens a small popup with its name and a delete
+  // button — the issue's "delete on click", with a confirm step so a stray
+  // tap doesn't silently drop a landmark.
+  function openFixedPointPopup(map, point) {
+    closePopup();
+    const name = point.name || 'Fixed point';
+    const div = document.createElement('div');
+    div.className = 'gw-fixed-popup-body';
+    const title = document.createElement('div');
+    title.className = 'gw-fixed-popup-name';
+    title.textContent = name;
+    const coords = document.createElement('div');
+    coords.className = 'gw-fixed-popup-coords';
+    coords.textContent = `${fmtLat(point.lat)} ${fmtLon(point.lon)}`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'gw-fixed-popup-delete';
+    btn.textContent = 'Delete point';
+    btn.addEventListener('click', () => {
+      fixedPointsStore.remove(point.id);
+      closePopup();
+      toasts.success(`Removed "${name}"`);
+    });
+    div.append(title, coords, btn);
+
+    activePopup = new maplibregl.Popup({
+      offset: 18,
+      maxWidth: '260px',
+      className: 'gw-fixed-popup',
+      closeButton: true,
+      closeOnClick: true,
+    })
+      .setLngLat([point.lon, point.lat])
+      .setDOMContent(div)
+      .addTo(map);
+    activePopup.on('close', () => {
+      activePopup = null;
+    });
+  }
+
   function updateCoordText(lngLat) {
     if (!lngLat) {
       coordText = '';
@@ -239,6 +416,23 @@
 
   function onMapReady(map) {
     mapRef = map;
+    // Radar first so the raster/fill sits below trails and station markers in
+    // the GL stack. DOM layers (stations, weather) always render above the
+    // canvas regardless, but GL line layers (trails) would otherwise cover it.
+    radarLayer = mountRadarLayer(map, {
+      visible: radarSettings.visible,
+      opacity: radarSettings.opacity,
+      region: mapState.radarRegion,
+      // The manifest poll often resolves before the basemap style loads (tiny
+      // edge-cached JSON vs a heavy basemap), so a frame ts may already be
+      // known. The currentTs effect won't re-fire for an unchanged ts once the
+      // layer exists, so seed the current frame here or the overlay stays blank
+      // until the index changes (e.g. pressing Play).
+      frameTs: radarFrames.currentTs,
+      // Preload every known frame up front (one cached source each) so looping
+      // toggles opacity instead of refetching tiles every cycle.
+      frames: radarFrames.frames.map((f) => f.ts),
+    });
     // Trails first so the line sits beneath the (DOM) station markers
     // and below the weather labels in symbol-layer order.
     trailsLayer = mountTrailsLayer(map, () => dataStore.stations, {
@@ -280,6 +474,9 @@
         hoverPathLayer?.clear();
       },
       onMarkerClick: (s) => openStationPopup(map, s),
+    });
+    fixedPointsLayer = mountFixedPointsLayer(map, () => fixedPointsStore.points, {
+      onMarkerClick: (point) => openFixedPointPopup(map, point),
     });
     myPositionLayer = mountMyPositionLayer(map, () => dataStore.myPosition, {
       onMarkerEnter: () => {
@@ -363,16 +560,29 @@
   // Drive layer refresh from data-store reactivity. Touching .size
   // ensures Svelte tracks Map mutations even if the proxy short-circuits
   // a reassignment. unitsState.isMetric is read so the weather layer
-  // re-renders when the operator toggles metric/imperial.
+  // re-renders when the operator toggles metric/imperial. tickNow is read
+  // so the 1s clock drives this effect even when the station roster is
+  // stable, keeping time-based layers (trail fade, staleness) current.
+  // radarLayer.refresh() is idempotent here -- it only re-adds the overlay's
+  // sources/layers if a basemap style swap dropped them.
   $effect(() => {
     const _size = dataStore.stations.size;
     const _isMetric = unitsState.isMetric;
     const _myPos = dataStore.myPosition; // track
+    const _tick = tickNow; // 1s clock drives time-based layer refresh
+    if (radarLayer) radarLayer.refresh();
     if (stationsLayer) stationsLayer.refresh();
     if (trailsLayer) trailsLayer.refresh();
     if (weatherLayer) weatherLayer.refresh();
     if (windBarbsLayer) windBarbsLayer.refresh();
     if (myPositionLayer) myPositionLayer.refresh();
+  });
+
+  // Fixed points change independently of the station poll (operator adds /
+  // deletes them), so they get their own refresh effect tracking the store.
+  $effect(() => {
+    const _len = fixedPointsStore.points.length;
+    fixedPointsLayer?.refresh();
   });
 
   // Push the layer toggles into the layer modules. We MUST read the
@@ -402,12 +612,65 @@
     const v = layerToggles.myPosition;
     myPositionLayer?.setVisible(v);
   });
-  // Direct RX filter: predicate is shared across stations/trails/weather/
-  // wind-barbs so the layers stay in lockstep. my-position is the
-  // operator's own beacon and is intentionally exempt.
   $effect(() => {
-    const on = layerToggles.directRxOnly;
-    const pred = on ? isDirectRx : null;
+    const v = radarSettings.visible;
+    localStorage.setItem('gw_radar_visible', v ? '1' : '0');
+    radarLayer?.setVisible(v);
+    // Only poll the loop manifest while the overlay is on; pause playback when
+    // it is hidden so the timer isn't running unseen.
+    if (v) {
+      radarFrames.startPolling();
+    } else {
+      radarFrames.pause();
+      radarFrames.stopPolling();
+    }
+  });
+  // Preload the full frame set into the layer (one cached source per frame) and
+  // reconcile it as the manifest poll rolls frames in and out. Looping then
+  // toggles opacity between already-loaded frames rather than refetching tiles.
+  $effect(() => {
+    radarLayer?.setFrames(radarFrames.frames.map((f) => f.ts));
+  });
+  // Drive the current animation frame into the layer. setFrameTs hands the
+  // visible opacity from the previous frame to the current one (no refetch).
+  $effect(() => {
+    const ts = radarFrames.currentTs;
+    if (ts != null) radarLayer?.setFrameTs(ts);
+  });
+  $effect(() => {
+    const v = radarSettings.opacity;
+    localStorage.setItem('gw_radar_opacity', String(v));
+    radarLayer?.setOpacity(v);
+  });
+  // Plain (non-reactive) guard so writing it doesn't retrigger the effect; the
+  // effect re-runs only when mapState.radarRegion changes.
+  let radarRegionApplied = mapState.radarRegion;
+  $effect(() => {
+    const region = mapState.radarRegion;
+    radarLayer?.setRegion(region);
+    if (region !== radarRegionApplied) {
+      radarRegionApplied = region;
+      // The frame ts namespace changed (US contour vs RainViewer): drop the old
+      // loop and immediately re-poll the new region's manifest so the slider and
+      // overlay don't briefly animate the wrong region's frames.
+      radarFrames.reset();
+      if (radarSettings.visible) radarFrames.startPolling();
+    }
+  });
+  $effect(() => {
+    const v = layerToggles.fixedPoints;
+    fixedPointsLayer?.setVisible(v);
+  });
+  // RF reachability filter: predicate is shared across stations/trails/
+  // weather/wind-barbs so the layers stay in lockstep. my-position is the
+  // operator's own beacon and is intentionally exempt. Direct RX is the
+  // stricter of the two (a subset of RF Only), so it wins when both are on.
+  $effect(() => {
+    const pred = layerToggles.directRxOnly
+      ? isDirectRx
+      : layerToggles.rfOnly
+        ? isRfOnly
+        : null;
     stationsLayer?.setFilter(pred);
     trailsLayer?.setFilter(pred);
     weatherLayer?.setFilter(pred);
@@ -477,6 +740,13 @@
     }
     return n;
   });
+  let rfOnlyStationCount = $derived.by(() => {
+    let n = 0;
+    for (const s of dataStore.stations.values()) {
+      if (isRfOnly(s)) n++;
+    }
+    return n;
+  });
   let timerangeLabel = $derived(
     TIMERANGES_S.find((o) => o.value === timerangeSec)?.label || '',
   );
@@ -485,7 +755,9 @@
     if (!t) return '';
     // Touching tickNow keeps this re-derived once a second.
     const _ = tickNow;
-    return timeAgo(t.toISOString());
+    // lastFetchAt is a browser-local event, so time it against the browser
+    // clock — not the host-corrected serverNow().
+    return timeAgo(t.toISOString(), Date.now());
   });
   let pollDotClass = $derived(
     dataStore.pollingState === 'error'
@@ -501,22 +773,39 @@
         ? 'live'
         : 'idle',
   );
+  // Subtle indicator: only present when the graywolf host clock differs from
+  // this browser's by enough to matter (GH #234). Packet ages are already
+  // corrected to the host clock; this just makes the disagreement visible.
+  let clockSkew = $derived.by(() => {
+    if (!clockOffset.isSignificant) return null;
+    const ms = clockOffset.offsetMs;
+    const mag = formatOffsetMagnitude(ms);
+    return {
+      text: `host clock ${ms > 0 ? '+' : '−'}${mag}`,
+      title: `graywolf host clock is ${mag} ${ms > 0 ? 'ahead of' : 'behind'} this browser; packet ages are shown against the host clock.`,
+    };
+  });
 
   onDestroy(() => {
     dataStore.stop();
     closePopup();
+    radarFrames.destroy();
+    radarLayer?.destroy();
     stationsLayer?.destroy();
     trailsLayer?.destroy();
     weatherLayer?.destroy();
     windBarbsLayer?.destroy();
     hoverPathLayer?.destroy();
     myPositionLayer?.destroy();
+    fixedPointsLayer?.destroy();
+    radarLayer = null;
     stationsLayer = null;
     trailsLayer = null;
     weatherLayer = null;
     windBarbsLayer = null;
     hoverPathLayer = null;
     myPositionLayer = null;
+    fixedPointsLayer = null;
     mapRef = null;
     if (tickTimer) {
       clearInterval(tickTimer);
@@ -572,12 +861,86 @@
       <label class="toggle-row">
         <input
           type="checkbox"
+          checked={layerToggles.fixedPoints}
+          onchange={(e) => (layerToggles.fixedPoints = e.currentTarget.checked)}
+        />
+        <span>Fixed Points</span>
+      </label>
+      <label class="toggle-row">
+        <input
+          type="checkbox"
           checked={layerToggles.directRxOnly}
           onchange={(e) => (layerToggles.directRxOnly = e.currentTarget.checked)}
         />
         <span>Direct RX</span>
       </label>
+      <label class="toggle-row">
+        <input
+          type="checkbox"
+          checked={layerToggles.rfOnly}
+          onchange={(e) => (layerToggles.rfOnly = e.currentTarget.checked)}
+        />
+        <span>RF Only</span>
+      </label>
+      <label class="toggle-row">
+        <input
+          type="checkbox"
+          checked={radarSettings.visible}
+          onchange={(e) => (radarSettings.visible = e.currentTarget.checked)}
+        />
+        <span>Radar</span>
+      </label>
     </div>
+
+    <label class="timerange-label" for="radar-opacity-range">
+      Radar opacity: {Math.round(radarSettings.opacity * 100)}%
+    </label>
+    <input
+      id="radar-opacity-range"
+      type="range"
+      min="0.1"
+      max="1.0"
+      step="0.05"
+      class="radar-opacity-range"
+      bind:value={radarSettings.opacity}
+    />
+
+    {#if radarSettings.visible}
+      <!-- Radar loop animation: two text buttons [Play/Pause][Reset] and a
+           frame-position slider. Disabled until the manifest yields >1 frame. -->
+      <div class="radar-anim-buttons">
+        <button
+          type="button"
+          class="radar-anim-btn"
+          onclick={() => radarFrames.toggle()}
+          disabled={radarFrames.count <= 1}
+          aria-label={radarFrames.playing ? 'Pause radar loop' : 'Play radar loop'}
+        >
+          {radarFrames.playing ? 'Pause' : 'Play'}
+        </button>
+        <button
+          type="button"
+          class="radar-anim-btn"
+          onclick={() => radarFrames.stop()}
+          disabled={radarFrames.count <= 1}
+          aria-label="Reset radar loop and jump to the latest frame"
+        >
+          Reset
+        </button>
+      </div>
+      <label class="timerange-label" for="radar-frame-range">{radarFrameLabel}</label>
+      <input
+        id="radar-frame-range"
+        type="range"
+        class="radar-frame-range"
+        min="0"
+        max={Math.max(0, radarFrames.count - 1)}
+        step="1"
+        value={radarFrames.index}
+        oninput={(e) => radarFrames.seek(Number(e.currentTarget.value))}
+        disabled={radarFrames.count <= 1}
+      />
+    {/if}
 
     <label class="timerange-label" for="map-timerange-select">Time range</label>
     <select
@@ -668,6 +1031,23 @@
     onclose={closeCtxMenu}
   />
 
+  <FixedPointDialog
+    bind:open={fpDialog.open}
+    lat={fpDialog.lat}
+    lon={fpDialog.lon}
+    onConfirm={({ name, table, symbol, overlay }) => {
+      const p = fixedPointsStore.add({
+        name,
+        table,
+        symbol,
+        overlay,
+        lat: fpDialog.lat,
+        lon: fpDialog.lon,
+      });
+      toasts.success(`Added "${p.name}"`);
+    }}
+  />
+
   <!-- Status bar (bottom-center; legacy placement so it doesn't sit
        under the sidebar on narrow desktop windows). -->
   <div class="map-status-bar" aria-live="polite">
@@ -676,6 +1056,8 @@
     <span class="status-sep">&middot;</span>
     {#if layerToggles.directRxOnly}
       <span>{rfStationCount} heard direct / {stationCount} total</span>
+    {:else if layerToggles.rfOnly}
+      <span>{rfOnlyStationCount} RF reachable / {stationCount} total</span>
     {:else}
       <span>{stationCount} station{stationCount !== 1 ? 's' : ''}</span>
     {/if}
@@ -684,6 +1066,10 @@
     {#if lastFetchAgo}
       <span class="status-sep">&middot;</span>
       <span>{lastFetchAgo}</span>
+    {/if}
+    {#if clockSkew}
+      <span class="status-sep">&middot;</span>
+      <span class="clock-skew" title={clockSkew.title}>{clockSkew.text}</span>
     {/if}
   </div>
 </div>
@@ -803,6 +1189,48 @@
     letter-spacing: 1px;
     color: var(--color-text-muted);
   }
+  .radar-opacity-range {
+    width: 100%;
+    cursor: pointer;
+    accent-color: var(--color-accent, #4a9eff);
+  }
+  /* Radar loop: two text buttons [Play/Pause][Reset] side by side. */
+  .radar-anim-buttons {
+    display: flex;
+    gap: 6px;
+    margin-top: 14px;
+  }
+  .radar-anim-btn {
+    flex: 1;
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 12px;
+    background: var(--color-surface);
+    color: var(--color-text);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .radar-anim-btn:hover:not(:disabled) {
+    border-color: var(--color-accent, #4a9eff);
+    color: var(--color-accent, #4a9eff);
+  }
+  .radar-anim-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .radar-frame-range {
+    width: 100%;
+    cursor: pointer;
+    accent-color: var(--color-accent, #4a9eff);
+  }
+  .radar-frame-range:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
   .map-timerange-select {
     width: 100%;
     background: var(--color-surface);
@@ -871,6 +1299,12 @@
   }
   .map-status-bar .status-sep {
     opacity: 0.5;
+  }
+  /* Clock-skew hint: present only when the host clock disagrees, so a faint
+     warning tint draws a glance without shouting. */
+  .map-status-bar .clock-skew {
+    color: var(--color-warning, #d4a72c);
+    opacity: 0.85;
   }
 
   /* Mobile: shrink coord/status text. Don't go below 11px to keep
@@ -974,6 +1408,93 @@
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
   }
 
+  /* Fixed-point markers: same footprint as station markers (APRS icon +
+     label to the right), but the label chip is tinted to distinguish
+     operator-placed landmarks from heard stations. MapLibre owns the DOM,
+     so these have to be :global. */
+  :global(.gw-fixed-marker) {
+    width: 21px;
+    height: 21px;
+    cursor: pointer;
+    pointer-events: auto;
+    user-select: none;
+  }
+  :global(.gw-fixed-icon) {
+    width: 21px;
+    height: 21px;
+  }
+  :global(.gw-fixed-label) {
+    position: absolute;
+    left: 100%;
+    top: 50%;
+    transform: translateY(-50%);
+    margin-left: 4px;
+    padding: 0 4px;
+    line-height: 12px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    color: #ffffff;
+    background: rgba(28, 58, 92, 0.82);
+    border: 1px solid rgba(110, 181, 255, 0.7);
+    border-radius: 2px;
+    white-space: nowrap;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  }
+
+  /* Fixed-point delete popup: theme-aware container matching station
+     popups, plus the interior name/coords/delete button. */
+  :global(.gw-fixed-popup .maplibregl-popup-content) {
+    background: var(--map-overlay-bg);
+    color: var(--map-overlay-fg);
+    border: 1px solid var(--map-overlay-border);
+    border-radius: 8px;
+    box-shadow: var(--map-overlay-shadow);
+    padding: 12px;
+    font-size: 13px;
+  }
+  :global(.gw-fixed-popup .maplibregl-popup-close-button) {
+    color: var(--map-overlay-fg);
+    font-size: 20px;
+    width: 32px;
+    height: 32px;
+  }
+  :global(.gw-fixed-popup-body) {
+    font-family: var(--font-mono);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 140px;
+  }
+  :global(.gw-fixed-popup-name) {
+    font-weight: 700;
+    font-size: 13px;
+    color: var(--color-text);
+    padding-right: 16px;
+  }
+  :global(.gw-fixed-popup-coords) {
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+  :global(.gw-fixed-popup-delete) {
+    margin-top: 2px;
+    padding: 5px 10px;
+    border: 1px solid var(--color-danger, #d64545);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-danger, #d64545);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  :global(.gw-fixed-popup-delete:hover) {
+    background: var(--color-danger, #d64545);
+    color: #ffffff;
+  }
+
   /* Station popup: theme-aware container + tip + close button. */
   :global(.gw-station-popup .maplibregl-popup-content) {
     background: var(--map-overlay-bg);
@@ -1020,6 +1541,11 @@
   :global(.stn-path .path-link) { color: #6eb5ff; text-decoration: none; cursor: pointer; }
   :global(.stn-path .path-link:hover) { text-decoration: underline; }
   :global(.stn-comment) { color: var(--color-text-dim); font-style: italic; font-size: 12px; }
+  :global(.stn-actions) { font-size: 12px; display: flex; gap: 12px; flex-wrap: wrap; }
+  :global(.stn-msg-link) { color: #6eb5ff; text-decoration: none; }
+  :global(.stn-msg-link:hover) { text-decoration: underline; }
+  :global(.stn-ext-link) { color: #6eb5ff; text-decoration: none; }
+  :global(.stn-ext-link:hover) { text-decoration: underline; }
   :global(.stn-weather) { font-size: 12px; }
   :global(.stn-weather-row) {
     display: flex;

@@ -780,7 +780,35 @@ its own list. The regression test in
 [`pkg/app/wiring_blocklist_isolation_test.go`](../../pkg/app/wiring_blocklist_isolation_test.go)
 locks the invariant in behaviorally.
 
-### 41. Hop count excludes generic path aliases
+### 41. The live map measures packet age against the host clock, not the browser's
+
+Packet receive times (`last_heard`) and every other server timestamp are
+stamped by the **graywolf host** clock. The browser must therefore compute
+packet age relative to that same clock, never its own `Date.now()` —
+otherwise a host whose clock is unsynced (a Pi with no RTC, a browser that
+has drifted off NTP) makes ages go negative or silently hides every station
+from the map (GH #234).
+
+[`web/src/lib/map/clock-offset.svelte.js`](../../web/src/lib/map/clock-offset.svelte.js)
+reads the standard HTTP `Date:` header off each `/api/stations` response
+(`clockOffset.observe`), derives `offsetMs = serverNow - browserNow`, and
+exposes `serverNow() ≈ Date.now() + offsetMs`. The two age-math sites use it:
+the prune cutoff in
+[`data-store.svelte.js`](../../web/src/lib/map/data-store.svelte.js)
+(`pruneStale`) and `timeAgo` in
+[`popup-helpers.js`](../../web/src/lib/map/popup-helpers.js).
+
+*Why:* the host stamps the timestamps, so the host clock is the only shared
+reference; correcting the browser to it (rather than the reverse) keeps every
+connected browser consistent even when their clocks disagree with each
+other. No new endpoint or protocol — the `Date` header is already on the wire.
+
+*How to apply:* never reintroduce `Date.now()` for map packet-age math; route
+it through `clockOffset.serverNow()`. The opposite case — timing a
+*browser-local* event, e.g. "last fetch N ago" — must pass `Date.now()`
+explicitly as `timeAgo`'s second arg to opt out of the host correction.
+
+### 42. Hop count excludes generic path aliases
 
 The displayed "hop" count for a station/packet is the number of *real*
 digipeaters that retransmitted it, not the number of path elements with
@@ -802,3 +830,135 @@ of truth for which path entries are real hops. The map's `hops` field is
 computed once in [`pkg/stationcache/extract.go`](../../pkg/stationcache/extract.go)
 and consumed verbatim by the frontend popup; do not recompute it from
 `path.length` client-side.
+
+### 43. 64-bit atomic counters must be `atomic.Uint64`, not bare `uint64`
+
+Any struct field touched by a 64-bit atomic operation must use the
+`atomic.Uint64` / `atomic.Int64` types, never a plain `uint64` accessed via
+`atomic.AddUint64`/`atomic.LoadUint64`. On 32-bit platforms (notably ARMv6 --
+the Raspberry Pi Zero), a 64-bit atomic op requires the address to be 8-byte
+aligned; a bare `uint64` sitting mid-struct on a 4-byte boundary is not
+guaranteed to be, and the op panics with `unaligned 64-bit atomic operation`.
+The `atomic.Uint64` wrapper carries an alignment guarantee, so the compiler
+places it correctly regardless of field order. The iGate's four packet
+counters (`statGated`, `statDownlinked`, `statFiltered`, `statDropped` in
+[`pkg/igate/igate.go`](../../pkg/igate/igate.go)) are the canonical example.
+
+*Why:* graywolf issue #262 -- on a Pi Zero the iGate connected to APRS-IS fine
+but the web UI showed "Disabled" because `handleISLine`'s first
+`atomic.AddUint64` panicked on the misaligned `statFiltered`, crash-looping the
+process roughly every 90 seconds so the UI never observed a healthy session.
+64-bit hosts are unaffected, which is why it slipped through.
+
+*How to apply:* declare any atomically-accessed 64-bit counter as
+`atomic.Uint64`/`atomic.Int64` and use the method API (`.Add(1)`, `.Load()`,
+`.Store()`). Do not reintroduce bare `uint64` + `atomic.AddUint64`, and do not
+rely on field ordering for alignment.
+
+### 44. Every Go→Rust IPC payload must be dispatched in BOTH modem loops
+
+The desktop/server modem and the Android modem read the same
+`graywolf.proto` IPC stream through **two independent dispatch matches**,
+and a Go→Rust payload only works on a platform whose match has an arm for
+it:
+
+1. `graywolf-modem/src/modem/mod.rs` — `handle_message` (desktop, server, the cdylib's non-Android path)
+2. `graywolf-modem/src/android/mod.rs` — the inbound `while let` in `run_demod` (Android)
+
+Both end in a catch-all (`_ => {}` / the grouped Rust→Go ignore arm), so a
+new payload added to one loop but not the other is **silently dropped** on
+the platform that missed it — no error, no log, just a Go-side request that
+never gets its reply and times out.
+
+*Why:* this has bitten twice. 5d6b75ad wired `ConfigurePtt` / `ManualPtt` /
+`TransmitFrame` into `run_demod` after they were found dropped on Android
+(PTT stayed silent); then `TransmitTestSignal` (the Channel TX test-signal
+feature, #193) shipped to the desktop loop only and fell into the Android
+catch-all, so **Test TX** returned `modembridge: test signal timeout` on
+Android (#267). Same failure mode as invariant #34 (KISS dispatch in two
+places), but across the Go↔Rust boundary.
+
+*How to apply:* when you add a Go→Rust `Payload` variant, add a matching
+arm to **both** loops in the same change — and on Android remember to send
+the corresponding Rust→Go reply (e.g. `TestSignalResult`) so the Go side's
+bounded wait resolves. Android TX jobs submit samples unscaled (gain is
+applied by `AndroidTxSink`), unlike the desktop arm which pre-scales by the
+output device gain.
+
+### 45. Disabling a KISS interface releases its device; the DTO flag is a pointer
+
+A KISS interface row carries `Enabled` (`KissInterface.Enabled`,
+gorm `default:true`). When `Enabled=false` the manager does **not** keep
+the device open looping reconnect attempts — it stops the supervisor,
+which cancels the serve context and closes the underlying
+`io.ReadWriteCloser` (the serial fd / TCP socket). This is what lets an
+operator release e.g. a Bluetooth `/dev/rfcomm0` tty before a battery
+swap without deleting the interface (graywolf #152). Three call sites
+already honor the flag and must stay in sync — they are the same
+two-switch dispatch as invariant #34 plus the TX snapshot:
+
+1. `pkg/app/wiring.go` — `kissComponent().start` skips `!Enabled` rows at boot.
+2. `pkg/webapi/kiss.go` — `notifyKissManager` calls `kissManager.Stop(id)` (release) on `!Enabled`, and (re)starts on `Enabled`. The focused `PUT /api/kiss/{id}/enabled` toggle (`setKissEnabled`) routes through here.
+3. `pkg/app/wiring.go` — `buildTxBackendSnapshot` excludes `!Enabled` rows so a disabled TNC registers no governor TX backend.
+
+*notifyKissManager must enumerate the same interface types as the boot
+switch* (this is invariant #34's two-switch hazard in practice). The
+re-enable path goes through `notifyKissManager`, so its `switch` needs a
+case for **every** type `kissComponent` can start — `tcp`, `tcp-client`,
+`serial`, `bluetooth`, `usbserial`. A type that falls into `default:`
+hits `Stop(id)` and silently never restarts on re-enable (this bit
+Bluetooth/USB: they were missing and re-enable was a no-op). The
+serial-family cases (`serial`/`bluetooth`/`usbserial`) must also pass
+`OpenFunc: s.kissSerialOpenFunc` — on Android that opener routes MAC /
+vid:pid device strings through `platformsvc`; without it the supervisor
+cannot open the device. The webapi `Server` receives it via
+`Config.KissSerialOpenFunc` (wired from `App.kissSerialOpenFunc()`; nil
+on desktop).
+
+*Why a pointer:* `dto.KissRequest.Enabled` is `*bool`, not `bool`. KISS
+`POST`/`PUT` is full-resource replace (invariant at line ~185), so a
+plain `bool` would conflate "field omitted" with "disable" and an older
+client editing any field would silently stop the interface. `nil` means
+"omitted → default true"; `ToModel` substitutes the explicit value. The
+frontend always sends `enabled` on save so a `PUT` never re-enables a row
+the operator disabled.
+
+*Create vs. the gorm default:* the `default:true` tag is kept (so the SQL
+DDL default survives for raw inserts / downgrade-safety — `migrate_kiss_*`
+tests rely on it). But gorm treats a Go zero-value `bool` as "unset" and
+sends the column default on `INSERT`, so a `POST` with `enabled=false`
+would otherwise persist `true` (the footgun the `actions` table dodged by
+dropping its tag default). `Store.CreateKissInterface` therefore captures
+the requested value *before* `db.Create` (gorm writes the applied default
+back into the struct) and re-asserts `false` with an explicit `Update`.
+`UpdateKissInterface` (`db.Save`) writes `false` correctly on its own, so
+only the create path needs the fix-up.
+
+Source: [`../../pkg/webapi/dto/kiss.go`](../../pkg/webapi/dto/kiss.go)
+(`KissRequest.ToModel`, `KissEnabledRequest`),
+[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`setKissEnabled`, `notifyKissManager`),
+[`../../pkg/configstore/store.go`](../../pkg/configstore/store.go) (`CreateKissInterface`),
+[`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`kissComponent`, `buildTxBackendSnapshot`, webapi `Config.KissSerialOpenFunc`).
+
+### 46. Per-frame metadata must be populated by every demod profile, not just Profile A
+
+The default AFSK RX path is the `RECOMMENDED_3DEMOD` ensemble (Profile A,
+Profile A + hard-limiter, Profile B / FM-discriminator). The ensemble dedups
+identical frames across sub-demods and keeps the *first* emitter within a
+~110-sample window; in practice **Profile B usually wins** because its
+pipeline detects the closing flag a few samples earlier. So any per-frame
+field stamped onto `DecodedFrame` (e.g. `audio_level_mark`/`space`) must be
+produced by *all three* profiles -- a field tracked only in
+`process_profile_a` will be the `-1.0`/zero init on the frames that actually
+reach the application, even though Profile A "also" decoded the packet.
+
+This bit the per-packet audio level (GRA-84): Profile B never called
+`track_level`, so nearly every logged packet showed no level (a dash) until
+Profile B was taught to track its center-frequency envelope. When adding a
+new per-frame measurement, populate it in `process_profile_a` **and**
+`process_profile_b`, or compute it profile-independently.
+
+Source: [`../../graywolf-modem/src/demod_afsk.rs`](../../graywolf-modem/src/demod_afsk.rs)
+(`process_profile_a`, `process_profile_b`, `track_level`),
+[`../../graywolf-modem/src/demod_afsk_multi.rs`](../../graywolf-modem/src/demod_afsk_multi.rs)
+(dedup in `process_sample`).
