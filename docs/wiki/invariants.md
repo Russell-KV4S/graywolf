@@ -963,7 +963,23 @@ Source: [`../../graywolf-modem/src/demod_afsk.rs`](../../graywolf-modem/src/demo
 [`../../graywolf-modem/src/demod_afsk_multi.rs`](../../graywolf-modem/src/demod_afsk_multi.rs)
 (dedup in `process_sample`).
 
-### 47. MapLibre `map.remove()` deletes `this.style`; any layer helper called after teardown must guard `getSource()`/`getLayer()`
+### 47. The GPS serial reader must deassert RTS/DTR on open
+
+`gps.RunSerial` opens its NMEA port with
+`InitialStatusBits: &serial.ModemOutputBits{RTS: false, DTR: false}`. This is
+not optional cosmetics: opening a tty otherwise leaves RTS and DTR raised
+(`go.bug.st/serial` only touches the modem bits when `InitialStatusBits` is
+non-nil, and the kernel asserts both on open by default). On shared serial
+rigs where RTS drives PTT -- the Digirig Mobile RS232 is the canonical case --
+raised RTS keys the transmitter the instant GPS connects, producing a
+persistent PTT that can't be toggled off (issue #305). GPS only consumes RX,
+so it holds the control lines low and leaves RTS for the PTT driver to assert
+when it keys. macOS does not exhibit this because its tty open does not raise
+the lines the same way, which is why the bug was Linux-only.
+
+Source: [`../../pkg/gps/serial.go`](../../pkg/gps/serial.go) (`RunSerial`).
+
+### 48. MapLibre `map.remove()` deletes `this.style`; any layer helper called after teardown must guard `getSource()`/`getLayer()`
 
 MapLibre GL JS v5 `map.remove()` → `_updateStyle(null)` → `delete this.style`.
 Any subsequent call to `map.getSource()` or `map.getLayer()` throws a
