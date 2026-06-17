@@ -7,6 +7,25 @@
 # route the body references via [text](link) markdown; renderer only
 # accepts internal #/... routes.
 
+- version: "0.14.2"
+  date: "2026-06-17"
+  style: info
+  schema_version: 1
+  link: "#/map"
+  title: "APRS popup tweaks, dBFS packet levels, and map polish"
+  body: |
+    APRS object popups on the Live Map now show the originating
+    callsign, so you can see which station sent an object or item.
+
+    The QRZ action on a station popup now drops the SSID before looking
+    up the callsign, so it opens the base station's qrz.com page.
+
+    Per-packet audio levels are now reported in dBFS, matching the units
+    on the real-time audio meter so the two line up.
+
+    The station-click actions on the map were restyled to match the map
+    context menu.
+
 - version: "0.14.1"
   date: "2026-06-17"
   style: info
