@@ -1533,6 +1533,23 @@
   :global(.stn-hdr) { display: flex; align-items: center; gap: 8px; }
   :global(.stn-call) { color: #d4a040; font-size: 13px; font-weight: 700; }
   :global(.stn-sub) { color: var(--color-text-dim); font-size: 11px; margin-top: 2px; }
+  /* Object/item "from CALLSIGN" line: the originating station beneath the
+     object name. Sits directly under the title so source reads first,
+     distinct from the relay path (.stn-via / .stn-path) shown lower down. */
+  :global(.stn-src) {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 3px;
+    font-size: 12px;
+    line-height: 1.2;
+  }
+  :global(.stn-src-icon) { flex: 0 0 auto; color: var(--color-text-muted); }
+  :global(.stn-src-from) { color: var(--color-text-dim); }
+  :global(.stn-src-call) { color: var(--color-text); font-weight: 600; }
+  :global(.stn-src a.stn-src-call) { color: #6eb5ff; font-weight: 600; text-decoration: none; cursor: pointer; }
+  :global(.stn-src a.stn-src-call:hover) { text-decoration: underline; }
   :global(.stn-sep) { border-top: 1px solid var(--color-border-subtle); margin: 6px 0; }
   :global(.stn-coords) { font-size: 12px; }
   :global(.stn-meta) { color: var(--color-text-muted); font-size: 12px; }
@@ -1544,9 +1561,44 @@
   :global(.stn-path .path-link) { color: #6eb5ff; text-decoration: none; cursor: pointer; }
   :global(.stn-path .path-link:hover) { text-decoration: underline; }
   :global(.stn-comment) { color: var(--color-text-dim); font-style: italic; font-size: 12px; }
-  :global(.stn-actions) { font-size: 12px; display: flex; gap: 12px; flex-wrap: wrap; }
-  :global(.stn-link) { color: #6eb5ff; text-decoration: none; }
-  :global(.stn-link:hover) { text-decoration: underline; }
+  /* Station actions: styled to match the map right-click context menu
+     (.menu-item in map-context-menu.svelte) -- vertical icon+label rows
+     with a hover tint rather than inline text links. Negative side margin
+     lets each row's hover background extend toward the popup edges the way
+     menu items do. */
+  :global(.stn-actions) {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 2px -8px -4px;
+    font-size: 13px;
+  }
+  :global(.stn-action) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    border-radius: 5px;
+    color: var(--map-overlay-fg);
+    text-decoration: none;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  :global(.stn-action .stn-action-icon) {
+    flex: 0 0 auto;
+    color: var(--map-overlay-muted);
+  }
+  :global(.stn-action-label) { flex: 1 1 auto; }
+  :global(.stn-action:hover),
+  :global(.stn-action:focus-visible) {
+    background: var(
+      --color-surface-hover,
+      color-mix(in srgb, var(--color-text) 9%, transparent)
+    );
+    color: var(--color-text);
+    text-decoration: none;
+    outline: none;
+  }
   :global(.stn-weather) { font-size: 12px; }
   :global(.stn-weather-row) {
     display: flex;

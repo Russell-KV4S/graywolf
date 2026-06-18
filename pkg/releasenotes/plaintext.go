@@ -34,13 +34,18 @@ var htmlTag = regexp.MustCompile(`<[^>]+>`)
 //
 // The result is NOT length-capped; pass it through Truncate for stores
 // with a character limit (see PlayWhatsNewMax).
+//
+// A prerelease suffix on version is stripped before lookup, so a beta tag
+// like "0.14.3-beta.1" resolves to the note keyed to the bare "0.14.3"
+// it is pre-releasing -- matching Compare's documented beta semantics.
 func PlainText(version string) (string, error) {
 	var raws []rawNote
 	if err := yaml.Unmarshal(source, &raws); err != nil {
 		return "", fmt.Errorf("releasenotes: parse yaml: %w", err)
 	}
+	want := strip(version)
 	for _, r := range raws {
-		if r.Version != version {
+		if strip(r.Version) != want {
 			continue
 		}
 		htmlBody, err := renderMarkdown(r.Body)

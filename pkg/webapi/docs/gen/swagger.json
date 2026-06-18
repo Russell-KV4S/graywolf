@@ -8833,6 +8833,9 @@
                     "items": {
                         "$ref": "#/definitions/dto.CatalogState"
                     }
+                },
+                "world": {
+                    "$ref": "#/definitions/dto.CatalogWorld"
                 }
             }
         },
@@ -8911,6 +8914,29 @@
                 },
                 "slug": {
                     "type": "string"
+                }
+            }
+        },
+        "dto.CatalogWorld": {
+            "type": "object",
+            "properties": {
+                "bbox": {
+                    "type": "array",
+                    "items": {
+                        "type": "number"
+                    }
+                },
+                "maxZoom": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "sha256": {
+                    "type": "string"
+                },
+                "sizeBytes": {
+                    "type": "integer"
                 }
             }
         },
@@ -10807,13 +10833,25 @@
         "packetlog.AudioLevel": {
             "type": "object",
             "properties": {
+                "level_dbfs": {
+                    "description": "LevelDBFS is the overall level in dBFS (mean tone amplitude), floored at -60.",
+                    "type": "number"
+                },
                 "mark": {
-                    "description": "Mark is the mark-tone amplitude, scaled to ~0-100.",
+                    "description": "Mark is the legacy mark-tone amplitude, scaled linearly to ~0-100.",
                     "type": "integer"
                 },
+                "mark_dbfs": {
+                    "description": "MarkDBFS is the mark-tone level in dBFS, floored at -60.",
+                    "type": "number"
+                },
                 "space": {
-                    "description": "Space is the space-tone amplitude, scaled to ~0-100.",
+                    "description": "Space is the legacy space-tone amplitude, scaled linearly to ~0-100.",
                     "type": "integer"
+                },
+                "space_dbfs": {
+                    "description": "SpaceDBFS is the space-tone level in dBFS, floored at -60.",
+                    "type": "number"
                 }
             }
         },
@@ -11150,6 +11188,10 @@
                         "$ref": "#/definitions/webapi.StationPosDTO"
                     }
                 },
+                "source": {
+                    "description": "Source is the originating station's callsign for an object/item — the station that created and transmitted it, which may differ from the digipeater that relayed it. Empty for regular stations, where Callsign already is the source.",
+                    "type": "string"
+                },
                 "symbol_code": {
                     "description": "SymbolCode is the APRS symbol code character within the selected table.",
                     "type": "string"
@@ -11462,7 +11504,7 @@
             "type": "object",
             "properties": {
                 "audio_level": {
-                    "description": "AudioLevel is the demodulator's per-packet received audio level\n(Direwolf-style mark/space tone amplitudes). Present only for frames\nheard off-air via the modem; nil for TX, APRS-IS, and hardware KISS-TNC\nentries, which carry no soundcard-domain level.",
+                    "description": "AudioLevel is the demodulator's per-packet received audio level (dBFS,\nplus legacy linear mark/space). Present only for frames heard off-air via\nthe modem; nil for TX, APRS-IS, and hardware KISS-TNC entries, which carry\nno soundcard-domain level.",
                     "allOf": [
                         {
                             "$ref": "#/definitions/packetlog.AudioLevel"

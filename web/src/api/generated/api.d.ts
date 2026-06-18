@@ -2406,6 +2406,7 @@ export interface components {
             provinces?: components["schemas"]["dto.CatalogProvince"][];
             schemaVersion?: number;
             states?: components["schemas"]["dto.CatalogState"][];
+            world?: components["schemas"]["dto.CatalogWorld"];
         };
         "dto.CatalogCountry": {
             bbox?: number[];
@@ -2430,6 +2431,13 @@ export interface components {
             sha256?: string;
             sizeBytes?: number;
             slug?: string;
+        };
+        "dto.CatalogWorld": {
+            bbox?: number[];
+            maxZoom?: number;
+            name?: string;
+            sha256?: string;
+            sizeBytes?: number;
         };
         "dto.ChannelBacking": {
             health?: string;
@@ -3324,10 +3332,16 @@ export interface components {
             peak_dbfs?: number;
         };
         "packetlog.AudioLevel": {
-            /** @description Mark is the mark-tone amplitude, scaled to ~0-100. */
+            /** @description LevelDBFS is the overall level in dBFS (mean tone amplitude), floored at -60. */
+            level_dbfs?: number;
+            /** @description Mark is the legacy mark-tone amplitude, scaled linearly to ~0-100. */
             mark?: number;
-            /** @description Space is the space-tone amplitude, scaled to ~0-100. */
+            /** @description MarkDBFS is the mark-tone level in dBFS, floored at -60. */
+            mark_dbfs?: number;
+            /** @description Space is the legacy space-tone amplitude, scaled linearly to ~0-100. */
             space?: number;
+            /** @description SpaceDBFS is the space-tone level in dBFS, floored at -60. */
+            space_dbfs?: number;
         };
         /** @enum {string} */
         "packetlog.Direction": "RX" | "TX" | "IS";
@@ -3455,6 +3469,8 @@ export interface components {
             path_positions?: number[][];
             /** @description Positions is the station's position history, newest first; static stations have exactly one entry. */
             positions?: components["schemas"]["webapi.StationPosDTO"][];
+            /** @description Source is the originating station's callsign for an object/item — the station that created and transmitted it, which may differ from the digipeater that relayed it. Empty for regular stations, where Callsign already is the source. */
+            source?: string;
             /** @description SymbolCode is the APRS symbol code character within the selected table. */
             symbol_code?: string;
             /** @description SymbolTable is the APRS symbol table character ("/" primary, "\\" alternate, or an overlay char). */
@@ -3594,10 +3610,10 @@ export interface components {
         };
         "webapi.packetDTO": {
             /**
-             * @description AudioLevel is the demodulator's per-packet received audio level
-             *     (Direwolf-style mark/space tone amplitudes). Present only for frames
-             *     heard off-air via the modem; nil for TX, APRS-IS, and hardware KISS-TNC
-             *     entries, which carry no soundcard-domain level.
+             * @description AudioLevel is the demodulator's per-packet received audio level (dBFS,
+             *     plus legacy linear mark/space). Present only for frames heard off-air via
+             *     the modem; nil for TX, APRS-IS, and hardware KISS-TNC entries, which carry
+             *     no soundcard-domain level.
              */
             audio_level?: components["schemas"]["packetlog.AudioLevel"];
             /** @description Channel is the graywolf channel ID that observed or transmitted the packet. */

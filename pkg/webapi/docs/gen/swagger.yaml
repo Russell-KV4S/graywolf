@@ -969,6 +969,8 @@ definitions:
         items:
           $ref: '#/definitions/dto.CatalogState'
         type: array
+      world:
+        $ref: '#/definitions/dto.CatalogWorld'
     type: object
   dto.CatalogCountry:
     properties:
@@ -1020,6 +1022,21 @@ definitions:
         type: integer
       slug:
         type: string
+    type: object
+  dto.CatalogWorld:
+    properties:
+      bbox:
+        items:
+          type: number
+        type: array
+      maxZoom:
+        type: integer
+      name:
+        type: string
+      sha256:
+        type: string
+      sizeBytes:
+        type: integer
     type: object
   dto.ChannelBacking:
     properties:
@@ -2434,12 +2451,21 @@ definitions:
     type: object
   packetlog.AudioLevel:
     properties:
+      level_dbfs:
+        description: LevelDBFS is the overall level in dBFS (mean tone amplitude), floored at -60.
+        type: number
       mark:
-        description: Mark is the mark-tone amplitude, scaled to ~0-100.
+        description: Mark is the legacy mark-tone amplitude, scaled linearly to ~0-100.
         type: integer
+      mark_dbfs:
+        description: MarkDBFS is the mark-tone level in dBFS, floored at -60.
+        type: number
       space:
-        description: Space is the space-tone amplitude, scaled to ~0-100.
+        description: Space is the legacy space-tone amplitude, scaled linearly to ~0-100.
         type: integer
+      space_dbfs:
+        description: SpaceDBFS is the space-tone level in dBFS, floored at -60.
+        type: number
     type: object
   packetlog.Direction:
     enum:
@@ -2673,6 +2699,9 @@ definitions:
         items:
           $ref: '#/definitions/webapi.StationPosDTO'
         type: array
+      source:
+        description: Source is the originating station's callsign for an object/item — the station that created and transmitted it, which may differ from the digipeater that relayed it. Empty for regular stations, where Callsign already is the source.
+        type: string
       symbol_code:
         description: SymbolCode is the APRS symbol code character within the selected table.
         type: string
@@ -2898,10 +2927,10 @@ definitions:
         allOf:
           - $ref: '#/definitions/packetlog.AudioLevel'
         description: |-
-          AudioLevel is the demodulator's per-packet received audio level
-          (Direwolf-style mark/space tone amplitudes). Present only for frames
-          heard off-air via the modem; nil for TX, APRS-IS, and hardware KISS-TNC
-          entries, which carry no soundcard-domain level.
+          AudioLevel is the demodulator's per-packet received audio level (dBFS,
+          plus legacy linear mark/space). Present only for frames heard off-air via
+          the modem; nil for TX, APRS-IS, and hardware KISS-TNC entries, which carry
+          no soundcard-domain level.
       channel:
         description: Channel is the graywolf channel ID that observed or transmitted the packet.
         type: integer

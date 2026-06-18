@@ -87,6 +87,30 @@ func TestPlainText_MissingVersion(t *testing.T) {
 	}
 }
 
+// A beta/prerelease tag must resolve to the note keyed to the bare
+// x.y.z it pre-releases. This is what the Release workflow relies on:
+// it passes the full tag (e.g. "0.14.3-beta.1") to release-notes, and
+// the note is keyed to the bare "0.14.3".
+func TestPlainText_BetaSuffixResolvesToBareVersion(t *testing.T) {
+	src := []byte(`
+- version: "0.14.3"
+  date: "2026-06-18"
+  style: info
+  title: "Beta fix"
+  body: "B"
+`)
+	restore := forceParse(src)
+	defer restore()
+
+	got, err := PlainText("0.14.3-beta.1")
+	if err != nil {
+		t.Fatalf("PlainText(beta tag): %v", err)
+	}
+	if !strings.Contains(got, "Beta fix") {
+		t.Fatalf("beta tag did not resolve to bare-version note; got %q", got)
+	}
+}
+
 // TestPlainText_EmbeddedLatest renders the newest real changelog entry
 // and confirms it fits Play's limit after truncation -- a guard that the
 // release workflow's whatsnew step won't be rejected by the API.
