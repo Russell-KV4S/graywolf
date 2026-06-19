@@ -2,7 +2,9 @@ package dto
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/chrissnell/graywolf/pkg/ax25"
 	"github.com/chrissnell/graywolf/pkg/configstore"
 )
 
@@ -58,7 +60,7 @@ type BeaconRequest struct {
 	SbTurnAngle    uint32  `json:"sb_turn_angle"`
 	SbTurnSlope    uint32  `json:"sb_turn_slope"`
 	SbMinTurnTime  uint32  `json:"sb_min_turn_time"`
-	SendToAPRSIS   bool    `json:"send_to_aprs_is"`
+	SendPath       string  `json:"send_path" enums:"rf,both,is_only" example:"rf"`
 	Enabled        bool    `json:"enabled"`
 }
 
@@ -73,6 +75,37 @@ type BeaconRequest struct {
 // constraints: ambiguity must be 0..4; only uncompressed and mic_e
 // carry ambiguity bytes, so compressed must keep ambiguity at zero.
 func (r BeaconRequest) Validate() error {
+	switch r.SendPath {
+	case "", "rf", "both", "is_only":
+		// "" normalizes to rf in normalizedSendPath
+	default:
+		return fmt.Errorf("send_path must be one of rf, both, is_only (got %q)", r.SendPath)
+	}
+	// Reject addresses the beacon loader cannot parse, so an invalid
+	// callsign/destination/path is surfaced here at save time instead of
+	// silently dropping the beacon from the scheduler at load. APRS SSIDs
+	// must be 0-15; this also catches bad characters and over-length calls.
+	// An empty/nil callsign override means "inherit the station callsign",
+	// which is validated by the station config, so skip it here.
+	if r.Callsign != nil {
+		if c := strings.TrimSpace(*r.Callsign); c != "" {
+			if _, err := ax25.ParseAddress(c); err != nil {
+				return fmt.Errorf("callsign %q is not a valid APRS address (SSID must be 0-15): %w", c, err)
+			}
+		}
+	}
+	if d := strings.TrimSpace(r.Destination); d != "" {
+		if _, err := ax25.ParseAddress(d); err != nil {
+			return fmt.Errorf("destination %q is not a valid APRS address: %w", d, err)
+		}
+	}
+	for _, p := range strings.Split(r.Path, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			if _, err := ax25.ParseAddress(p); err != nil {
+				return fmt.Errorf("path element %q is not a valid APRS address: %w", p, err)
+			}
+		}
+	}
 	switch r.Type {
 	case "position", "igate":
 		if !r.UseGps && r.Latitude == 0 && r.Longitude == 0 {
@@ -95,6 +128,18 @@ func (r BeaconRequest) Validate() error {
 		}
 	}
 	return nil
+}
+
+// normalizedSendPath returns the send_path value to persist. Empty
+// (older client / unset form) becomes "rf" so the column never holds a
+// surprise value. Validate() rejects unknown non-empty values up front.
+func (r BeaconRequest) normalizedSendPath() string {
+	switch r.SendPath {
+	case "rf", "both", "is_only":
+		return r.SendPath
+	default:
+		return "rf"
+	}
 }
 
 // normalizedFormat returns the position_format value to persist:
@@ -161,7 +206,7 @@ func (r BeaconRequest) ToModel() configstore.Beacon {
 		SbTurnAngle:   r.SbTurnAngle,
 		SbTurnSlope:   r.SbTurnSlope,
 		SbMinTurnTime: r.SbMinTurnTime,
-		SendToAPRSIS:  r.SendToAPRSIS,
+		SendPath:      r.normalizedSendPath(),
 		Enabled:       r.Enabled,
 	}
 }
@@ -220,7 +265,7 @@ func (r BeaconRequest) ApplyToUpdate(id uint32, existing configstore.Beacon) con
 		SbTurnAngle:   r.SbTurnAngle,
 		SbTurnSlope:   r.SbTurnSlope,
 		SbMinTurnTime: r.SbMinTurnTime,
-		SendToAPRSIS:  r.SendToAPRSIS,
+		SendPath:      r.normalizedSendPath(),
 		Enabled:       r.Enabled,
 	}
 }
@@ -267,7 +312,7 @@ type BeaconResponse struct {
 	SbTurnAngle   uint32  `json:"sb_turn_angle"`
 	SbTurnSlope   uint32  `json:"sb_turn_slope"`
 	SbMinTurnTime uint32  `json:"sb_min_turn_time"`
-	SendToAPRSIS  bool    `json:"send_to_aprs_is"`
+	SendPath      string  `json:"send_path" enums:"rf,both,is_only" example:"rf"`
 	Enabled       bool    `json:"enabled"`
 }
 
@@ -311,7 +356,7 @@ func BeaconFromModel(m configstore.Beacon) BeaconResponse {
 		SbTurnAngle:   m.SbTurnAngle,
 		SbTurnSlope:   m.SbTurnSlope,
 		SbMinTurnTime: m.SbMinTurnTime,
-		SendToAPRSIS:  m.SendToAPRSIS,
+		SendPath:      m.SendPath,
 		Enabled:       m.Enabled,
 	}
 }

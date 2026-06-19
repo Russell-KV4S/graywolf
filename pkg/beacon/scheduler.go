@@ -17,10 +17,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/chrissnell/graywolf/pkg/aprs"
 	"github.com/chrissnell/graywolf/pkg/ax25"
 	"github.com/chrissnell/graywolf/pkg/configstore"
 	"github.com/chrissnell/graywolf/pkg/gps"
@@ -67,7 +67,7 @@ type Options struct {
 	Observer Observer
 	Clock    Clock  // defaults to wall clock
 	Version  string // running graywolf version, used to expand {{version}} in comments
-	ISSink   ISSink // optional APRS-IS line sender for beacons with SendToAPRSIS
+	ISSink   ISSink // optional APRS-IS line sender for beacons whose SendPath includes APRS-IS
 	// MaxConcurrentFires bounds how many beacon fires can be in flight
 	// at once. Zero selects DefaultMaxConcurrentFires. The scheduler
 	// never blocks on submit — if all workers are busy when a beacon is
@@ -429,59 +429,59 @@ func (s *Scheduler) sendBeaconWith(ctx context.Context, b Config, skipDedup bool
 		Priority:  ax25.PriorityBeacon,
 		SkipDedup: skipDedup,
 	}
-	if err := s.sink.Submit(ctx, b.Channel, frame, src); err != nil {
-		reason := classifySubmitError(err)
-		s.logger.Warn("beacon submit", "id", b.ID, "name", name, "reason", reason, "err", err)
-		if eo, ok := s.observer.(ErrorObserver); ok && eo != nil {
-			eo.OnSubmitError(name, reason)
+	// rf and is are derived from SendPath. Empty SendPath behaves as
+	// SendPathRF (safe default for any unmigrated/zero value).
+	sendRF := b.SendPath != SendPathISOnly
+	sendIS := b.SendPath == SendPathBoth || b.SendPath == SendPathISOnly
+
+	// RF/TNC leg. Skipped for is_only beacons so a radioless station can
+	// still beacon.
+	sent := false
+	if sendRF {
+		if err := s.sink.Submit(ctx, b.Channel, frame, src); err != nil {
+			reason := classifySubmitError(err)
+			s.logger.Warn("beacon submit", "id", b.ID, "name", name, "reason", reason, "err", err)
+			if eo, ok := s.observer.(ErrorObserver); ok && eo != nil {
+				eo.OnSubmitError(name, reason)
+			}
+			return &SendNowError{Kind: SendNowErrorSubmit, Err: err}
 		}
-		return &SendNowError{Kind: SendNowErrorSubmit, Err: err}
+		s.logger.Info("beacon sent", "id", b.ID, "type", b.Type, "channel", b.Channel, "send_path", b.SendPath, "info", info)
+		sent = true
 	}
-	s.logger.Info("beacon sent", "id", b.ID, "type", b.Type, "channel", b.Channel, "info", info)
-	if s.observer != nil {
+
+	// APRS-IS leg. When RF also ran, an IS failure is non-fatal (the RF
+	// copy already went out and an offline IS path is normal). For an
+	// is_only beacon the IS leg IS the transmission, so a missing sink or
+	// a send error is surfaced as a SendNowError.
+	if sendIS {
+		if s.isSink == nil {
+			if !sendRF {
+				return &SendNowError{Kind: SendNowErrorSubmit, Err: errors.New("aprs-is sink not configured for is_only beacon")}
+			}
+		} else {
+			// Inject to APRS-IS with a TCPIP* path, the convention for
+			// self-originated traffic. Sending the RF digipeater path
+			// (WIDE1-1 etc.) gets the packet silently dropped by APRS-IS
+			// servers, so it never reaches aprs.fi. Matches the messages
+			// sender's buildMessageTNC2.
+			line := aprs.FormatTNC2(b.Source.String(), dest.String(), []string{"TCPIP*"}, []byte(info))
+			if err := s.isSink.SendLine(line); err != nil {
+				s.logger.Warn("beacon aprs-is send", "id", b.ID, "name", name, "err", err)
+				if !sendRF {
+					return &SendNowError{Kind: SendNowErrorSubmit, Err: err}
+				}
+			} else {
+				s.logger.Info("beacon sent to aprs-is", "id", b.ID, "send_path", b.SendPath, "line", line)
+				sent = true
+			}
+		}
+	}
+
+	if sent && s.observer != nil {
 		s.observer.OnBeaconSent(b.Type)
 	}
-
-	// Optionally duplicate the beacon to APRS-IS. APRS-IS leg failures
-	// do not cause SendNow to report failure: the RF leg already
-	// succeeded, and an offline IS path is normal.
-	if b.SendToAPRSIS && s.isSink != nil {
-		line := formatTNC2(b.Source, dest, b.Path, info)
-		if err := s.isSink.SendLine(line); err != nil {
-			s.logger.Warn("beacon aprs-is send", "id", b.ID, "name", name, "err", err)
-		} else {
-			s.logger.Info("beacon sent to aprs-is", "id", b.ID, "line", line)
-		}
-	}
 	return nil
-}
-
-// formatTNC2 renders a beacon as a TNC-2 monitor line for APRS-IS.
-// The APRS-IS server adds the q-construct; we send the bare packet.
-func formatTNC2(src, dest ax25.Address, path []ax25.Address, info string) string {
-	var b strings.Builder
-	b.WriteString(src.Call)
-	if src.SSID != 0 {
-		fmt.Fprintf(&b, "-%d", src.SSID)
-	}
-	b.WriteByte('>')
-	b.WriteString(dest.Call)
-	if dest.SSID != 0 {
-		fmt.Fprintf(&b, "-%d", dest.SSID)
-	}
-	for _, p := range path {
-		b.WriteByte(',')
-		b.WriteString(p.Call)
-		if p.SSID != 0 {
-			fmt.Fprintf(&b, "-%d", p.SSID)
-		}
-		if p.Repeated {
-			b.WriteByte('*')
-		}
-	}
-	b.WriteByte(':')
-	b.WriteString(info)
-	return b.String()
 }
 
 // beaconName returns a stable, human-readable label for a beacon,

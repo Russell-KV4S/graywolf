@@ -2377,7 +2377,11 @@ export interface components {
             sb_slow_speed?: number;
             sb_turn_angle?: number;
             sb_turn_slope?: number;
-            send_to_aprs_is?: boolean;
+            /**
+             * @example rf
+             * @enum {string}
+             */
+            send_path?: "rf" | "both" | "is_only";
             slot_seconds?: number;
             smart_beacon?: boolean;
             symbol?: string;
@@ -2419,7 +2423,11 @@ export interface components {
             sb_slow_speed?: number;
             sb_turn_angle?: number;
             sb_turn_slope?: number;
-            send_to_aprs_is?: boolean;
+            /**
+             * @example rf
+             * @enum {string}
+             */
+            send_path?: "rf" | "both" | "is_only";
             slot_seconds?: number;
             smart_beacon?: boolean;
             symbol?: string;

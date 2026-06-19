@@ -97,7 +97,7 @@
     symbol_table: '/', symbol: '-', overlay: '',
     position_format: 'compressed', ambiguity: 0,
     pos_source: 'gps', latitude: '', longitude: '', alt_ft: '',
-    comment: '', interval: '600', slot: '', send_to_aprs_is: false, enabled: true,
+    comment: '', interval: '600', slot: '', send_path: 'rf', enabled: true,
   });
 
   let callsignError = $state('');
@@ -294,7 +294,7 @@
     form.comment = defaultComment;
     form.interval = '600';
     form.slot = '';
-    form.send_to_aprs_is = false;
+    form.send_path = 'rf';
     form.enabled = true;
     modalOpen = true;
   }
@@ -319,6 +319,7 @@
       symbol: row.symbol || '-',
       overlay: row.overlay || '',
       position_format: row.position_format || 'compressed',
+      send_path: row.send_path || 'rf',
       ambiguity: row.ambiguity ?? 0,
       pos_source: row.use_gps ? 'gps' : 'fixed',
       latitude: row.latitude != null ? String(row.latitude) : '',
@@ -352,8 +353,11 @@
       callsignToSend = '';
     }
     callsignError = '';
-    const channelId = parseInt(form.channel);
-    if (!Number.isFinite(channelId) || channelId <= 0) {
+    let channelId = parseInt(form.channel);
+    if (form.send_path === 'is_only') {
+      // APRS-IS-only beacon: no RF channel needed.
+      if (!Number.isFinite(channelId) || channelId <= 0) channelId = 0;
+    } else if (!Number.isFinite(channelId) || channelId <= 0) {
       toasts.error('Channel required');
       return;
     }
@@ -539,7 +543,9 @@
             {#if b.type === 'object'}
               <Badge variant="info">Object</Badge>
             {/if}
-            {#if b.send_to_aprs_is}
+            {#if b.send_path === 'is_only'}
+              <Badge variant="info">APRS-IS only</Badge>
+            {:else if b.send_path === 'both'}
               <Badge variant="info">APRS-IS</Badge>
             {/if}
           </div>
@@ -837,7 +843,16 @@
         hint="Optional. Aligns each transmission to a fixed second past the top of the hour so multiple beacons stagger instead of flooding. E.g. 0 fires at :00/:30 with a 1800 s interval; 900 fires at :15/:45. Leave blank to fire on a plain interval.">
         <Input id="bcn-slot" bind:value={form.slot} type="number" min="0" max="3599" placeholder="e.g. 0" />
       </FormField>
-      <Toggle bind:checked={form.send_to_aprs_is} label="Also send to APRS-IS" />
+      <FormField label="Destination" id="bcn-send-path"
+        hint="Where this beacon is transmitted. APRS-IS only needs no radio channel.">
+        <RadioGroup bind:value={form.send_path}>
+          <div class="pos-source-row">
+            <Radio value="rf" label="RF only" />
+            <Radio value="both" label="RF + APRS-IS" />
+            <Radio value="is_only" label="APRS-IS only (no radio)" />
+          </div>
+        </RadioGroup>
+      </FormField>
     </div>
   </div>
   {#if txBlock}

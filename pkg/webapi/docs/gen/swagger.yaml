@@ -845,8 +845,13 @@ definitions:
         type: integer
       sb_turn_slope:
         type: integer
-      send_to_aprs_is:
-        type: boolean
+      send_path:
+        enum:
+          - rf
+          - both
+          - is_only
+        example: rf
+        type: string
       slot_seconds:
         type: integer
       smart_beacon:
@@ -928,8 +933,13 @@ definitions:
         type: integer
       sb_turn_slope:
         type: integer
-      send_to_aprs_is:
-        type: boolean
+      send_path:
+        enum:
+          - rf
+          - both
+          - is_only
+        example: rf
+        type: string
       slot_seconds:
         type: integer
       smart_beacon:
