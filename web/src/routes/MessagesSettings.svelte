@@ -44,6 +44,21 @@
 <PageHeader title="Messaging" subtitle="APRS message sending options" />
 
 <Box title="Messages">
+  <p class="tx-channel-label">Digipeater path</p>
+  <input
+    class="path-input"
+    type="text"
+    placeholder="WIDE1-1,WIDE2-1"
+    value={messagesPreferencesState.defaultPath}
+    disabled={!messagesPreferencesState.loaded || messagesPreferencesState.saving}
+    onchange={(e) => messagesPreferencesState.setDefaultPath(e.target.value)}
+  />
+  <p class="messages-hint">
+    The digipeater path used for outbound APRS messages and bulletins.
+    <strong>WIDE1-1,WIDE2-1</strong> is the standard for most fixed stations (2 hops).
+    Use <strong>WIDE1-1</strong> for portable/mobile or when near a fill-in digipeater.
+    Leave empty to transmit direct with no digipeating.
+  </p>
   <Toggle
     checked={messagesPreferencesState.allowLong}
     onCheckedChange={(v) => messagesPreferencesState.setAllowLong(v)}
@@ -125,6 +140,20 @@
     font-size: 13px;
     font-weight: 500;
     color: var(--text-default);
+  }
+  .path-input {
+    width: 200px;
+    padding: 6px 8px;
+    font-size: 13px;
+    font-family: monospace;
+    border: 1px solid var(--border-default);
+    border-radius: 6px;
+    background: var(--bg-input, var(--bg-surface));
+    color: var(--text-default);
+  }
+  .path-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .retry-input {
     width: 80px;

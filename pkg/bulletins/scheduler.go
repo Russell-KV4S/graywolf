@@ -8,16 +8,26 @@ import (
 )
 
 const (
-	// BulletinInterval is the retransmit period for BLN0-9 per APRS spec.
+	// BulletinInterval is the stable retransmit period for BLN0-9 per APRS spec.
 	BulletinInterval = 20 * time.Minute
 	// AnnouncementInterval is the retransmit period for BLNA-Z.
 	AnnouncementInterval = 1 * time.Hour
-	// BulletinMaxSends = 12 sends × 20 min = 4 hours.
+	// BulletinMaxSends = 12 sends × 20 min ≈ 4 hours total coverage.
 	BulletinMaxSends = 12
 	// AnnouncementMaxSends = 96 sends × 1 hour = 4 days.
 	AnnouncementMaxSends = 96
 
-	schedulerPollInterval = 1 * time.Minute
+	// BulletinBurstCount is the number of rapid sends fired when a bulletin
+	// is first created. The burst covers packet collisions and ensures the
+	// bulletin is heard quickly even if the first transmission is lost.
+	// After BulletinBurstCount sends the scheduler settles into BulletinInterval.
+	// Per Bruninga/APRS protocol: new information should be retransmitted
+	// rapidly at first, then decay to the Net Cycle Time.
+	BulletinBurstCount = 3
+	// BulletinBurstInterval is the gap between burst sends.
+	BulletinBurstInterval = 30 * time.Second
+
+	schedulerPollInterval = 15 * time.Second
 )
 
 // Scheduler periodically re-sends outbound bulletins per the APRS spec
@@ -109,9 +119,15 @@ func (sc *Scheduler) processDue(ctx context.Context) {
 			continue
 		}
 		b.SendCount++
-		interval := BulletinInterval
-		if b.IsAnnouncement {
+		var interval time.Duration
+		switch {
+		case b.IsAnnouncement:
 			interval = AnnouncementInterval
+		case b.SendCount < BulletinBurstCount:
+			// Still in the initial burst phase — retransmit quickly.
+			interval = BulletinBurstInterval
+		default:
+			interval = BulletinInterval
 		}
 		next := time.Now().UTC().Add(interval)
 		b.NextSendAt = &next

@@ -60,7 +60,6 @@ func TestScheduler_ProcessesDueRows(t *testing.T) {
 
 	waitFor(t, 3*time.Second, func() bool { return sink.count() > 0 }, "bulletin to be sent")
 
-	// After send, SendCount should be incremented and NextSendAt advanced.
 	got, err := store.GetByID(ctx, b.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +69,46 @@ func TestScheduler_ProcessesDueRows(t *testing.T) {
 	}
 	if got.NextSendAt == nil || !got.NextSendAt.After(time.Now().UTC()) {
 		t.Error("expected NextSendAt to be advanced into the future")
+	}
+	// First send is still in the burst window: next interval should be
+	// BulletinBurstInterval, not BulletinInterval.
+	if got.NextSendAt.After(time.Now().UTC().Add(BulletinBurstInterval + 5*time.Second)) {
+		t.Errorf("expected burst interval (~%s), got NextSendAt far in the future: %s",
+			BulletinBurstInterval, got.NextSendAt)
+	}
+}
+
+func TestScheduler_BurstThenStableRate(t *testing.T) {
+	sc, store, sink, _ := buildSchedulerRig(t)
+	ctx := context.Background()
+
+	past := time.Now().UTC().Add(-time.Second)
+	b := &configstore.Bulletin{
+		Slot:       "BLN0",
+		Text:       "burst test",
+		MaxSends:   12,
+		NextSendAt: &past,
+		SendCount:  BulletinBurstCount - 1, // one send left in burst window
+	}
+	if err := store.Insert(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+
+	sc.Start(ctx)
+	t.Cleanup(sc.Stop)
+
+	waitFor(t, 3*time.Second, func() bool { return sink.count() > 0 }, "final burst send")
+
+	got, err := store.GetByID(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// After this send SendCount == BulletinBurstCount, so next interval
+	// should be BulletinInterval (stable rate), not BulletinBurstInterval.
+	minExpected := time.Now().UTC().Add(BulletinInterval - 5*time.Second)
+	if got.NextSendAt == nil || got.NextSendAt.Before(minExpected) {
+		t.Errorf("expected stable interval (~%s) after burst, got NextSendAt: %v",
+			BulletinInterval, got.NextSendAt)
 	}
 }
 

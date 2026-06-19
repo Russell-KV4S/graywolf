@@ -235,6 +235,34 @@ export const messagesPreferencesState = (() => {
     }
   }
 
+  async function setDefaultPath(path) {
+    const v = (path ?? '').trim();
+    if (!hydrated) {
+      await fetchPreferences();
+      if (!hydrated) {
+        toasts.error("Couldn't load preferences — try again in a moment.");
+        return;
+      }
+    }
+    if (prefs?.default_path === v) return;
+    const baseline = prefs;
+    const prev = baseline;
+    prefs = { ...baseline, default_path: v };
+    saving = true;
+    error = null;
+    try {
+      const resp = await putPreferences(buildPayload(baseline, { default_path: v }));
+      prefs = resp ?? prefs;
+      toasts.success('Saved');
+    } catch (e) {
+      prefs = prev;
+      error = e?.message || String(e);
+      toasts.error("Couldn't save digipeater path — try again.");
+    } finally {
+      saving = false;
+    }
+  }
+
   return {
     get loaded() { return loaded; },
     get saving() { return saving; },
@@ -252,6 +280,7 @@ export const messagesPreferencesState = (() => {
     get fallbackPolicy() { return prefs?.fallback_policy || 'is_fallback'; },
     get retryMaxAttempts() { return prefs?.retry_max_attempts ?? DEFAULT_RETRY_MAX_ATTEMPTS; },
     get retryIntervalSecs() { return prefs?.retry_interval_secs ?? DEFAULT_RETRY_INTERVAL_SECS; },
+    get defaultPath() { return prefs?.default_path ?? 'WIDE1-1,WIDE2-1'; },
     // Effective cap the compose bar should enforce. Mirrors the server's
     // sender gate: 0 => 67, otherwise => the override value itself.
     get maxMessageText() {
@@ -265,6 +294,7 @@ export const messagesPreferencesState = (() => {
     setFallbackPolicy,
     setRetryMaxAttempts,
     setRetryIntervalSecs,
+    setDefaultPath,
   };
 })();
 
