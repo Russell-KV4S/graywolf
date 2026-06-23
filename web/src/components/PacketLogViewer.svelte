@@ -20,6 +20,7 @@
     formatTime,
     packetToEntry,
     audioLevel,
+    displaySegments,
   } from '../lib/packetColumns.js';
   import PacketInspector from './PacketInspector.svelte';
 
@@ -27,6 +28,19 @@
     packets = [],
     height = '600px',
     live = true,
+    // Follow new packets to the bottom of the viewer. The Logs route binds
+    // this to an operator toggle so a full buffer can be read without the
+    // content shifting as packets arrive (GH #373); defaults on elsewhere.
+    autoscroll = true,
+    // Optional compact switches rendered in the viewer's own toolbar (e.g.
+    // the Logs route's auto-refresh / auto-scroll controls). Forwarded to
+    // Chonky's LogViewer; see its LogToolbarToggle type.
+    toolbarToggles = undefined,
+    // Surface non-printable bytes in the raw packet line as styled <0x7f>
+    // hex tokens (GH #376). Off by default so the line reads as clean text;
+    // the Logs/Dashboard toolbars bind this to an operator toggle for when
+    // a malformed packet needs diagnosing.
+    showNonPrintable = false,
     showHeader = true,
     mobileBreakpoint = '768px',
     // When set, each packet with a raw frame gets a subtle inspect affordance
@@ -45,6 +59,20 @@
   function inspect(entry) {
     inspectPacket = entry;
     inspectOpen = true;
+  }
+
+  // Deep-link a positioned packet to the live map, framed on its coordinates.
+  // Mirrors the reverse "APRS logs" link the map's station popup renders
+  // (#/logs?callsign=…). lat/lon come from the packet DTO (see
+  // pkg/webapi/packets.go) and are present for every transmission type that
+  // carries a fix — position, Mic-E, weather, object, item — so the reticle
+  // shows up consistently rather than only on plain position reports.
+  function mapHref(callsign, lat, lon) {
+    const p = new URLSearchParams();
+    if (callsign) p.set('focus', callsign);
+    p.set('lat', String(lat));
+    p.set('lon', String(lon));
+    return `#/map?${p.toString()}`;
   }
 
   // Column definitions. ORDER IS LOAD-BEARING — first 3 are primary on mobile.
@@ -82,6 +110,23 @@
 {#snippet srcDstCell(_value, entry)}
   {@const calls = parseDisplay(entry)}
   <span class="pkt-srcdst">
+    {#if entry.lat != null && entry.lon != null}
+      <a
+        class="pkt-locate"
+        href={mapHref(calls.src, entry.lat, entry.lon)}
+        title={`Show ${calls.src || 'this station'} on the map`}
+        aria-label={`Show ${calls.src || 'this station'} on the map`}
+      >
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+          <circle cx="8" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.3" />
+          <circle cx="8" cy="8" r="1" fill="currentColor" />
+          <line x1="8" y1="0.5" x2="8" y2="3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          <line x1="8" y1="13" x2="8" y2="15.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          <line x1="0.5" y1="8" x2="3" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          <line x1="13" y1="8" x2="15.5" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+        </svg>
+      </a>
+    {/if}
     <span class="pkt-src">{calls.src || '—'}</span>
     <span class="pkt-arrow" aria-hidden="true">→</span>
     <span class="pkt-dst">{calls.dst || '—'}</span>
@@ -122,7 +167,10 @@
 
 {#snippet rawPacketFooter(entry)}
   <div class="pkt-foot">
-    <code class="pkt-raw">{entry.display || ''}</code>
+    <code class="pkt-raw">{#if showNonPrintable}{#each displaySegments(entry.display) as seg}{#if seg.ctrl}<span
+          class="pkt-ctrl"
+          title={seg.title}
+        >{seg.label}</span>{:else}{seg.text}{/if}{/each}{:else}{entry.display}{/if}</code>
     {#if inspectable && entry.raw}
       <button
         type="button"
@@ -144,6 +192,8 @@
   entries={entries}
   {columns}
   {live}
+  {autoscroll}
+  {toolbarToggles}
   {showHeader}
   {height}
   {mobileBreakpoint}
@@ -177,6 +227,26 @@
   .pkt-arrow {
     color: var(--color-text-dim);
     flex-shrink: 0;
+  }
+
+  /* Scope-reticle locate button: sits just before the source callsign on any
+     packet that carries coordinates. Dim by default like the inspect loupe,
+     brightening on hover/focus so it stays quiet until the operator wants it. */
+  .pkt-locate {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-dim);
+    opacity: 0.55;
+    cursor: pointer;
+    transition: opacity 0.12s ease, color 0.12s ease;
+  }
+  .pkt-locate:hover,
+  .pkt-locate:focus-visible {
+    opacity: 1;
+    color: var(--color-info);
+    outline: none;
   }
   .pkt-dst {
     color: var(--color-info);
@@ -291,6 +361,19 @@
     white-space: normal;
     overflow-wrap: anywhere;
     word-break: break-all;
+  }
+
+  /* Non-printable byte token (e.g. <0x7f>): flagged with the danger colour so
+     it reads distinctly from text that merely happens to spell "<0x7f>", but
+     kept as plain inline text -- no background, no chip. Chonky ships
+     `.log-body span { display: block }`, which would otherwise stack each token
+     on its own full-width line; the parent-child selector outweighs it after
+     Svelte scoping so `display: inline` wins. See GH #376. */
+  .pkt-raw .pkt-ctrl {
+    display: inline;
+    color: var(--color-danger);
+    font-weight: 600;
+    white-space: nowrap;
   }
 
   /* Subtle inspect affordance: dim by default, only brightens on

@@ -114,12 +114,18 @@ Source: [`../../pkg/webapi/ptt.go`](../../pkg/webapi/ptt.go) (`validatePttChanne
 
 ### 9c. Android PTT transport is a first-class `ptt_method`; `gpio_pin` is CM108-only
 
-*Why:* The Android per-channel PTT transport (PttMethod enum, spec Appendix B: 1 = CP2102N RTS / Digirig, 2 = CM108 HID, 3 = AIOC CDC-ACM DTR, 4 = VOX) travels in its own field the whole way: SPA `POST /api/ptt {method:"android", ptt_method:N}` → `PttConfig.PttMethod` → `session.go` → `ConfigurePtt.ptt_method` (a `uint32`, deliberately not the `platform.proto` enum, to keep `graywolf.proto` self-contained — invariant #2) → Rust `build_driver` (`PttMethod::Android` does `let method = cfg.ptt_method as i32`) → `AndroidPtt` → JNI → Kotlin `UsbPttAdapter.pttSet`. `method=="android"` is only the coarse subsystem discriminator. **`gpio_pin` is the CM108 HID pin and nothing else** — it must never carry the Android transport (an earlier build did, via a `method=="android"` sentinel, which silently downgraded saved AIOC configs to CP2102N on re-save when a response DTO dropped the field; removed by migration v22 `ptt_android_method_field`).
+*Why:* The Android per-channel PTT transport (PttMethod enum, spec Appendix B: 1 = CP2102N RTS / Digirig, 2 = CM108 HID, 3 = AIOC CDC-ACM DTR, 4 = VOX, 5 = DIGIRIG_TONE) travels in its own field the whole way: SPA `POST /api/ptt {method:"android", ptt_method:N}` → `PttConfig.PttMethod` → `session.go` → `ConfigurePtt.ptt_method` (a `uint32`, deliberately not the `platform.proto` enum, to keep `graywolf.proto` self-contained — invariant #2) → Rust `build_driver` (`PttMethod::Android` does `let method = cfg.ptt_method as i32`) → `AndroidPtt` → JNI → Kotlin `UsbPttAdapter.pttSet`. `method=="android"` is only the coarse subsystem discriminator. **`gpio_pin` is the CM108 HID pin and nothing else** — it must never carry the Android transport (an earlier build did, via a `method=="android"` sentinel, which silently downgraded saved AIOC configs to CP2102N on re-save when a response DTO dropped the field; removed by migration v22 `ptt_android_method_field`).
+
+*Tone PTT divergence (method 5):* Unlike transports 1–4, the Digirig Lite tone method has **no USB PTT line**. `AndroidPtt` does **not** call `UsbPttAdapter.pttSet` for it; instead `key`/`unkey` invoke the **`AudioTxCallback.setTone(active, hz)`** upcall (mark frequency read from `config_state` at key time), and the keying tone is synthesised in Kotlin's `AudioTxPump` on a **stereo** track (`L`=AFSK, `R`=tone — `ToneOscillator`, a port of the desktop `audio/soundcard.rs` `PttTone`). The Rust→Kotlin PCM contract stays **mono** (the sink interleaves), so the TX governor's `samples.len()`-based drain timing is unchanged; the silent 500&nbsp;ms lead-in is prepended in `android/mod.rs` via `config_state::digirig_tone()`. The L/R mapping is hard-pinned on Android (no output-channel selector, unlike desktop).
 
 Source: [`../../pkg/webapi/dto/channel.go`](../../pkg/webapi/dto/channel.go) (`ChannelPtt.PttMethod`, `ChannelPttFromModel`);
 [`../../pkg/configstore/migrate.go`](../../pkg/configstore/migrate.go) (`migratePttAndroidMethodField`, v22);
 [`../../pkg/modembridge/session.go`](../../pkg/modembridge/session.go) (`ConfigurePtt` construction, `PttMethod` field);
 [`../../graywolf-modem/src/tx/ptt.rs`](../../graywolf-modem/src/tx/ptt.rs) (`PttMethod::Android` arm);
+[`../../graywolf-modem/src/tx/ptt_android.rs`](../../graywolf-modem/src/tx/ptt_android.rs) (`AndroidPtt`, tone branch);
+[`../../graywolf-modem/src/android/upcall.rs`](../../graywolf-modem/src/android/upcall.rs) (`jni_audio_set_tone`);
+[`../../android/app/src/main/kotlin/com/nw5w/graywolf/audio/AudioTxPump.kt`](../../android/app/src/main/kotlin/com/nw5w/graywolf/audio/AudioTxPump.kt) (`setTone`, stereo render);
+[`../../android/app/src/main/kotlin/com/nw5w/graywolf/audio/ToneOscillator.kt`](../../android/app/src/main/kotlin/com/nw5w/graywolf/audio/ToneOscillator.kt);
 [`../../android/app/src/main/kotlin/com/nw5w/graywolf/usb/UsbPttAdapter.kt`](../../android/app/src/main/kotlin/com/nw5w/graywolf/usb/UsbPttAdapter.kt) (`pttSet`, `setAiocRts`).
 
 *UI contract:* PTT configuration is operated only from the **PTT tab**
@@ -667,6 +673,23 @@ cannot outlive the app, because no single mechanism covers both cases.
   (bounded) before tearing the same resources down. The cheap `UsbPttAdapter.init()`
   stays on the main thread so `MainActivity.onResume`'s `enumerate()` never races an
   uninitialized adapter.
+- **WebView owns its insets (edge-to-edge + keyboard):** `targetSdk=36` forces
+  edge-to-edge on Android 15+, where the platform no longer auto-insets the
+  content view or resizes the window for the soft keyboard. `MainActivity.applyWindowInsets`
+  calls `WindowCompat.setDecorFitsSystemWindows(window, false)` and a
+  `setOnApplyWindowInsetsListener` that pads the WebView by the system bars plus
+  `max(systemBars.bottom, ime.bottom)`. The IME padding is the cross-system load-bearing
+  bit: it shrinks the web viewport above the keyboard so the SPA's sticky compose bar
+  (`web/.../ComposeBar.svelte`, `position:absolute; bottom:0`) is never covered. That
+  component skips its own `visualViewport` translateY when `Platform.isAndroid` so the
+  two mechanisms don't stack into a double-offset; the web translate stays the path for
+  mobile browsers. The manifest's `android:windowSoftInputMode="adjustResize"` is the
+  pre-API-30 fallback: there `WindowInsetsCompat.Type.ime()` reports 0, so adjustResize
+  resizes the decor frame instead, re-firing the same listener -- do NOT drop it assuming
+  the inset path covers 28-29. The WebView background is painted `@color/chrome_bg` (the
+  single source the theme's `statusBarColor` also uses) so the padded bar strips don't
+  flash white. Do NOT revert to letting the system manage insets -- on Android 15+ the
+  compose bar disappears behind the keyboard.
 
 Source: [`../../android/app/src/main/kotlin/com/nw5w/graywolf/GraywolfService.kt`](../../android/app/src/main/kotlin/com/nw5w/graywolf/GraywolfService.kt),
 [`../../cmd/graywolf/parentwatch.go`](../../cmd/graywolf/parentwatch.go),
@@ -1013,7 +1036,170 @@ Source: [`../../pkg/gps/serial_open_linux.go`](../../pkg/gps/serial_open_linux.g
 [`../../pkg/gps/serial_open_other.go`](../../pkg/gps/serial_open_other.go) (non-Linux opener);
 [`../../graywolf-modem/src/tx/ptt_unix.rs`](../../graywolf-modem/src/tx/ptt_unix.rs) (`UnixSerialLines::open`).
 
-### 48. MapLibre `map.remove()` deletes `this.style`; any layer helper called after teardown must guard `getSource()`/`getLayer()`
+### 48. "Direct RX" is a time-windowed filter, backed by a sticky-but-timestamped direct hearing
+
+The Live Map "Direct RX" filter shows a station only if it was heard directly
+on RF (RX, zero digi hops) **within the selected time range** -- not merely if
+it has *ever* been heard directly. Two pieces enforce this and must stay in
+sync:
+
+- `stationcache` records `Station.LastDirectHeard` -- the timestamp of the most
+  recent direct reception. It is set in `updateMetadata` only when
+  `isDirectRF(direction, hops)` is true, and is **never** advanced by a
+  digipeated, gated, or IS copy. The static-rebeacon merge keeps the most
+  RF-reachable reception metadata via `rfRank` (issue #130, so a direct copy is
+  not masked by a later digipeated one) **but advances the fix's `Timestamp` to
+  the latest beacon** -- so the fix's own timestamp is *not* a reliable "when
+  heard directly". `LastDirectHeard` is the authoritative answer and is exposed
+  as `last_direct_heard` in `StationDTO`. It stores the packet's `Timestamp`
+  (`e.Timestamp` -- embedded APRS timestamp if present, otherwise decode/receive
+  time), consistent with per-position trail timestamps, **not** the server
+  receive clock that stamps `LastHeard`. For the common position packet (no
+  embedded timestamp) the two coincide; only packets carrying an explicit APRS
+  timestamp can diverge, by the sender's TNC clock skew.
+
+- The frontend predicate `directHeardWithin(station, cutoffMs)`
+  (`web/src/lib/map/direct-rx-core.js`) qualifies a station only when
+  `last_direct_heard >= serverNow() - timerangeMs`. `isDirectRx` in
+  `LiveMapV2.svelte` builds the cutoff from `clockOffset.serverNow()` and the
+  active time range.
+
+*Why:* a mobile station heard directly earlier in the day but only via a
+digipeater recently must drop out of Direct RX once the direct hearing ages
+past the window (issue #349). Classifying off the position's direction/hops
+alone -- the old behavior -- kept it visible forever because issue #130's merge
+keeps the direct copy sticky.
+
+*How to apply:* never advance `LastDirectHeard` on a non-direct reception, and
+never re-derive "heard directly within range" from a position's `Direction`/
+`Hops`/`Timestamp` -- those describe the *displayed* fix, not when the station
+was last heard directly. `LastDirectHeard` is in-memory only; it is not yet
+persisted in `historydb`, so after a restart a station re-qualifies for Direct
+RX only once it is heard directly again.
+
+Source: [`../../pkg/stationcache/memcache.go`](../../pkg/stationcache/memcache.go) (`updateMetadata`, `isDirectRF`, `rfRank`);
+[`../../pkg/webapi/stations.go`](../../pkg/webapi/stations.go) (`StationDTO.LastDirectHeard`);
+[`../../web/src/lib/map/direct-rx-core.js`](../../web/src/lib/map/direct-rx-core.js) (`directHeardWithin`).
+
+### 49. `world` is a legitimate bare offline-map slug -- never namespace it
+
+The offline-map slug grammar (`pkg/mapsslug`) is namespaced -- `state/<x>`,
+`country/<iso2>`, `province/<iso2>/<x>` -- with exactly one bare exception: the
+single global archive `world`. The frontend region picker
+(`web/src/lib/maps/catalog-tree.js`, `buildWorldNode`) hardcodes this `world`
+slug, and the backend keys the DB row and the on-disk `world.pmtiles` by it.
+
+The two startup migrations that namespace **legacy** bare slugs predate the
+world archive (added in #277) and must explicitly skip `world`:
+
+- `Store.MigrateMapsDownloadSlugs` (`pkg/configstore/migrate_downloads.go`)
+  prepends `state/` to any DB slug lacking `/`.
+- `Manager.MigrateLegacyArchives` (`pkg/mapscache/manager.go`) moves any bare
+  `<x>.pmtiles` into `state/<x>.pmtiles`.
+
+*Why:* before the skip, every restart rewrote a downloaded `world` row+file to
+`state/world`. Offline rendering still worked (row and file moved together), but
+the picker's `statusOf('world')` lookup missed, so it showed a Download button
+for an already-downloaded world map (GH #364). Both migrations now also repair
+an existing `state/world` back to `world`.
+
+*How to apply:* any new top-level (non-regional) archive that uses a bare slug
+must be excluded from these bare-slug migrations the same way, or it will be
+mis-namespaced on the next startup.
+
+Source: [`../../pkg/configstore/migrate_downloads.go`](../../pkg/configstore/migrate_downloads.go);
+[`../../pkg/mapscache/manager.go`](../../pkg/mapscache/manager.go) (`MigrateLegacyArchives`, `repairWorldArchive`);
+[`../../pkg/mapsslug/slug.go`](../../pkg/mapsslug/slug.go);
+[`../../web/src/lib/maps/catalog-tree.js`](../../web/src/lib/maps/catalog-tree.js) (`buildWorldNode`).
+
+### 50. REST client surfaces a lost connection; it does not fabricate data in production
+
+A genuine network failure (a thrown `fetch`) in the legacy REST client
+[`web/src/lib/api.js`](../../web/src/lib/api.js) falls back to canned mock
+data **only when `import.meta.env?.DEV` is truthy**. In a production build
+Vite resolves that to `false`, so the mock branch is dead code (`getMockData`
+and the whole mock dataset are tree-shaken out -- verified by grepping the
+built bundle) and a thrown `fetch` instead `throw`s `ApiError(0, …)` and calls
+`markDisconnected()`. Any response received -- even a 4xx/5xx -- calls
+`markConnected()`, since it proves the server is reachable.
+
+`api.js`, the live-map data store
+[`web/src/lib/map/data-store.svelte.js`](../../web/src/lib/map/data-store.svelte.js),
+and the basemap component
+[`web/src/lib/map/maplibre-map.svelte`](../../web/src/lib/map/maplibre-map.svelte)
+(its `fetchUpstreamStyle`, which uses a raw `fetch`, not `api.js`) all report
+into the shared store
+[`web/src/lib/stores/connection.js`](../../web/src/lib/stores/connection.js)
+(`online`, `markConnected`, `markDisconnected`). The store is plain
+`svelte/store` `writable`, **not** a `$state` runes module, because `api.js`
+is imported by `node --test`, which has no Svelte compiler. Screens read
+`online` to swap stale values for `--` placeholders and a lost-connection
+indicator: the Dashboard clears `status`/`position`/`packets` and shows a red
+banner; the APRS Logs screen shows a red "error" dot and no entries; the map
+status bar shows the red "error" dot.
+
+The map status bar (`LiveMapV2.svelte`) derives its dot/label from **both**
+`$online` and `dataStore.pollingState` -- `!$online` forces "error" on its
+own. This is load-bearing, not belt-and-suspenders: when the operator opens
+the map while *already* offline, the basemap style fetch fails, so
+`maplibre-map.svelte` never fires `oncreate`, `dataStore.start()` never runs,
+and `pollingState` stays stuck at its initial `'idle'`. Seeding `pollingState`
+from `get(online)` inside `start()` is therefore *insufficient* on its own
+(it's dead code on that path); the status bar must read `$online` directly so
+it shows "error" rather than a misleading green "idle" dot (GH #374). The
+`start()` seed is still kept for the connected-then-disconnected first paint.
+
+*Why:* before GH #365, a disconnected browser silently rendered the dev mock
+channels (`VHF APRS`/`9600 Data`), mock position (`35.0N 106.0W`), and mock
+beacons as if they were live, with a green status dot -- the operator had no
+way to tell the connection was lost.
+
+*How to apply:* use `import.meta.env?.DEV` (optional chaining) so the check
+is safe under `node --test`, where `import.meta.env` is `undefined` -- there
+it reads falsy, exercising the production throw path. `api.test.js` covers
+this with a rejected-fetch case asserting `ApiError(0)` and `online === false`.
+Only flip the connection store to offline on a genuine network failure -- in
+the data store that means gating `markDisconnected()` on `e instanceof
+TypeError`, since the manual HTTP-status `throw`s (incl. 401) come from a
+reachable server and already ran `markConnected()`.
+
+Source: [`../../web/src/lib/api.js`](../../web/src/lib/api.js),
+[`../../web/src/lib/stores/connection.js`](../../web/src/lib/stores/connection.js),
+[`../../web/src/lib/map/data-store.svelte.js`](../../web/src/lib/map/data-store.svelte.js),
+[`../../web/src/routes/Dashboard.svelte`](../../web/src/routes/Dashboard.svelte),
+[`../../web/src/routes/Logs.svelte`](../../web/src/routes/Logs.svelte).
+
+### 51. The stationcache reads `pkt.Comment`, so every parser must mirror its free-form text there
+
+*Why:* `pkg/stationcache/extract.go` (`buildStationEntry`) takes the
+displayed comment from `pkt.Comment` only -- it never reaches into the
+per-type sub-structs. Most parsers (position, object, item) already
+write their trailing text to `DecodedAPRSPacket.Comment` (or the
+sub-struct's `Comment`, which `ExtractEntry` forwards). Mic-E is the
+trap: `parseMicE` decodes the comment into `MicE.Status` and, before
+GH #377, stopped there -- so mobile-beacon comments like
+"KK4CUK Matt's Cozy" decoded correctly yet rendered blank in the UI
+while aprs.fi showed them. The fix copies `mic.Status` into
+`pkt.Comment` at the end of `parseMicE`. Any new packet type that
+carries human-readable trailing text must populate `pkt.Comment` (or a
+sub-struct `Comment` that `ExtractEntry` forwards); decoding it into a
+private field alone makes it invisible downstream.
+
+Mic-E corollary: the comment tail on real Byonics/McTracker mobile
+beacons is `<text>|<base91 telemetry>|!<DAO>!|3`. `stripMicEPipeTelemetry`
+removes each `|...|` block non-greedily (a greedy first-to-last sweep
+ate the DAO and left a stray "3"), then drops a lone unterminated `|`
+opener; `extractDAO` then consumes the `!DAO!`.
+
+Source: [`../../pkg/aprs/mice.go`](../../pkg/aprs/mice.go)
+(`parseMicE`, `stripMicEPipeTelemetry`),
+[`../../pkg/aprs/dao.go`](../../pkg/aprs/dao.go) (`extractDAO`),
+[`../../pkg/stationcache/extract.go`](../../pkg/stationcache/extract.go)
+(`buildStationEntry`),
+[`../../pkg/aprs/mice_test.go`](../../pkg/aprs/mice_test.go)
+(`TestParseMicECommentSurfaced`).
+
+### 52. MapLibre `map.remove()` deletes `this.style`; any layer helper called after teardown must guard `getSource()`/`getLayer()`
 
 MapLibre GL JS v5 `map.remove()` → `_updateStyle(null)` → `delete this.style`.
 Any subsequent call to `map.getSource()` or `map.getLayer()` throws a

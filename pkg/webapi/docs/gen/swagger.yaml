@@ -825,8 +825,13 @@ definitions:
         type: integer
       sb_turn_slope:
         type: integer
-      send_to_aprs_is:
-        type: boolean
+      send_path:
+        enum:
+          - rf
+          - both
+          - is_only
+        example: rf
+        type: string
       slot_seconds:
         type: integer
       smart_beacon:
@@ -908,8 +913,13 @@ definitions:
         type: integer
       sb_turn_slope:
         type: integer
-      send_to_aprs_is:
-        type: boolean
+      send_path:
+        enum:
+          - rf
+          - both
+          - is_only
+        example: rf
+        type: string
       slot_seconds:
         type: integer
       smart_beacon:
@@ -1269,6 +1279,38 @@ definitions:
       slug:
         type: string
       state:
+        type: string
+    type: object
+  dto.FixedPointRequest:
+    properties:
+      latitude:
+        type: number
+      longitude:
+        type: number
+      name:
+        type: string
+      overlay:
+        type: string
+      symbol:
+        type: string
+      symbol_table:
+        type: string
+    type: object
+  dto.FixedPointResponse:
+    properties:
+      id:
+        type: integer
+      latitude:
+        type: number
+      longitude:
+        type: number
+      name:
+        type: string
+      overlay:
+        type: string
+      symbol:
+        type: string
+      symbol_table:
         type: string
     type: object
   dto.GPSRequest:
@@ -2679,6 +2721,13 @@ definitions:
       is_object:
         description: IsObject is true for APRS objects and items; false for regular stations.
         type: boolean
+      last_direct_heard:
+        description: |-
+          LastDirectHeard is the UTC RFC3339 timestamp of the most recent reception heard
+          directly on RF (RX, zero digi hops). Zero value (serialized as the JSON zero
+          time) means the station has never been heard directly. The Live Map "Direct
+          RX" filter requires this to fall within the selected time range.
+        type: string
       last_heard:
         description: LastHeard is the UTC RFC3339 timestamp of the most recent packet from this station.
         type: string
@@ -2958,6 +3007,17 @@ definitions:
       distance_mi:
         description: DistanceMi is the great-circle distance from this station's GPS fix to the packet's reported position, in statute miles; omitted when either position is unavailable.
         type: number
+      lat:
+        description: |-
+          Lat/Lon are the packet's reported coordinates in decimal degrees (WGS84),
+          surfaced for any transmission type that carries a fix -- position, Mic-E,
+          weather-with-position, object, and item alike. Omitted for positionless
+          packets (messages, telemetry, status). The web UI uses these to render the
+          click-to-zoom map reticle on a log entry; unlike DistanceMi they do not
+          depend on the local station having its own GPS fix.
+        type: number
+      lon:
+        type: number
       notes:
         description: Notes is a short annotation describing how this entry was handled (e.g. "deduped", "rate-limited", "digi consumed WIDE1-1").
         type: string
@@ -3037,6 +3097,8 @@ tags:
     description: Radio channel configuration.
   - name: beacons
     description: Beacon configuration and send-now.
+  - name: fixed-points
+    description: Operator-placed map landmarks, shared across devices.
   - name: audio-devices
     description: Audio input/output device binding.
   - name: kiss
@@ -4945,6 +5007,147 @@ paths:
       summary: Update digipeater rule
       tags:
         - digipeater
+  /fixed-points:
+    get:
+      operationId: listFixedPoints
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/dto.FixedPointResponse'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      security:
+        - CookieAuth: []
+      summary: List fixed points
+      tags:
+        - fixed-points
+    post:
+      consumes:
+        - application/json
+      operationId: createFixedPoint
+      parameters:
+        - description: Fixed point definition
+          in: body
+          name: body
+          required: true
+          schema:
+            $ref: '#/definitions/dto.FixedPointRequest'
+      produces:
+        - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/dto.FixedPointResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      security:
+        - CookieAuth: []
+      summary: Create fixed point
+      tags:
+        - fixed-points
+  /fixed-points/{id}:
+    delete:
+      operationId: deleteFixedPoint
+      parameters:
+        - description: Fixed point id
+          in: path
+          name: id
+          required: true
+          type: integer
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      security:
+        - CookieAuth: []
+      summary: Delete fixed point
+      tags:
+        - fixed-points
+    get:
+      operationId: getFixedPoint
+      parameters:
+        - description: Fixed point id
+          in: path
+          name: id
+          required: true
+          type: integer
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.FixedPointResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      security:
+        - CookieAuth: []
+      summary: Get fixed point
+      tags:
+        - fixed-points
+    put:
+      consumes:
+        - application/json
+      operationId: updateFixedPoint
+      parameters:
+        - description: Fixed point id
+          in: path
+          name: id
+          required: true
+          type: integer
+        - description: Fixed point definition
+          in: body
+          name: body
+          required: true
+          schema:
+            $ref: '#/definitions/dto.FixedPointRequest'
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.FixedPointResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      security:
+        - CookieAuth: []
+      summary: Update fixed point
+      tags:
+        - fixed-points
   /gps:
     get:
       operationId: getGps

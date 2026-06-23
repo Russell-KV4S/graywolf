@@ -7,6 +7,122 @@
 # route the body references via [text](link) markdown; renderer only
 # accepts internal #/... routes.
 
+- version: "0.14.8"
+  date: "2026-06-22"
+  style: info
+  schema_version: 1
+  link: "#/logs"
+  title: "APRS Logs: non-printable bytes, auto-refresh, and Mic-E comments"
+  body: |
+    The APRS Logs tab can now keep up with live traffic on its own. New
+    auto-refresh and auto-scroll toggles pull in and follow new packets
+    without you reloading the page. Packets that carry non-printable
+    bytes now show them plainly, with a Hex toggle to flip the raw frame
+    between a readable view and a straight hex dump. Mic-E mobile beacons
+    now show their comment text instead of dropping it.
+
+    Smaller touches: the map status bar shows its red error dot right
+    away when you open it offline, the default theme has better contrast
+    on its primary color, and on Android the message compose bar stays
+    above the on-screen keyboard. The handbook also gains notes on
+    testing VOX and Digirig tone PTT keying, plus a Serial RTS PTT
+    recommendation for the Digirig Mobile.
+
+- version: "0.14.7"
+  date: "2026-06-20"
+  style: info
+  schema_version: 1
+  link: "#/map"
+  title: "Lost-connection warning, world map and clock fixes, steadier audio"
+  body: |
+    When the app loses contact with the server it now shows a clear
+    lost-connection warning instead of filling the dashboard and logs
+    with placeholder data. The dashboard shows a banner with dashes in
+    place of the live numbers, and the logs and map show a red error
+    dot, so you can tell a dropped connection from a quiet one.
+
+    The world map no longer offers a Download button once you have
+    already downloaded it. And hosts that are in fact synced over NTP no
+    longer get a false clock-not-synchronized warning at startup, which
+    most often hit a Raspberry Pi with no battery-backed clock.
+
+    Returning to the Live Map now applies your saved layer toggles and
+    RF filters right away, instead of waiting until you toggle a
+    checkbox. Audio capture is also steadier on older 32-bit Linux
+    systems, where a timestamp-decoding bug could flood the logs and
+    keep rebuilding the audio stream.
+
+- version: "0.14.6"
+  date: "2026-06-20"
+  style: info
+  schema_version: 1
+  link: "#/map"
+  title: "Fixed points sync across devices, jump from a log to the map, mobile map fixes"
+  body: |
+    Fixed map points you add now live on the server instead of in a
+    single browser, so they show up on every device you sign in from and
+    come back correctly when you return to the map. On a touchscreen you
+    can drop one with a long press on the map background.
+
+    Each packet log row now has a scope button next to the callsign
+    whenever the packet carries a position. Click it to jump to the Live
+    Map framed on that fix, the reverse of the map popup's link back to
+    the logs. This now works for position, Mic-E, weather, object, and
+    item reports.
+
+    The Live Map behaves better in a phone browser: a two-finger pinch no
+    longer accidentally rotates the map, the Layers button no longer
+    covers the compass in portrait, and the bottom scale and counters
+    stay on screen as the address bar collapses. The Direct RX filter
+    now also honors the time range you have selected.
+
+    There is a new PTT method for the Digirig Lite, on desktop and
+    Android, which keys the radio with a tone on the right audio channel.
+    Pick Digirig Lite Tone in your PTT settings if you use one. And
+    radioless stations can now create APRS-IS-only beacons without
+    configuring a channel; saving one turns on the iGate it needs.
+
+- version: "0.14.5"
+  date: "2026-06-19"
+  style: info
+  schema_version: 1
+  link: "#/beacons"
+  title: "Beacon to APRS-IS without a radio"
+  body: |
+    Beacons now have a Destination control that picks where each one
+    goes: RF only, RF plus APRS-IS, or APRS-IS only with no radio. The
+    new APRS-IS only option puts a beacon straight onto the APRS-IS
+    network without keying a radio, so a host with just an internet
+    connection can still beacon its position. Turn the iGate on first so
+    there is an APRS-IS connection to send through.
+
+    Along the way, APRS-IS beacons now reliably reach the network and
+    show up in your packet log, and a beacon whose callsign,
+    destination, or path is not a valid APRS address is rejected when
+    you save it, instead of quietly never transmitting.
+
+- version: "0.14.4"
+  date: "2026-06-19"
+  style: info
+  schema_version: 1
+  link: "#/map"
+  title: "Map toggles that stick, beacon slot timing and object altitude, Android fixes"
+  body: |
+    Your Live Map layer toggles now stick between sessions. Stations,
+    Trails, Weather, My Position, Fixed Points, and the RF filters all
+    come back the way you left them, instead of resetting to the
+    defaults on your next visit.
+
+    The beacon editor gains a slot timing field, so you can set how many
+    seconds past the hour a beacon transmits and stagger it from your
+    others instead of only picking a plain interval. Object beacons can
+    now also carry an altitude.
+
+    Two Android fixes: the app no longer crashes on launch on devices
+    with no GPS hardware, such as Facebook Portal, Android TV boxes, and
+    emulators, and the status-bar notification icon no longer shows up as
+    a solid white square.
+
 - version: "0.14.3"
   date: "2026-06-18"
   style: info

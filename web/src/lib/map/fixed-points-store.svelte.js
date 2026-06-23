@@ -1,57 +1,61 @@
-// User-defined fixed map points: locally significant landmarks or
-// event-specific locations the operator drops via the map's right-click
-// menu. Each point carries a name, an APRS symbol (table/symbol/overlay,
-// same vocabulary as station markers), and a lat/lon.
+// User-defined fixed map points: operator-placed landmarks shown on the
+// live map. Persisted SERVER-SIDE (GET/POST/DELETE /api/fixed-points) so
+// they are shared across every device/browser pointed at this server and
+// survive a client browser-data wipe (graywolf#347). Uses .svelte.js so
+// the $state rune drives the map layer's reactive refresh.
 //
-// Persistence: localStorage, so points survive reloads and outlive a
-// single session. They are removed only when the operator clicks a point
-// and deletes it (or clears localStorage). Uses .svelte.js so the $state
-// rune drives the map layer's reactive refresh.
+// load() is called when the map mounts, so navigating back to the map --
+// or opening the map on a second device -- shows the current server set.
 
-const STORAGE_KEY = 'map-fixed-points';
-
-function load() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return [];
-    // Keep only well-formed entries — guards against a hand-edited or
-    // schema-drifted localStorage value crashing the layer.
-    return arr.filter(
-      (p) =>
-        p &&
-        typeof p.id === 'string' &&
-        typeof p.name === 'string' &&
-        Number.isFinite(p.lat) &&
-        Number.isFinite(p.lon),
-    );
-  } catch {
-    return [];
-  }
-}
-
-// Monotonic counter so the non-crypto fallback can't collide for two
-// points added in the same millisecond. Graywolf dashboards are commonly
-// served over plain HTTP on a LAN, where crypto.randomUUID is unavailable.
-let idSeq = 0;
-function newId() {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return `fp-${crypto.randomUUID()}`;
-  }
-  idSeq += 1;
-  return `fp-${Date.now()}-${idSeq}`;
-}
+import { api } from '../api.js';
+import { fixedPointFromApi, fixedPointToApi } from './fixed-points-api.js';
 
 export const fixedPointsStore = (() => {
-  let points = $state(load());
+  let points = $state([]);
+  let loaded = $state(false);
 
-  function persist() {
+  const LEGACY_KEY = 'map-fixed-points';
+  const MIGRATED_FLAG = 'map-fixed-points-migrated';
+
+  // One-time upload of points saved by the old localStorage-only build
+  // so upgrading operators don't lose them. Guarded by a flag so it runs
+  // at most once per browser. Best-effort: on any failure we leave the
+  // legacy data in place and do NOT set the flag, so a later load retries.
+  //
+  // The flag is per-browser, so an operator who had legacy points in two
+  // browsers will upload both sets -- a few duplicate server rows they can
+  // delete. Accepted trade-off (no per-point dedup); far better than losing
+  // points to silent data loss.
+  async function migrateLegacyLocalStorage() {
+    let legacy;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(points));
+      if (localStorage.getItem(MIGRATED_FLAG)) return;
+      const raw = localStorage.getItem(LEGACY_KEY);
+      if (!raw) {
+        localStorage.setItem(MIGRATED_FLAG, '1');
+        return;
+      }
+      legacy = JSON.parse(raw);
     } catch {
-      // Quota or private-mode failures are non-fatal — the points still
-      // live in memory for this session.
+      return;
+    }
+    if (!Array.isArray(legacy) || legacy.length === 0) {
+      try {
+        localStorage.setItem(MIGRATED_FLAG, '1');
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    try {
+      for (const p of legacy) {
+        if (!p || typeof p.name !== 'string' || !Number.isFinite(p.lat) || !Number.isFinite(p.lon)) continue;
+        await api.post('/fixed-points', fixedPointToApi(p));
+      }
+      localStorage.setItem(MIGRATED_FLAG, '1');
+      localStorage.removeItem(LEGACY_KEY);
+    } catch {
+      // Leave legacy data + unset flag so the next load() retries.
     }
   }
 
@@ -59,32 +63,35 @@ export const fixedPointsStore = (() => {
     get points() {
       return points;
     },
+    get loaded() {
+      return loaded;
+    },
 
-    add({ name, table, symbol, overlay = '', lat, lon }) {
-      const point = {
-        id: newId(),
-        name: (name || '').trim() || 'Point',
-        table: table || '/',
-        symbol: symbol || '/',
-        overlay: overlay || '',
-        lat,
-        lon,
-      };
-      points = [...points, point];
-      persist();
+    // Fetch the server set and replace the in-memory list. Safe to call
+    // on every map mount; malformed rows are dropped, not fatal. On
+    // failure the previous list is kept and the error is rethrown so the
+    // caller can surface it.
+    async load() {
+      await migrateLegacyLocalStorage();
+      const rows = (await api.get('/fixed-points')) || [];
+      points = rows.map(fixedPointFromApi).filter(Boolean);
+      loaded = true;
+      return points;
+    },
+
+    // Create a point on the server, then append the persisted record
+    // (with its server-assigned id) to the list. Returns the point.
+    async add({ name, table, symbol, overlay = '', lat, lon }) {
+      const created = await api.post('/fixed-points', fixedPointToApi({ name, table, symbol, overlay, lat, lon }));
+      const point = fixedPointFromApi(created);
+      if (point) points = [...points, point];
       return point;
     },
 
-    remove(id) {
-      const next = points.filter((p) => p.id !== id);
-      if (next.length === points.length) return;
-      points = next;
-      persist();
-    },
-
-    clear() {
-      points = [];
-      persist();
+    // Delete a point on the server, then drop it locally.
+    async remove(id) {
+      await api.delete(`/fixed-points/${id}`);
+      points = points.filter((p) => p.id !== id);
     },
   };
 })();

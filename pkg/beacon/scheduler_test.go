@@ -574,3 +574,160 @@ func TestSchedulerChannelModeGate(t *testing.T) {
 type logSink struct{}
 
 func (logSink) Write(p []byte) (int, error) { return len(p), nil }
+
+// fakeISSink records the TNC-2 lines a beacon would send to APRS-IS and
+// can be made to fail, so tests can assert the IS leg and its errors.
+type fakeISSink struct {
+	mu    sync.Mutex
+	lines []string
+	err   error
+}
+
+func (f *fakeISSink) SendLine(line string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.lines = append(f.lines, line)
+	return nil
+}
+
+func (f *fakeISSink) Lines() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.lines...)
+}
+
+func mustParse(s string) ax25.Address {
+	a, err := ax25.ParseAddress(s)
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
+
+func mkPathBeacon(sendPath string) Config {
+	return Config{
+		ID:       7,
+		Type:     TypePosition,
+		Channel:  0,
+		Source:   mustParse("N0CALL-9"),
+		Dest:     mustParse("APGRWO"),
+		Path:     []ax25.Address{mustParse("WIDE1-1")},
+		Slot:     -1,
+		Lat:      37.7749,
+		Lon:      -122.4194,
+		Format:   "compressed",
+		SendPath: sendPath,
+	}
+}
+
+func TestSendBeacon_PathRF(t *testing.T) {
+	sink := newMockSink(1)
+	is := &fakeISSink{}
+	logger := slog.New(slog.NewTextHandler(logSink{}, nil))
+	s, err := New(Options{Sink: sink, ISSink: is, Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.sendBeacon(context.Background(), mkPathBeacon(SendPathRF))
+	if got := len(sink.Frames()); got != 1 {
+		t.Fatalf("RF frames = %d, want 1", got)
+	}
+	if got := len(is.Lines()); got != 0 {
+		t.Fatalf("IS lines = %d, want 0", got)
+	}
+}
+
+func TestSendBeacon_PathBoth(t *testing.T) {
+	sink := newMockSink(1)
+	is := &fakeISSink{}
+	logger := slog.New(slog.NewTextHandler(logSink{}, nil))
+	s, _ := New(Options{Sink: sink, ISSink: is, Logger: logger})
+	s.sendBeacon(context.Background(), mkPathBeacon(SendPathBoth))
+	if got := len(sink.Frames()); got != 1 {
+		t.Fatalf("RF frames = %d, want 1", got)
+	}
+	if got := len(is.Lines()); got != 1 {
+		t.Fatalf("IS lines = %d, want 1", got)
+	}
+}
+
+func TestSendBeacon_PathISOnly(t *testing.T) {
+	sink := newMockSink(0)
+	is := &fakeISSink{}
+	logger := slog.New(slog.NewTextHandler(logSink{}, nil))
+	s, _ := New(Options{Sink: sink, ISSink: is, Logger: logger})
+	s.sendBeacon(context.Background(), mkPathBeacon(SendPathISOnly))
+	if got := len(sink.Frames()); got != 0 {
+		t.Fatalf("RF frames = %d, want 0 (RF disabled)", got)
+	}
+	if got := len(is.Lines()); got != 1 {
+		t.Fatalf("IS lines = %d, want 1", got)
+	}
+}
+
+func TestSendBeaconImmediate_ISOnly_NoSink(t *testing.T) {
+	sink := newMockSink(0)
+	logger := slog.New(slog.NewTextHandler(logSink{}, nil))
+	s, _ := New(Options{Sink: sink, Logger: logger}) // no ISSink
+	err := s.sendBeaconImmediate(context.Background(), mkPathBeacon(SendPathISOnly))
+	if err == nil {
+		t.Fatal("expected error when is_only beacon has no APRS-IS sink")
+	}
+}
+
+// TestSendNow_ISOnly_NoRF models the dashboard "Beacon Now" action on an
+// APRS-IS-only beacon: it must transmit to APRS-IS and submit ZERO frames
+// to the RF/TNC sink (so nothing shows in the packet log as going over
+// the RF channel). Channel is deliberately non-zero to prove the skip is
+// driven by SendPath, not by an empty channel.
+func TestSendNow_ISOnly_NoRF(t *testing.T) {
+	sink := newMockSink(0)
+	is := &fakeISSink{}
+	logger := slog.New(slog.NewTextHandler(logSink{}, nil))
+	s, err := New(Options{Sink: sink, ISSink: is, Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := mkPathBeacon(SendPathISOnly)
+	b.ID = 42
+	b.Channel = 1
+	s.SetBeacons([]Config{b})
+
+	if err := s.SendNow(context.Background(), 42); err != nil {
+		t.Fatalf("SendNow: %v", err)
+	}
+	if got := len(sink.Frames()); got != 0 {
+		t.Fatalf("RF frames = %d, want 0 (is_only must not hit the RF sink)", got)
+	}
+	if got := len(is.Lines()); got != 1 {
+		t.Fatalf("IS lines = %d, want 1", got)
+	}
+}
+
+// TestBeaconISLine_UsesTCPIP verifies the APRS-IS leg injects the beacon
+// with a TCPIP* path (the APRS-IS convention for self-originated traffic)
+// rather than the RF digipeater path. Sending the raw RF path (e.g.
+// WIDE1-1) gets the packet silently dropped by APRS-IS servers, so it
+// never reaches aprs.fi. Mirrors the messages sender's buildMessageTNC2.
+func TestBeaconISLine_UsesTCPIP(t *testing.T) {
+	sink := newMockSink(0)
+	is := &fakeISSink{}
+	logger := slog.New(slog.NewTextHandler(logSink{}, nil))
+	s, _ := New(Options{Sink: sink, ISSink: is, Logger: logger})
+	s.sendBeacon(context.Background(), mkPathBeacon(SendPathISOnly))
+
+	lines := is.Lines()
+	if len(lines) != 1 {
+		t.Fatalf("IS lines = %d, want 1", len(lines))
+	}
+	line := lines[0]
+	if !strings.HasPrefix(line, "N0CALL-9>APGRWO,TCPIP*:") {
+		t.Errorf("IS line = %q, want prefix %q", line, "N0CALL-9>APGRWO,TCPIP*:")
+	}
+	if strings.Contains(line, "WIDE") {
+		t.Errorf("IS line must not carry the RF digipeater path; got %q", line)
+	}
+}

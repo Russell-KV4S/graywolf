@@ -645,6 +645,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/fixed-points": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List fixed points */
+        get: operations["listFixedPoints"];
+        put?: never;
+        /** Create fixed point */
+        post: operations["createFixedPoint"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/fixed-points/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get fixed point */
+        get: operations["getFixedPoint"];
+        /** Update fixed point */
+        put: operations["updateFixedPoint"];
+        post?: never;
+        /** Delete fixed point */
+        delete: operations["deleteFixedPoint"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/gps": {
         parameters: {
             query?: never;
@@ -2334,7 +2371,11 @@ export interface components {
             sb_slow_speed?: number;
             sb_turn_angle?: number;
             sb_turn_slope?: number;
-            send_to_aprs_is?: boolean;
+            /**
+             * @example rf
+             * @enum {string}
+             */
+            send_path?: "rf" | "both" | "is_only";
             slot_seconds?: number;
             smart_beacon?: boolean;
             symbol?: string;
@@ -2376,7 +2417,11 @@ export interface components {
             sb_slow_speed?: number;
             sb_turn_angle?: number;
             sb_turn_slope?: number;
-            send_to_aprs_is?: boolean;
+            /**
+             * @example rf
+             * @enum {string}
+             */
+            send_path?: "rf" | "both" | "is_only";
             slot_seconds?: number;
             smart_beacon?: boolean;
             symbol?: string;
@@ -2563,6 +2608,23 @@ export interface components {
             error_message?: string;
             slug?: string;
             state?: string;
+        };
+        "dto.FixedPointRequest": {
+            latitude?: number;
+            longitude?: number;
+            name?: string;
+            overlay?: string;
+            symbol?: string;
+            symbol_table?: string;
+        };
+        "dto.FixedPointResponse": {
+            id?: number;
+            latitude?: number;
+            longitude?: number;
+            name?: string;
+            overlay?: string;
+            symbol?: string;
+            symbol_table?: string;
         };
         "dto.GPSRequest": {
             baud_rate?: number;
@@ -3461,6 +3523,13 @@ export interface components {
             hops?: number;
             /** @description IsObject is true for APRS objects and items; false for regular stations. */
             is_object?: boolean;
+            /**
+             * @description LastDirectHeard is the UTC RFC3339 timestamp of the most recent reception heard
+             *     directly on RF (RX, zero digi hops). Zero value (serialized as the JSON zero
+             *     time) means the station has never been heard directly. The Live Map "Direct
+             *     RX" filter requires this to fall within the selected time range.
+             */
+            last_direct_heard?: string;
             /** @description LastHeard is the UTC RFC3339 timestamp of the most recent packet from this station. */
             last_heard?: string;
             /** @description Path is the raw AX.25 digipeater path from the most recent packet (entries with trailing "*" have the H-bit set). */
@@ -3634,6 +3703,16 @@ export interface components {
             display?: string;
             /** @description DistanceMi is the great-circle distance from this station's GPS fix to the packet's reported position, in statute miles; omitted when either position is unavailable. */
             distance_mi?: number;
+            /**
+             * @description Lat/Lon are the packet's reported coordinates in decimal degrees (WGS84),
+             *     surfaced for any transmission type that carries a fix -- position, Mic-E,
+             *     weather-with-position, object, and item alike. Omitted for positionless
+             *     packets (messages, telemetry, status). The web UI uses these to render the
+             *     click-to-zoom map reticle on a log entry; unlike DistanceMi they do not
+             *     depend on the local station having its own GPS fix.
+             */
+            lat?: number;
+            lon?: number;
             /** @description Notes is a short annotation describing how this entry was handled (e.g. "deduped", "rate-limited", "digi consumed WIDE1-1"). */
             notes?: string;
             /** @description Raw is the on-air AX.25 frame bytes with FCS stripped; omitted for entries without raw framing. */
@@ -3693,6 +3772,12 @@ export interface components {
         "dto.IGateRfFilterRequest": {
             content: {
                 "application/json": components["schemas"]["dto.IGateRfFilterRequest"];
+            };
+        };
+        /** @description Fixed point definition */
+        "dto.FixedPointRequest": {
+            content: {
+                "application/json": components["schemas"]["dto.FixedPointRequest"];
             };
         };
         /** @description Blocklist entry */
@@ -6311,6 +6396,194 @@ export interface operations {
             header?: never;
             path: {
                 /** @description Digipeater rule id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    listFixedPoints: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.FixedPointResponse"][];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    createFixedPoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["dto.FixedPointRequest"];
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.FixedPointResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    getFixedPoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Fixed point id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.FixedPointResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    updateFixedPoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Fixed point id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["dto.FixedPointRequest"];
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.FixedPointResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    deleteFixedPoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Fixed point id */
                 id: number;
             };
             cookie?: never;

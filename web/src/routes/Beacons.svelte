@@ -97,7 +97,7 @@
     symbol_table: '/', symbol: '-', overlay: '',
     position_format: 'compressed', ambiguity: 0,
     pos_source: 'gps', latitude: '', longitude: '', alt_ft: '',
-    comment: '', interval: '600', send_to_aprs_is: false, enabled: true,
+    comment: '', interval: '600', slot: '', send_path: 'rf', enabled: true,
   });
 
   let callsignError = $state('');
@@ -121,7 +121,12 @@
     const n = parseInt(form.channel, 10);
     return lookupChannel(n);
   });
+  // APRS-IS-only beacons carry no RF leg, so the radio channel is
+  // irrelevant — the form hides the channel picker and skips the
+  // TX-capability gate entirely for them.
+  let needsChannel = $derived(form.send_path !== 'is_only');
   let txBlock = $derived.by(() => {
+    if (!needsChannel) return null;
     const c = selectedChannelObj;
     if (!c) return null;
     const cap = c.backing?.tx;
@@ -254,11 +259,14 @@
     }
     // Deep-link entry from the map context menu's "Add fixed beacon
     // here" item: open the create modal with pos_source=fixed and the
-    // clicked coordinates prefilled. Done after the channels store has
-    // been kicked above so openCreate() finds a default channel.
+    // clicked coordinates prefilled. Await the channels store's first
+    // load so openCreate() defaults the send path off a populated list
+    // (no channels => APRS-IS only; otherwise RF) instead of racing an
+    // empty list and wrongly preselecting APRS-IS only on an RF station.
     const { lat, lon } = parseLatLonFromHash();
     if (lat != null && lon != null) {
       clearLatLonFromHash();
+      await refreshChannels();
       openCreate();
       form.pos_source = 'fixed';
       form.latitude = String(lat);
@@ -267,14 +275,18 @@
   });
 
   function openCreate() {
-    if (channels.length === 0) {
-      toasts.error('Create a channel first on the Channels page');
-      return;
-    }
     editing = null;
     form.type = 'position';
     form.object_name = '';
-    form.channel = String(channels[0].id);
+    // A radioless (APRS-IS-only) station has no channels at all. Rather
+    // than block beacon creation, default to an APRS-IS-only beacon so
+    // the operator can get on the network with no RF setup; the channel
+    // picker stays hidden until they pick an RF send path.
+    if (channels.length === 0) {
+      form.channel = '';
+    } else {
+      form.channel = String(channels[0].id);
+    }
     form.callsign = '';
     form.callsign_override = false;
     callsignError = '';
@@ -293,7 +305,8 @@
     altError = '';
     form.comment = defaultComment;
     form.interval = '600';
-    form.send_to_aprs_is = false;
+    form.slot = '';
+    form.send_path = channels.length === 0 ? 'is_only' : 'rf';
     form.enabled = true;
     modalOpen = true;
   }
@@ -318,12 +331,14 @@
       symbol: row.symbol || '-',
       overlay: row.overlay || '',
       position_format: row.position_format || 'compressed',
+      send_path: row.send_path || 'rf',
       ambiguity: row.ambiguity ?? 0,
       pos_source: row.use_gps ? 'gps' : 'fixed',
       latitude: row.latitude != null ? String(row.latitude) : '',
       longitude: row.longitude != null ? String(row.longitude) : '',
       alt_ft: row.alt_ft != null ? String(row.alt_ft) : '',
       interval: String(row.interval),
+      slot: row.slot_seconds != null && row.slot_seconds >= 0 ? String(row.slot_seconds) : '',
     });
     altInput = altInputFromFeet(form.alt_ft);
     altError = '';
@@ -350,8 +365,13 @@
       callsignToSend = '';
     }
     callsignError = '';
-    const channelId = parseInt(form.channel);
-    if (!Number.isFinite(channelId) || channelId <= 0) {
+    let channelId = parseInt(form.channel);
+    if (form.send_path === 'is_only') {
+      // APRS-IS-only beacon: no RF channel needed. Store 0 unconditionally
+      // so the value is unambiguous even when switching from an RF beacon
+      // that had a channel selected.
+      channelId = 0;
+    } else if (!Number.isFinite(channelId) || channelId <= 0) {
       toasts.error('Channel required');
       return;
     }
@@ -373,11 +393,11 @@
     const lonStr = form.longitude.trim();
     const lat = latStr === '' ? 0 : parseFloat(latStr);
     const lon = lonStr === '' ? 0 : parseFloat(lonStr);
-    // Convert altitude input to feet for the API. Object reports don't
-    // carry altitude (the ObjectInfo encoder has no /A= field), so skip it.
+    // Convert altitude input to feet for the API. Objects carry it via
+    // the /A= comment extension, same as position reports.
     const altNorm = altInput.replace(',', '.').trim();
     let altFt = null;
-    if (form.type !== 'object' && altNorm !== '') {
+    if (altNorm !== '') {
       const altVal = parseFloat(altNorm);
       if (Number.isNaN(altVal)) {
         altError = 'Altitude must be a number';
@@ -394,18 +414,31 @@
       toasts.error('Latitude/longitude required when not using GPS');
       return;
     }
+    // Slot: seconds past the hour (0..3599); blank means unset (-1).
+    const slotNorm = String(form.slot).trim();
+    let slotSeconds = -1;
+    if (slotNorm !== '') {
+      const slotVal = parseInt(slotNorm, 10);
+      if (Number.isNaN(slotVal) || slotVal < 0 || slotVal > 3599) {
+        toasts.error('Slot must be 0–3599 seconds past the hour (or blank)');
+        return;
+      }
+      slotSeconds = slotVal;
+    }
     const data = {
       ...form,
       callsign: callsignToSend,
       channel: channelId,
       use_gps: useGps,
       interval: parseInt(form.interval),
+      slot_seconds: slotSeconds,
       latitude: lat,
       longitude: lon,
       alt_ft: altFt,
     };
     delete data.pos_source;
     delete data.callsign_override;
+    delete data.slot;
     delete data.id;
     try {
       if (editing) {
@@ -418,8 +451,32 @@
       modalOpen = false;
       beacons = await api.get('/beacons') || [];
       refreshChannels();
+      if (data.send_path === 'is_only') {
+        await ensureIgateEnabled();
+      }
     } catch (err) {
       toasts.error(err.message);
+    }
+  }
+
+  // An APRS-IS-only beacon only reaches the network when the iGate is
+  // connected to APRS-IS. Auto-enable the iGate on save so a radioless
+  // operator isn't left wondering why nothing shows up on aprs.fi.
+  // Best-effort: the beacon is already saved, so any failure here is
+  // surfaced as a toast rather than failing the whole operation.
+  async function ensureIgateEnabled() {
+    try {
+      const cfg = await api.get('/igate/config');
+      if (!cfg || cfg.enabled) return;
+      await api.put('/igate/config', { ...cfg, enabled: true });
+      toasts.success('iGate enabled so your APRS-IS-only beacon can reach the network');
+    } catch (err) {
+      // The most common failure here is a missing station callsign: the
+      // backend refuses to enable the iGate until one is set, which is
+      // exactly the state of a fresh radioless install. Surface the
+      // server's own actionable message rather than a generic "try the
+      // iGate page" that would fail for the same reason.
+      toasts.error(`Beacon saved, but the iGate could not be enabled automatically: ${err.message || 'enable it on the iGate page so APRS-IS-only beacons transmit.'}`);
     }
   }
 
@@ -478,13 +535,29 @@
   <Button variant="primary" onclick={openCreate}>+ Add Beacon</Button>
 </PageHeader>
 
+<!-- Gated on lastUpdated (set only after a successful fetch) so the
+     banner doesn't flash before the channels store's first load, and
+     stays hidden if that fetch errors — we don't claim "no channels"
+     when we don't actually know the channel set yet. -->
+{#if channelsStore.lastUpdated && channels.length === 0}
+  <div class="no-rf-banner" role="note">
+    <span class="no-rf-banner-icon" aria-hidden="true">&#9432;</span>
+    <div class="no-rf-banner-body">
+      <strong>No radio channels configured.</strong>
+      You can still beacon to APRS-IS only (no radio needed). To transmit
+      over RF, <a href="#/channels">create a channel</a> first.
+    </div>
+  </div>
+{/if}
+
 {#if beacons.length === 0}
   <div class="empty-state">No beacons configured. Add a beacon to start transmitting position reports.</div>
 {:else}
   <div class="beacon-grid">
     {#each beacons as b}
+      {@const isOnly = b.send_path === 'is_only'}
       {@const refStatus = channelRefStatus(b.channel, channelsById)}
-      {@const broken = refStatus.status !== STATUS_OK}
+      {@const broken = !isOnly && refStatus.status !== STATUS_OK}
       {@const pillAriaLabel = broken
         ? (refStatus.status === STATUS_DELETED
             ? `Channel #${b.channel} deleted`
@@ -524,13 +597,19 @@
             {#if b.type === 'object'}
               <Badge variant="info">Object</Badge>
             {/if}
-            {#if b.send_to_aprs_is}
+            {#if b.send_path === 'is_only'}
+              <Badge variant="info">APRS-IS only</Badge>
+            {:else if b.send_path === 'both'}
               <Badge variant="info">APRS-IS</Badge>
             {/if}
           </div>
         </div>
 
         <div class="beacon-channel" class:broken>
+          {#if isOnly}
+            <span class="channel-label">Send to</span>
+            <span class="channel-value">APRS-IS only (no radio)</span>
+          {:else}
           <span
             class="channel-label"
             class:danger={broken}
@@ -547,6 +626,7 @@
           </span>
           {#if refStatus.status !== STATUS_DELETED}
             <span class="channel-value">{channelName(b.channel)}</span>
+          {/if}
           {/if}
         </div>
 
@@ -567,6 +647,12 @@
             <span class="detail-label">Interval</span>
             <span class="detail-value">{formatInterval(b.interval)}</span>
           </div>
+          {#if b.slot_seconds != null && b.slot_seconds >= 0}
+            <div class="detail-row">
+              <span class="detail-label">Slot</span>
+              <span class="detail-value">{b.slot_seconds}s past the hour</span>
+            </div>
+          {/if}
           {#if b.comment}
             <div class="detail-row">
               <span class="detail-label">Comment</span>
@@ -672,16 +758,36 @@
           <Input id="bcn-objname" bind:value={form.object_name} placeholder="e.g. FIELDDAY" maxlength="9" />
         </FormField>
       {/if}
-      <FormField label="Channel" id="bcn-channel"
-        hint="Radio channel this beacon transmits on. Defined on the Channels page.">
-        <ChannelListbox
-          id="bcn-channel"
-          bind:value={form.channel}
-          valueType="string"
-          channels={channels}
-          capabilityFilter={txPredicate}
-        />
+      <FormField label="Send to" id="bcn-send-path"
+        hint="Where this beacon is transmitted. APRS-IS only needs no radio channel — ideal for a station with no radio.">
+        <RadioGroup bind:value={form.send_path}>
+          <div class="pos-source-row">
+            <Radio value="rf" label="RF only" />
+            <Radio value="both" label="RF + APRS-IS" />
+            <Radio value="is_only" label="APRS-IS only (no radio)" />
+          </div>
+        </RadioGroup>
       </FormField>
+      {#if needsChannel}
+        {#if channels.length === 0}
+          <div class="no-channel-note" role="note">
+            No radio channels are configured. Add one on the
+            <a href="#/channels">Channels page</a>, or choose
+            <strong>APRS-IS only</strong> above to beacon without a radio.
+          </div>
+        {:else}
+          <FormField label="Channel" id="bcn-channel"
+            hint="Radio channel this beacon transmits on. Defined on the Channels page.">
+            <ChannelListbox
+              id="bcn-channel"
+              bind:value={form.channel}
+              valueType="string"
+              channels={channels}
+              capabilityFilter={txPredicate}
+            />
+          </FormField>
+        {/if}
+      {/if}
       <FormField
         label={form.type === 'object' ? 'Transmitting station (via)' : 'Callsign'}
         id="bcn-call"
@@ -793,26 +899,29 @@
           hint="Decimal degrees, east positive (e.g. -122.4 for San Francisco; 151.2 for Sydney).">
           <Input id="bcn-lon" bind:value={form.longitude} placeholder="-122.4" />
         </FormField>
-        {#if form.type !== 'object'}
-          <FormField label="Altitude" id="bcn-alt"
-            hint="Antenna height above sea level in {altUnit}. Optional; leave blank or 0 to omit.">
-            <div class="alt-row">
-              <Input id="bcn-alt" bind:value={altInput} placeholder={altUnit === 'feet' ? '0 ft' : '0 m'}
-                type="text" inputmode="decimal" error={altError} oninput={() => altError = ''} />
-              <div class="unit-toggle" role="group" aria-label="Altitude unit">
-                <button type="button" class="unit-btn" class:unit-active={altUnit === 'feet'}
-                  onclick={() => toggleAltUnit('feet')}>ft</button>
-                <button type="button" class="unit-btn" class:unit-active={altUnit === 'meters'}
-                  onclick={() => toggleAltUnit('meters')}>m</button>
-              </div>
+        <FormField label="Altitude" id="bcn-alt"
+          hint={form.type === 'object'
+            ? `Object altitude above sea level in ${altUnit}. Optional; leave blank or 0 to omit.`
+            : `Antenna height above sea level in ${altUnit}. Optional; leave blank or 0 to omit.`}>
+          <div class="alt-row">
+            <Input id="bcn-alt" bind:value={altInput} placeholder={altUnit === 'feet' ? '0 ft' : '0 m'}
+              type="text" inputmode="decimal" error={altError} oninput={() => altError = ''} />
+            <div class="unit-toggle" role="group" aria-label="Altitude unit">
+              <button type="button" class="unit-btn" class:unit-active={altUnit === 'feet'}
+                onclick={() => toggleAltUnit('feet')}>ft</button>
+              <button type="button" class="unit-btn" class:unit-active={altUnit === 'meters'}
+                onclick={() => toggleAltUnit('meters')}>m</button>
             </div>
-          </FormField>
-        {/if}
+          </div>
+        </FormField>
       {/if}
       <FormField label="Interval (seconds)" id="bcn-interval">
         <Input id="bcn-interval" bind:value={form.interval} type="number" placeholder="600" />
       </FormField>
-      <Toggle bind:checked={form.send_to_aprs_is} label="Also send to APRS-IS" />
+      <FormField label="Slot (seconds past the hour)" id="bcn-slot"
+        hint="Optional. Aligns each transmission to a fixed second past the top of the hour so multiple beacons stagger instead of flooding. E.g. 0 fires at :00/:30 with a 1800 s interval; 900 fires at :15/:45. Leave blank to fire on a plain interval.">
+        <Input id="bcn-slot" bind:value={form.slot} type="number" min="0" max="3599" placeholder="e.g. 0" />
+      </FormField>
     </div>
   </div>
   {#if txBlock}
@@ -1099,6 +1208,38 @@
     font-size: 12px;
     color: var(--color-text-muted, #888);
     line-height: 1.4;
+  }
+  .no-channel-note {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--color-text-muted, #888);
+    background: var(--bg-secondary);
+    border: 1px dashed var(--border-color);
+    border-radius: var(--radius);
+  }
+  .no-rf-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 16px;
+    padding: 12px 14px;
+    font-size: 13px;
+    line-height: 1.45;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--color-info, #3b82f6);
+    border-radius: var(--radius);
+  }
+  .no-rf-banner-icon {
+    flex: 0 0 auto;
+    font-size: 16px;
+    color: var(--color-info, #3b82f6);
+    line-height: 1.4;
+  }
+  .no-rf-banner-body {
+    color: var(--text-secondary, var(--color-text-muted, #888));
   }
   .symbol-swatch {
     flex: 0 0 auto;

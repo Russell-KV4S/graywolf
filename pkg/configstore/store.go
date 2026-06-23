@@ -154,6 +154,7 @@ func (s *Store) Migrate() error {
 		&IGateConfig{},
 		&IGateRfFilter{},
 		&Beacon{},
+		&FixedPoint{},
 		&PacketFilter{},
 		&GPSConfig{},
 		&SmartBeaconConfig{},
@@ -1338,6 +1339,35 @@ func (s *Store) UpdateBeacon(ctx context.Context, b *Beacon) error {
 }
 func (s *Store) DeleteBeacon(ctx context.Context, id uint32) error {
 	return s.db.WithContext(ctx).Delete(&Beacon{}, id).Error
+}
+
+// ---------------------------------------------------------------------------
+// FixedPoint
+// ---------------------------------------------------------------------------
+
+func (s *Store) ListFixedPoints(ctx context.Context) ([]FixedPoint, error) {
+	var out []FixedPoint
+	return out, s.db.WithContext(ctx).Order("id").Find(&out).Error
+}
+
+func (s *Store) GetFixedPoint(ctx context.Context, id uint32) (*FixedPoint, error) {
+	var fp FixedPoint
+	if err := s.db.WithContext(ctx).First(&fp, id).Error; err != nil {
+		return nil, err
+	}
+	return &fp, nil
+}
+
+func (s *Store) CreateFixedPoint(ctx context.Context, fp *FixedPoint) error {
+	return s.db.WithContext(ctx).Create(fp).Error
+}
+
+func (s *Store) UpdateFixedPoint(ctx context.Context, fp *FixedPoint) error {
+	return s.db.WithContext(ctx).Save(fp).Error
+}
+
+func (s *Store) DeleteFixedPoint(ctx context.Context, id uint32) error {
+	return s.db.WithContext(ctx).Delete(&FixedPoint{}, id).Error
 }
 
 // ---------------------------------------------------------------------------

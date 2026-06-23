@@ -2,10 +2,12 @@
   import { onMount } from 'svelte';
   import { Button, Box } from '@chrissnell/chonky-ui';
   import { api } from '../lib/api.js';
+  import { online } from '../lib/stores/connection.js';
   import { formatAltitude, formatSpeed } from '../lib/settings/units.js';
   import { beaconLabel } from '../lib/beaconLabel.js';
   import PageHeader from '../components/PageHeader.svelte';
   import PacketLogViewer from '../components/PacketLogViewer.svelte';
+  import { logPrefsState } from '../lib/settings/log-prefs-store.svelte.js';
 
   let packets = $state([]);
   let status = $state(null);
@@ -15,8 +17,21 @@
   let audioDevices = $state([]);
   let pollTimer = $state(null);
 
+  let offline = $derived(!$online);
+
   let hasInput = $derived(audioDevices.some(d => d.direction === 'input'));
   let hasOutput = $derived(audioDevices.some(d => d.direction === 'output'));
+
+  // When contact with the server is lost, the polled values we hold are
+  // stale — drop them so the cards fall back to placeholder dashes instead
+  // of presenting the last-known numbers as if they were live (GH #365).
+  $effect(() => {
+    if (!$online) {
+      status = null;
+      position = null;
+      packets = [];
+    }
+  });
 
   let totalRx = $derived(status?.channels?.reduce((sum, ch) => sum + (ch.rx_frames || 0), 0) ?? 0);
   let totalTx = $derived(status?.channels?.reduce((sum, ch) => sum + (ch.tx_frames || 0), 0) ?? 0);
@@ -39,6 +54,31 @@
     }, {})
   );
 
+  // Same auto-refresh / auto-scroll switches as the APRS Logs page, rendered
+  // in the packet feed's own toolbar via Chonky's LogViewer toolbarToggles.
+  // State is the shared device-local store, so a preference set on either
+  // screen carries over (GH #373).
+  const toolbarToggles = $derived([
+    {
+      label: 'Auto-refresh',
+      checked: logPrefsState.autoRefresh,
+      onChange: (v) => logPrefsState.setAutoRefresh(v),
+      title: 'Poll for new packets every few seconds',
+    },
+    {
+      label: 'Auto-scroll',
+      checked: logPrefsState.autoScroll,
+      onChange: (v) => logPrefsState.setAutoScroll(v),
+      title: 'Follow new packets to the bottom',
+    },
+    {
+      label: 'Non-ASCII data',
+      checked: logPrefsState.showNonPrintable,
+      onChange: (v) => logPrefsState.setShowNonPrintable(v),
+      title: 'Show non-printable bytes as <0x7f> hex tokens',
+    },
+  ]);
+
   onMount(() => {
     loadData();
     loadBeacons();
@@ -54,7 +94,10 @@
       api.get('/position'),
       api.get('/status'),
     ]);
-    if (pkts.status === 'fulfilled') packets = pkts.value || [];
+    // Auto-refresh gates only the packet feed (its toolbar owns the toggle),
+    // so the operator can freeze the log to read it while the status cards
+    // and position keep updating. See the toolbarToggles wiring below.
+    if (pkts.status === 'fulfilled' && logPrefsState.autoRefresh) packets = pkts.value || [];
     if (pos.status === 'fulfilled') position = pos.value;
     if (st.status === 'fulfilled' && st.value) {
       // Track RX/TX activity changes for flash indicators
@@ -167,16 +210,25 @@
 
 <PageHeader title="Dashboard" subtitle="Live station overview" />
 
-<div class="readiness-row">
-  <div class="ready-chip" class:ok={hasInput}>
-    <span class="ready-dot">{hasInput ? '\u25CF' : '\u25CB'}</span>
-    <span>RX {hasInput ? 'Ready' : 'No Input'}</span>
+{#if offline}
+  <div class="conn-lost" role="alert">
+    <span class="conn-dot"></span>
+    <span>Connection to the Graywolf server lost. Live data is unavailable until the connection is restored.</span>
   </div>
-  <div class="ready-chip" class:ok={hasOutput}>
-    <span class="ready-dot">{hasOutput ? '\u25CF' : '\u25CB'}</span>
-    <span>TX Audio {hasOutput ? 'Ready' : 'No Output'}</span>
+{/if}
+
+{#if !offline}
+  <div class="readiness-row">
+    <div class="ready-chip" class:ok={hasInput}>
+      <span class="ready-dot">{hasInput ? '\u25CF' : '\u25CB'}</span>
+      <span>RX {hasInput ? 'Ready' : 'No Input'}</span>
+    </div>
+    <div class="ready-chip" class:ok={hasOutput}>
+      <span class="ready-dot">{hasOutput ? '\u25CF' : '\u25CB'}</span>
+      <span>TX Audio {hasOutput ? 'Ready' : 'No Output'}</span>
+    </div>
   </div>
-</div>
+{/if}
 
 <!-- Channel Cards -->
 <div class="channel-grid">
@@ -231,22 +283,22 @@
       </div>
     {/each}
   {:else}
-    <div class="ch-card"><span class="text-muted">No channels configured</span></div>
+    <div class="ch-card"><span class="text-muted">{offline ? 'No data — connection lost' : 'No channels configured'}</span></div>
   {/if}
 </div>
 
 <!-- Station Summary -->
 <div class="stats-grid">
   <div class="stat-card">
-    <span class="stat-value">{totalRx}</span>
+    <span class="stat-value">{offline ? '—' : totalRx}</span>
     <span class="stat-label">Packets RX</span>
   </div>
   <div class="stat-card">
-    <span class="stat-value">{totalTx}</span>
+    <span class="stat-value">{offline ? '—' : totalTx}</span>
     <span class="stat-label">Packets TX</span>
   </div>
   <div class="stat-card">
-    <span class="stat-value">{igated}</span>
+    <span class="stat-value">{offline ? '—' : igated}</span>
     <span class="stat-label">iGated</span>
   </div>
   <div class="stat-card">
@@ -276,7 +328,10 @@
     <PacketLogViewer
       {packets}
       height="400px"
-      live
+      live={logPrefsState.autoRefresh}
+      autoscroll={logPrefsState.autoScroll}
+      {toolbarToggles}
+      showNonPrintable={logPrefsState.showNonPrintable}
       showHeader
       mobileBreakpoint="768px"
     />
@@ -284,6 +339,29 @@
 </div>
 
 <style>
+  /* ── lost-connection banner ───────────────────── */
+  .conn-lost {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    border: 1px solid var(--color-danger);
+    border-radius: var(--radius);
+    background: var(--color-danger-muted, rgba(248, 81, 73, 0.15));
+    color: var(--color-danger);
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .conn-dot {
+    width: 10px;
+    height: 10px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--color-danger);
+    box-shadow: 0 0 8px var(--color-danger);
+  }
+
   /* ── readiness row ────────────────────────────── */
   .readiness-row {
     display: flex;

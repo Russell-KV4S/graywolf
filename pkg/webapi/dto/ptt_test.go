@@ -10,8 +10,8 @@ import (
 // TestPttRequest_Validate_Android covers the ptt_method gate for the
 // android method (spec Appendix B, C1 final-review sweep).
 func TestPttRequest_Validate_Android(t *testing.T) {
-	// Each valid ptt_method must pass.
-	for _, pin := range []uint32{1, 2, 3, 4} {
+	// Each valid ptt_method must pass (5 = Digirig Lite tone PTT).
+	for _, pin := range []uint32{1, 2, 3, 4, 5} {
 		r := PttRequest{ChannelID: 1, Method: "android", PttMethod: pin}
 		if err := r.Validate(); err != nil {
 			t.Errorf("ptt_method=%d: expected no error, got %v", pin, err)
@@ -52,7 +52,7 @@ func TestPttRequest_AndroidRequiresPttMethod(t *testing.T) {
 // TestPttRequest_Validate_NonAndroid confirms the android ptt_method gate
 // does not interfere with other methods (they may carry any gpio_pin value).
 func TestPttRequest_Validate_NonAndroid(t *testing.T) {
-	for _, method := range []string{"serial_rts", "cm108_hid", "gpio", "vox", "none"} {
+	for _, method := range []string{"serial_rts", "cm108_hid", "gpio", "vox", "digirig_tone", "none"} {
 		r := PttRequest{ChannelID: 1, Method: method, GpioPin: 0}
 		if err := r.Validate(); err != nil {
 			t.Errorf("method=%s gpio_pin=0: unexpected error: %v", method, err)

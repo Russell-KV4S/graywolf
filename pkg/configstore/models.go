@@ -88,10 +88,10 @@ type PttConfig struct {
 	ID         uint32    `gorm:"primaryKey;autoIncrement" json:"id"`
 	ChannelID  uint32    `gorm:"not null;uniqueIndex" json:"channel_id"`
 	Channel    *Channel  `gorm:"foreignKey:ChannelID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE" json:"-"`
-	Method     string    `gorm:"not null;default:'none'" json:"method"` // serial_rts|serial_dtr|gpio|cm108|android|vox|none
+	Method     string    `gorm:"not null;default:'none'" json:"method"` // serial_rts|serial_dtr|gpio|cm108|android|vox|digirig_tone|none
 	Device     string    `json:"device_path"`
 	GpioPin    uint32    `json:"gpio_pin"`                             // CM108 HID GPIO pin (1-indexed, default 3). cm108 method only.
-	PttMethod  uint32    `gorm:"not null;default:0" json:"ptt_method"` // Android transport when Method=="android": PttMethod enum 1..4 (1 CP2102N_RTS, 2 CM108_HID, 3 AIOC_CDC_DTR, 4 VOX). 0 = unset / non-android.
+	PttMethod  uint32    `gorm:"not null;default:0" json:"ptt_method"` // Android transport when Method=="android": PttMethod enum 1..5 (1 CP2102N_RTS, 2 CM108_HID, 3 AIOC_CDC_DTR, 4 VOX, 5 DIGIRIG_TONE). 0 = unset / non-android.
 	GpioLine   uint32    `gorm:"not null;default:0" json:"gpio_line"`  // gpiochip method: 0-indexed line offset
 	Invert     bool      `gorm:"not null;default:false" json:"invert"` // reverse polarity for rigs wired backwards
 	SlotTimeMs uint32    `gorm:"not null;default:10" json:"slot_time_ms"`
@@ -667,10 +667,27 @@ type Beacon struct {
 	// moved to the global config. See
 	// .context/2026-04-18-smart-beacon-implementation.md.
 	SbMinTurnTime uint32    `gorm:"default:5" json:"sb_min_turn_time"`
-	SendToAPRSIS  bool      `gorm:"column:send_to_aprs_is;not null;default:false" json:"send_to_aprs_is"`
+	SendPath      string    `gorm:"column:send_path;not null;default:'rf'" json:"send_path"` // rf | both | is_only
 	Enabled       bool      `gorm:"not null;default:true" json:"enabled"`
 	CreatedAt     time.Time `json:"-"`
 	UpdatedAt     time.Time `json:"-"`
+}
+
+// FixedPoint is an operator-placed landmark on the live map: a named
+// location with an APRS symbol, stored server-side so it is shared by
+// every browser/device pointed at this server and survives a client
+// browser-data wipe (graywolf#347). Unlike a Beacon it is never
+// transmitted -- it is purely a map annotation.
+type FixedPoint struct {
+	ID          uint32    `gorm:"primaryKey;autoIncrement" json:"id"`
+	Name        string    `gorm:"not null" json:"name"`
+	SymbolTable string    `gorm:"not null;default:'/'" json:"symbol_table"`
+	Symbol      string    `gorm:"not null;default:'/'" json:"symbol"`
+	Overlay     string    `json:"overlay"`
+	Latitude    float64   `gorm:"not null" json:"latitude"`
+	Longitude   float64   `gorm:"not null" json:"longitude"`
+	CreatedAt   time.Time `json:"-"`
+	UpdatedAt   time.Time `json:"-"`
 }
 
 // SmartBeaconConfig is a singleton (id=1) row holding the global

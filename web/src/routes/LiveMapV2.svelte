@@ -31,10 +31,16 @@
   import { renderStationPopupHTML } from '../lib/map/popup.js';
   import { unitsState } from '../lib/settings/units-store.svelte.js';
   import { mapState, MY_POSITION_ZOOM } from '../lib/map/map-store.svelte.js';
+  import {
+    LAYER_TOGGLES_KEY,
+    parseLayerToggles,
+  } from '../lib/map/layer-toggles-core.js';
   import { toMaidenhead } from '../lib/map/maidenhead.js';
   import { fmtLat, fmtLon, timeAgo } from '../lib/map/popup-helpers.js';
   import { clockOffset, formatOffsetMagnitude } from '../lib/map/clock-offset.svelte.js';
+  import { directHeardWithin } from '../lib/map/direct-rx-core.js';
   import { toasts } from '../lib/stores.js';
+  import { online } from '../lib/stores/connection.js';
   import MapPinPlus from 'lucide-svelte/icons/map-pin-plus';
   import MapPinned from 'lucide-svelte/icons/map-pinned';
   import Copy from 'lucide-svelte/icons/copy';
@@ -61,6 +67,29 @@
   // view from a prior session — restoring that view is what they want, not
   // having it yanked to the station bounds on first poll.
   let didAutoFit = mapState.hasSavedView;
+
+  // Deep-link focus: the packet log's reticle navigates here with
+  // #/map?focus=CALL&lat=…&lon=… (the reverse of the popup's "APRS logs"
+  // link). When present we frame the map on those coordinates on load and,
+  // once the station shows up in the first poll, open its popup. lat/lon are
+  // authoritative for the camera so we can fly even to a station that is older
+  // than the active time-range and thus never enters the data store.
+  const FOCUS_ZOOM = 12;
+  const pendingFocus = parseFocusFromHash();
+  let focusPopupDone = false;
+
+  function parseFocusFromHash() {
+    if (typeof window === 'undefined') return null;
+    const h = window.location.hash || '';
+    const qIdx = h.indexOf('?');
+    if (qIdx < 0) return null;
+    const params = new URLSearchParams(h.slice(qIdx + 1));
+    const lat = parseFloat(params.get('lat'));
+    const lon = parseFloat(params.get('lon'));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    return { callsign: params.get('focus') || '', lat, lon };
+  }
+
   let stationsLayer = null;
   let trailsLayer = null;
   let weatherLayer = null;
@@ -173,30 +202,26 @@
   let isMobile = $state(false);
   let panelOpen = $state(false);
   let layerCardCollapsed = $state(false);
-  let layerToggles = $state({
-    stations: true,
-    trails: true,
-    weather: true,
-    myPosition: true,
-    fixedPoints: true,
-    directRxOnly: false,
-    rfOnly: false,
-  });
+  // Layer toggles are a per-browser preference (like the radar settings
+  // above): persisted to localStorage so unchecking e.g. Trails or Fixed
+  // Points survives navigating away and back. The load/merge logic lives in
+  // layer-toggles-core.js (pure, unit-tested); here we only read/write storage.
+  let layerToggles = $state(parseLayerToggles(localStorage.getItem(LAYER_TOGGLES_KEY)));
 
   // Add-fixed-point dialog state. Opened from the context menu with the
   // clicked coordinates; onConfirm drops the point into the store.
   let fpDialog = $state({ open: false, lat: 0, lon: 0 });
 
-  // Direct RX predicate: a station qualifies if at least one of its
-  // accumulated positions arrived directly on RF (RX direction with
-  // zero digi hops). Anything iGated (IS) or digipeated is excluded.
+  // Direct RX predicate: a station qualifies only if it was heard directly on
+  // RF (RX, zero digi hops) WITHIN the active time range. The server tracks the
+  // last direct-hearing time in last_direct_heard and never advances it on a
+  // later digipeated copy, so a station heard directly earlier but only via a
+  // digipeater recently drops out of this filter once the direct hearing falls
+  // outside the window (issue #349). Uses serverNow() so the cutoff matches the
+  // host clock that stamped the timestamps.
   function isDirectRx(station) {
-    const pts = station?.positions;
-    if (!Array.isArray(pts) || pts.length === 0) return false;
-    for (const p of pts) {
-      if (p.direction === 'RX' && (p.hops ?? 0) === 0) return true;
-    }
-    return false;
+    const cutoffMs = clockOffset.serverNow() - dataStore.timerangeMs;
+    return directHeardWithin(station, cutoffMs);
   }
 
   // RF Only predicate: a station qualifies if at least one position was
@@ -373,10 +398,14 @@
     btn.type = 'button';
     btn.className = 'gw-fixed-popup-delete';
     btn.textContent = 'Delete point';
-    btn.addEventListener('click', () => {
-      fixedPointsStore.remove(point.id);
-      closePopup();
-      toasts.success(`Removed "${name}"`);
+    btn.addEventListener('click', async () => {
+      try {
+        await fixedPointsStore.remove(point.id);
+        closePopup();
+        toasts.success(`Removed "${name}"`);
+      } catch (err) {
+        toasts.error(`Could not remove point: ${err.message}`);
+      }
     });
     div.append(title, coords, btn);
 
@@ -478,6 +507,18 @@
     fixedPointsLayer = mountFixedPointsLayer(map, () => fixedPointsStore.points, {
       onMarkerClick: (point) => openFixedPointPopup(map, point),
     });
+    // Render any points already in the store at mount time. On a remount
+    // (e.g. navigating back to the map) the store singleton still holds the
+    // last set, and the layer is created here -- after the refresh $effect's
+    // first run -- so without this call pre-existing points stay invisible
+    // until the next store mutation. (graywolf#347)
+    fixedPointsLayer.refresh();
+    // Then pull the server-side set so points placed on another device (or
+    // before a browser-data wipe) show up here. load() reassigns the store
+    // array, so the refresh $effect re-runs once this resolves. (graywolf#347)
+    fixedPointsStore.load().catch((err) => {
+      toasts.error(`Could not load fixed points: ${err.message}`);
+    });
     myPositionLayer = mountMyPositionLayer(map, () => dataStore.myPosition, {
       onMarkerEnter: () => {
         if (activePopup) return;
@@ -491,6 +532,28 @@
         hoverPathLayer?.clear();
       },
     });
+
+    // Apply the saved toggle state to the freshly-mounted layers. The
+    // setVisible/setFilter effects only depend on layerToggles.*, not on the
+    // layer references, so assigning a layer above does NOT re-run them. On a
+    // remount with a non-default config (e.g. Trails unchecked) the layers
+    // would otherwise be created visible/unfiltered and the saved preference
+    // never applied until the operator toggled a checkbox. (graywolf#363)
+    stationsLayer.setVisible(layerToggles.stations);
+    trailsLayer.setVisible(layerToggles.trails);
+    weatherLayer.setVisible(layerToggles.weather);
+    windBarbsLayer.setVisible(layerToggles.weather);
+    myPositionLayer.setVisible(layerToggles.myPosition);
+    fixedPointsLayer.setVisible(layerToggles.fixedPoints);
+    const initialPred = layerToggles.directRxOnly
+      ? isDirectRx
+      : layerToggles.rfOnly
+        ? isRfOnly
+        : null;
+    stationsLayer.setFilter(initialPred);
+    trailsLayer.setFilter(initialPred);
+    weatherLayer.setFilter(initialPred);
+    windBarbsLayer.setFilter(initialPred);
 
     function updateBounds() {
       const b = map.getBounds();
@@ -522,12 +585,23 @@
     map.on('mousemove', (e) => updateCoordText(e.lngLat));
     map.on('mouseout', () => (coordText = ''));
 
+    // Open the background context menu at viewport coords vx/vy anchored to
+    // the given lngLat. Shared by right-click (desktop) and long-press
+    // (touch) so both surfaces behave identically once triggered.
+    function openCtxMenuAt(vx, vy, lngLat) {
+      ctxMenu = { open: true, x: vx, y: vy, lat: lngLat.lat, lon: lngLat.lng };
+      // Suppress hover overlays while the menu is up.
+      closePopup();
+      hoverPathLayer?.clear();
+    }
+
     // Right-click background → open context menu. Bail when the click
-    // landed on a station marker (or any DOM child of one): markers own
-    // a left-click popup and we don't want to fight that surface.
+    // landed on a marker (or any DOM child of one): station markers own a
+    // left-click popup and fixed-point markers own a delete popup, so we
+    // don't want the background menu to fight either surface.
     map.on('contextmenu', (e) => {
       const target = e.originalEvent?.target;
-      if (target && target.closest && target.closest('.gw-station-marker')) {
+      if (target && target.closest && target.closest('.gw-station-marker, .gw-fixed-marker')) {
         return;
       }
       e.preventDefault?.();
@@ -539,22 +613,82 @@
       const oe = e.originalEvent;
       const vx = oe?.clientX ?? e.point.x;
       const vy = oe?.clientY ?? e.point.y;
-      ctxMenu = {
-        open: true,
-        x: vx,
-        y: vy,
-        lat: e.lngLat.lat,
-        lon: e.lngLat.lng,
-      };
-      // Suppress hover overlays while the menu is up.
-      closePopup();
-      hoverPathLayer?.clear();
+      openCtxMenuAt(vx, vy, e.lngLat);
     });
+
+    // Long-press background → same context menu, for touchscreens where no
+    // contextmenu event fires (graywolf#347). A single finger held still for
+    // LONGPRESS_MS opens the menu; any second touch (pinch), a drag past
+    // LONGPRESS_SLOP px, or an early lift cancels it so normal pan/zoom is
+    // untouched. On browsers that DO synthesize a contextmenu on long-press,
+    // both paths call openCtxMenuAt with near-identical coords — the second
+    // open just overwrites the first single ctxMenu state, so it's a no-op,
+    // not a duplicate menu.
+    const LONGPRESS_MS = 500;
+    const LONGPRESS_SLOP = 10;
+    let lpTimer = null;
+    let lpStart = null;
+    function clearLongPress() {
+      if (lpTimer !== null) {
+        clearTimeout(lpTimer);
+        lpTimer = null;
+      }
+      lpStart = null;
+    }
+    map.on('touchstart', (e) => {
+      const touches = e.originalEvent?.touches;
+      if (!touches || touches.length !== 1) {
+        clearLongPress();
+        return;
+      }
+      const target = e.originalEvent?.target;
+      // Same guard as the right-click path: a press that lands on a marker
+      // belongs to that marker's own tap surface, not the background menu.
+      if (target && target.closest && target.closest('.gw-station-marker, .gw-fixed-marker')) {
+        return;
+      }
+      const t = touches[0];
+      lpStart = { x: t.clientX, y: t.clientY };
+      const lngLat = e.lngLat;
+      lpTimer = setTimeout(() => {
+        lpTimer = null;
+        openCtxMenuAt(lpStart.x, lpStart.y, lngLat);
+        lpStart = null;
+      }, LONGPRESS_MS);
+    });
+    map.on('touchmove', (e) => {
+      if (!lpStart) return;
+      const t = e.originalEvent?.touches?.[0];
+      if (
+        !t ||
+        Math.abs(t.clientX - lpStart.x) > LONGPRESS_SLOP ||
+        Math.abs(t.clientY - lpStart.y) > LONGPRESS_SLOP
+      ) {
+        clearLongPress();
+      }
+    });
+    map.on('touchend', clearLongPress);
+    map.on('touchcancel', clearLongPress);
+
     // Any camera change closes the menu — its anchor lat/lon would drift.
     map.on('movestart', closeCtxMenu);
     map.on('zoomstart', closeCtxMenu);
 
     dataStore.start();
+
+    // Honor a #/map?focus=…&lat=…&lon= deep-link from the packet log. Claim the
+    // camera before the auto-fit / my-position effects can fire (they bail when
+    // didAutoFit is set) so an explicit "show this station" intent wins over the
+    // default framing. The popup is opened later, once a poll has populated the
+    // store (see the focus-popup effect).
+    if (pendingFocus) {
+      didAutoFit = true;
+      map.easeTo({
+        center: [pendingFocus.lon, pendingFocus.lat],
+        zoom: FOCUS_ZOOM,
+        duration: 600,
+      });
+    }
   }
 
   // Drive layer refresh from data-store reactivity. Touching .size
@@ -580,11 +714,19 @@
 
   // Fixed points change independently of the station poll (operator adds /
   // deletes them), so they get their own refresh effect tracking the store.
+  // The store reassigns `points` to a new array on every load/add/remove, so
+  // reading the array here makes the effect re-run on each mutation
+  // (including a same-length replacement from load()).
   $effect(() => {
-    const _len = fixedPointsStore.points.length;
+    const _points = fixedPointsStore.points;
     fixedPointsLayer?.refresh();
   });
 
+  // Persist the whole toggle set on any change. JSON.stringify reads every
+  // property, so Svelte tracks each one as a dependency.
+  $effect(() => {
+    localStorage.setItem(LAYER_TOGGLES_KEY, JSON.stringify(layerToggles));
+  });
   // Push the layer toggles into the layer modules. We MUST read the
   // reactive value before the optional-chain so Svelte 5 tracks it as a
   // dependency on the initial run. With `layer?.setVisible(toggle)`, if
@@ -711,6 +853,19 @@
     if (fitToStations()) didAutoFit = true;
   });
 
+  // Focus deep-link popup: after the first poll completes, make one attempt to
+  // open the focused station's popup. One-shot (focusPopupDone) so a station
+  // heard minutes later doesn't surprise the operator with a popup; if the
+  // station isn't in the store (older than the time-range), the camera fly in
+  // onMapReady already framed its coordinates, which is enough.
+  $effect(() => {
+    const t = dataStore.lastFetchAt;
+    if (!pendingFocus?.callsign || !mapRef || !t || focusPopupDone) return;
+    focusPopupDone = true;
+    const target = dataStore.stations.get(pendingFocus.callsign);
+    if (target) openStationPopup(mapRef, target);
+  });
+
   function fitToStations() {
     if (!mapRef) return false;
     const coords = [];
@@ -759,15 +914,21 @@
     // clock — not the host-corrected serverNow().
     return timeAgo(t.toISOString(), Date.now());
   });
+  // A lost connection forces the error state regardless of pollingState. When
+  // the operator opens the map while already offline, the basemap style fetch
+  // fails, so MaplibreMap never fires `oncreate`, dataStore.start() never runs,
+  // and pollingState is stuck at its initial 'idle' — which would otherwise
+  // render a misleading green dot + "idle". Reading $online directly makes the
+  // status bar honest no matter how the map mounted (GH #365, #374).
   let pollDotClass = $derived(
-    dataStore.pollingState === 'error'
+    !$online || dataStore.pollingState === 'error'
       ? 'error'
       : dataStore.pollingState === 'polling'
         ? 'polling'
         : '',
   );
   let pollLabel = $derived(
-    dataStore.pollingState === 'error'
+    !$online || dataStore.pollingState === 'error'
       ? 'error'
       : dataStore.pollingState === 'polling'
         ? 'live'
@@ -955,7 +1116,7 @@
   {/snippet}
 
   {#if isMobile}
-    <!-- Mobile: FAB at top-right opens a bottom-sheet drawer. -->
+    <!-- Mobile: FAB at top-left opens a bottom-sheet drawer. -->
     <button
       type="button"
       class="map-fab"
@@ -1035,16 +1196,20 @@
     bind:open={fpDialog.open}
     lat={fpDialog.lat}
     lon={fpDialog.lon}
-    onConfirm={({ name, table, symbol, overlay }) => {
-      const p = fixedPointsStore.add({
-        name,
-        table,
-        symbol,
-        overlay,
-        lat: fpDialog.lat,
-        lon: fpDialog.lon,
-      });
-      toasts.success(`Added "${p.name}"`);
+    onConfirm={async ({ name, table, symbol, overlay }) => {
+      try {
+        const p = await fixedPointsStore.add({
+          name,
+          table,
+          symbol,
+          overlay,
+          lat: fpDialog.lat,
+          lon: fpDialog.lon,
+        });
+        toasts.success(`Added "${p.name}"`);
+      } catch (err) {
+        toasts.error(`Could not add point: ${err.message}`);
+      }
     }}
   />
 
@@ -1081,14 +1246,15 @@
     overflow: hidden;
   }
 
-  /* FAB (mobile only). Sits to the LEFT of MapLibre's NavigationControl
-     (which is already top-right at the default 10px inset). NavigationControl
-     itself is hidden on touch widths via maplibre-map.svelte's media query,
-     so the FAB has the corner to itself. */
+  /* FAB (mobile only). Anchored top-LEFT so it clears MapLibre's
+     NavigationControl (compass) at top-right; in a narrow portrait window
+     the two used to overlap and the FAB hid the north-up reset (GH #348).
+     The desktop layer-card never renders on mobile, so the left corner is
+     free. */
   .map-fab {
     position: absolute;
     top: 12px;
-    right: 12px;
+    left: 12px;
     width: 44px;
     height: 44px;
     border-radius: 22px;
@@ -1323,11 +1489,17 @@
       text-overflow: ellipsis;
     }
   }
-  /* Pull the status bar up on mobile so it clears the bottom safe area
-     and the MapLibre attribution. */
+  /* Pull the status bar and coord/zoom readout up on mobile so they clear
+     the bottom safe area (home indicator / gesture bar) and the MapLibre
+     attribution. The dynamic-viewport height on .main-content.full-bleed
+     keeps the map's bottom edge inside the visible area as the address bar
+     collapses; these offsets keep the chrome off the safe-area inset. */
   @media (max-width: 768px) {
     .map-status-bar {
-      bottom: 14px;
+      bottom: calc(14px + env(safe-area-inset-bottom));
+    }
+    .map-coord-display {
+      bottom: calc(28px + env(safe-area-inset-bottom));
     }
   }
 
