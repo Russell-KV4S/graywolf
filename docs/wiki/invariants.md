@@ -673,23 +673,34 @@ cannot outlive the app, because no single mechanism covers both cases.
   (bounded) before tearing the same resources down. The cheap `UsbPttAdapter.init()`
   stays on the main thread so `MainActivity.onResume`'s `enumerate()` never races an
   uninitialized adapter.
-- **WebView owns its insets (edge-to-edge + keyboard):** `targetSdk=36` forces
-  edge-to-edge on Android 15+, where the platform no longer auto-insets the
-  content view or resizes the window for the soft keyboard. `MainActivity.applyWindowInsets`
-  calls `WindowCompat.setDecorFitsSystemWindows(window, false)` and a
-  `setOnApplyWindowInsetsListener` that pads the WebView by the system bars plus
-  `max(systemBars.bottom, ime.bottom)`. The IME padding is the cross-system load-bearing
-  bit: it shrinks the web viewport above the keyboard so the SPA's sticky compose bar
-  (`web/.../ComposeBar.svelte`, `position:absolute; bottom:0`) is never covered. That
-  component skips its own `visualViewport` translateY when `Platform.isAndroid` so the
-  two mechanisms don't stack into a double-offset; the web translate stays the path for
-  mobile browsers. The manifest's `android:windowSoftInputMode="adjustResize"` is the
-  pre-API-30 fallback: there `WindowInsetsCompat.Type.ime()` reports 0, so adjustResize
-  resizes the decor frame instead, re-firing the same listener -- do NOT drop it assuming
-  the inset path covers 28-29. The WebView background is painted `@color/chrome_bg` (the
-  single source the theme's `statusBarColor` also uses) so the padded bar strips don't
-  flash white. Do NOT revert to letting the system manage insets -- on Android 15+ the
-  compose bar disappears behind the keyboard.
+- **Inset ownership is split: top in CSS, bottom in native padding (edge-to-edge + keyboard):**
+  `targetSdk=36` forces edge-to-edge on Android 15+, where the platform no longer
+  auto-insets the content view or resizes the window for the soft keyboard.
+  `MainActivity.applyWindowInsets` calls `WindowCompat.setDecorFitsSystemWindows(window, false)`
+  and a `setOnApplyWindowInsetsListener` that pads the WebView by the side bars and
+  `max(systemBars.bottom, ime.bottom)` -- but **leaves the top inset at 0 on purpose**.
+  The split is load-bearing and not interchangeable:
+  - **Top is owned by CSS.** The SPA's mobile top bar is `position:fixed; top:0`
+    (`web/.../Sidebar.svelte`), and a fixed element is pinned to the visual viewport,
+    which WebView top-padding does NOT shift -- padding the top leaves the bar stranded
+    behind the status bar (GH #390). Instead `web/index.html` sets `viewport-fit=cover`
+    so `env(safe-area-inset-top)` is populated, and the top bar reserves the status-bar
+    strip itself (`height: calc(56px + env(safe-area-inset-top))`, matching
+    `margin-top` on `.main-content`). Do NOT re-add `bars.top` to the WebView padding and
+    do NOT drop `viewport-fit=cover`.
+  - **Bottom is owned by native padding.** `env()` cannot express the keyboard, so the
+    IME padding is the cross-system load-bearing bit: it shrinks the web viewport above
+    the keyboard so the SPA's sticky compose bar (`web/.../ComposeBar.svelte`,
+    `position:absolute; bottom:0`) is never covered. That component skips its own
+    `visualViewport` translateY when `Platform.isAndroid` so the two mechanisms don't
+    stack into a double-offset; the web translate stays the path for mobile browsers.
+  The manifest's `android:windowSoftInputMode="adjustResize"` is the pre-API-30 fallback:
+  there `WindowInsetsCompat.Type.ime()` reports 0, so adjustResize resizes the decor
+  frame instead, re-firing the same listener -- do NOT drop it assuming the inset path
+  covers 28-29. The WebView background is painted `@color/chrome_bg` (the single source
+  the theme's `statusBarColor` also uses) so the padded bar strips don't flash white.
+  Do NOT revert to letting the system manage insets -- on Android 15+ the compose bar
+  disappears behind the keyboard.
 
 Source: [`../../android/app/src/main/kotlin/com/nw5w/graywolf/GraywolfService.kt`](../../android/app/src/main/kotlin/com/nw5w/graywolf/GraywolfService.kt),
 [`../../cmd/graywolf/parentwatch.go`](../../cmd/graywolf/parentwatch.go),
@@ -1199,7 +1210,54 @@ Source: [`../../pkg/aprs/mice.go`](../../pkg/aprs/mice.go)
 [`../../pkg/aprs/mice_test.go`](../../pkg/aprs/mice_test.go)
 (`TestParseMicECommentSurfaced`).
 
-### 52. MapLibre `map.remove()` deletes `this.style`; any layer helper called after teardown must guard `getSource()`/`getLayer()`
+### 52. "RF Only" classifies on the current fix, not the whole trail
+
+The Live Map "RF Only" filter shows a station only when its **current fix**
+(`positions[0]`) arrived over the air (`direction === 'RX'`) and was not
+Internet-to-RF gated (`gated`). The predicate `isRfOnly`
+(`web/src/lib/map/rf-only-core.js`) inspects only `positions[0]` -- never the
+accumulated trail.
+
+*Why:* the data store accumulates a per-callsign trail by prepending each delta
+fix (`data-store.svelte.js` `mergeStation`). A mobile station heard on RF
+earlier and now arriving only via APRS-IS keeps a stale RF breadcrumb deep in
+that trail. The old predicate scanned every position and qualified the station
+on that stale breadcrumb, so it stayed visible under RF Only even though its
+marker (drawn at `positions[0]`) and popup badge labeled it `APRS-IS` -- the bug
+in graywolf GitHub #394. The marker is always `positions[0]`, so the filter must
+classify off that same fix.
+
+*Top-level fields vs. positions[0] -- they are NOT the same.*
+`stationcache.updateMetadata` overwrites the **station-level** `Direction`/
+`Via`/`Gated` (exposed as the top-level `StationDTO` fields, and what the popup
+badge reads via `popup.js` `s.direction` and `viaText`'s `s.via === 'is'`) with
+the **latest** packet on every update, unconditionally. `positions[0]`, by
+contrast, is rfRank-protected for static re-beacons. For the common case (a
+fresh or moving station) `positions[0]` *is* the latest fix and matches the
+badge; they diverge only for a static station heard on RF then re-beaconed via
+IS, where `positions[0]` stays `RX` (rfRank) while the top-level badge flips to
+`IS`. RF Only intentionally keys on the rfRank-protected `positions[0]`, so that
+static station stays visible (next paragraph) even though its popup badge may
+read APRS-IS. Do **not** "fix" that by classifying off the top-level fields --
+that would re-hide RF-reachable static stations.
+
+*How to apply:* keep RF Only keyed on `positions[0]` only. Static stations are
+preserved -- `stationcache`'s static-rebeacon merge folds the most RF-reachable
+copy of a fix into `positions[0]` via `rfRank` (invariant #48), so a fixed
+station once heard on RF and later re-beaconed via a gated/IS copy still
+qualifies. RF Only is the looser companion to Direct RX (#48): it keeps
+RF-digipeated stations (`hops > 0`) and drops only APRS-IS and Internet-to-RF
+gated current fixes.
+
+Source: [`../../web/src/lib/map/rf-only-core.js`](../../web/src/lib/map/rf-only-core.js)
+(`isRfOnly`),
+[`../../web/src/lib/map/rf-only-core.test.js`](../../web/src/lib/map/rf-only-core.test.js),
+[`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
+(filter `$effect`, `rfOnlyStationCount`),
+[`../../web/src/lib/map/popup-helpers.js`](../../web/src/lib/map/popup-helpers.js)
+(`viaText`).
+
+### 53. MapLibre `map.remove()` deletes `this.style`; any layer helper called after teardown must guard `getSource()`/`getLayer()`
 
 MapLibre GL JS v5 `map.remove()` → `_updateStyle(null)` → `delete this.style`.
 Any subsequent call to `map.getSource()` or `map.getLayer()` throws a

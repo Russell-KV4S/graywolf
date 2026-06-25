@@ -23,6 +23,8 @@
     parseManifestFramesForRegion,
     RADAR_REGION_WORLD,
   } from '../lib/map/sources/radar-source.js';
+  import { mountFrontsLayer } from '../lib/map/layers/fronts.js';
+  import { frontsProvider, frontsWorldProvider } from '../lib/map/sources/fronts-source.js';
   import { createRadarFrames } from '../lib/map/radar-frames.svelte.js';
   import { mapsState } from '../lib/settings/maps-store.svelte.js';
   import { mountFixedPointsLayer } from '../lib/map/layers/fixed-points.js';
@@ -39,6 +41,7 @@
   import { fmtLat, fmtLon, timeAgo } from '../lib/map/popup-helpers.js';
   import { clockOffset, formatOffsetMagnitude } from '../lib/map/clock-offset.svelte.js';
   import { directHeardWithin } from '../lib/map/direct-rx-core.js';
+  import { isRfOnly } from '../lib/map/rf-only-core.js';
   import { toasts } from '../lib/stores.js';
   import { online } from '../lib/stores/connection.js';
   import MapPinPlus from 'lucide-svelte/icons/map-pin-plus';
@@ -97,6 +100,7 @@
   let hoverPathLayer = null;
   let myPositionLayer = null;
   let radarLayer = null;
+  let frontsLayer = null;
   let fixedPointsLayer = null;
 
   // Radar overlay settings -- persisted per browser (not per account).
@@ -193,6 +197,153 @@
     return `${t} · ${radarFrames.index + 1}/${radarFrames.count}`;
   });
 
+  // Surface-fronts overlay. Unlike radar there is no frame loop -- one GeoJSON
+  // document holds the current analysis. A slow poll (every 5 min, only while
+  // the Fronts toggle is on) checks the tiny manifest and reloads the source
+  // when a newer analysis is published. The manifest is a plain fetch, so we
+  // append the bearer token (?t=) ourselves, mirroring loadRadarFrames(); the
+  // GeoJSON data URL itself is a MapLibre source request, so transformRequest
+  // attaches the token to it without any wiring here.
+  let frontsToken = null;
+  let frontsPollTimer = null;
+  let frontsDataRetry = null; // short retry until registration+token are ready
+  // One issuance marker per source (WPC analysis + model-derived world). Either
+  // changing triggers a refetch of both GeoJSON documents via loadFrontsData()
+  // (they share the toggle and the smoothing path).
+  let lastFrontsIssued = null;
+  let lastFrontsWorldIssued = null;
+  // De-dupe diagnostics like warnRadar: a persistent failure would otherwise
+  // warn every poll. The de-dupe is keyed by status string and tracked PER
+  // SOURCE: a healthy `na` must not clear a persistently-failing `world`'s
+  // warning (the normal state while the world source is rolling out). A source
+  // clears only its own statuses on success.
+  const frontsWarned = new Set();
+  function warnFronts(status, ...args) {
+    if (frontsWarned.has(status)) return;
+    frontsWarned.add(status);
+    console.warn(...args);
+  }
+  function clearFrontsWarn(label) {
+    for (const s of [...frontsWarned]) if (s.startsWith(`${label}-`)) frontsWarned.delete(s);
+  }
+  // Fetch one fronts manifest and return its issuance marker, or undefined on
+  // any failure (network/401/HTTP/parse). A 401 clears the token to re-reveal.
+  async function fetchFrontsIssued(manifestUrl, label) {
+    const url = `${manifestUrl}?t=${encodeURIComponent(frontsToken)}`;
+    let resp;
+    try {
+      resp = await fetch(url);
+    } catch (e) {
+      warnFronts(`${label}-network`, `[fronts] ${label} manifest fetch failed (network/CORS)`, e);
+      return undefined;
+    }
+    if (resp.status === 401) {
+      frontsToken = null; // stale token -- re-reveal next poll
+      warnFronts(`${label}-401`, `[fronts] ${label} manifest 401 -- token rejected; will re-reveal`);
+      return undefined;
+    }
+    if (!resp.ok) {
+      warnFronts(`${label}-${resp.status}`, `[fronts] ${label} manifest fetch HTTP ${resp.status}`);
+      return undefined;
+    }
+    try {
+      const json = await resp.json();
+      const issued = json?.issued ?? json?.latest ?? null;
+      clearFrontsWarn(label); // this source recovered
+      return issued;
+    } catch (e) {
+      warnFronts(`${label}-parse`, `[fronts] ${label} manifest JSON parse failed`, e);
+      return undefined;
+    }
+  }
+  async function pollFrontsManifest() {
+    if (!mapsState.registered) return;
+    if (!frontsToken) frontsToken = await mapsState.revealToken();
+    if (!frontsToken) return;
+    const na = await fetchFrontsIssued(frontsProvider().manifestUrl, 'na');
+    // If `na` got a 401 it cleared the token; don't fire a guaranteed second
+    // 401 at the world manifest -- re-reveal on the next poll instead.
+    if (!frontsToken) return;
+    const world = await fetchFrontsIssued(frontsWorldProvider().manifestUrl, 'world');
+    let changed = false;
+    if (na !== undefined && na != null) {
+      if (lastFrontsIssued !== null && na !== lastFrontsIssued) changed = true;
+      lastFrontsIssued = na;
+    }
+    if (world !== undefined && world != null) {
+      if (lastFrontsWorldIssued !== null && world !== lastFrontsWorldIssued) changed = true;
+      lastFrontsWorldIssued = world;
+    }
+    if (changed) loadFrontsData();
+  }
+  // Fetch the GeoJSON document (token-gated, same as the manifest) and hand it
+  // to the layer, which smooths the lines before rendering. Kept here rather
+  // than in the layer module so all bearer-token handling stays in one place.
+  // Fetch one fronts GeoJSON document (token-gated, same as the manifest) and
+  // return the parsed object, or undefined on any failure. A 401 clears the
+  // token to re-reveal. Diagnostics are de-duped PER SOURCE like the manifest
+  // poll, so a healthy `na` never silences a persistently-failing `world`.
+  async function fetchFrontsDoc(dataUrl, label) {
+    const url = `${dataUrl}?t=${encodeURIComponent(frontsToken)}`;
+    let resp;
+    try {
+      resp = await fetch(url);
+    } catch (e) {
+      warnFronts(`${label}-data-network`, `[fronts] ${label} geojson fetch failed (network/CORS)`, e);
+      return undefined;
+    }
+    if (resp.status === 401) {
+      frontsToken = null; // stale token -- re-reveal next load
+      warnFronts(`${label}-data-401`, `[fronts] ${label} geojson 401 -- token rejected; will re-reveal`);
+      return undefined;
+    }
+    if (!resp.ok) {
+      warnFronts(`${label}-data-http`, `[fronts] ${label} geojson fetch HTTP ${resp.status}`);
+      return undefined;
+    }
+    try {
+      const json = await resp.json();
+      clearFrontsWarn(label); // this source recovered
+      return json;
+    } catch (e) {
+      warnFronts(`${label}-data-parse`, `[fronts] ${label} geojson JSON parse failed`, e);
+      return undefined;
+    }
+  }
+  // Fetch both GeoJSON documents and hand them to the layer, which smooths the
+  // lines before rendering. Kept here rather than in the layer module so all
+  // bearer-token handling stays in one place. The world source rolling out 404s
+  // until published -- that warns once and the WPC overlay still paints.
+  async function loadFrontsData() {
+    if (frontsDataRetry) { clearTimeout(frontsDataRetry); frontsDataRetry = null; }
+    if (!mapsState.registered) { frontsDataRetry = setTimeout(loadFrontsData, 2000); return; }
+    if (!frontsToken) frontsToken = await mapsState.revealToken();
+    if (!frontsToken) { frontsDataRetry = setTimeout(loadFrontsData, 2000); return; }
+    const na = await fetchFrontsDoc(frontsProvider().dataUrl, 'na');
+    if (na !== undefined) frontsLayer?.setData(na);
+    // A 401 on the WPC doc cleared the token; skip the guaranteed second 401 and
+    // re-reveal on the next load.
+    if (!frontsToken) return;
+    const world = await fetchFrontsDoc(frontsWorldProvider().dataUrl, 'world');
+    if (world !== undefined) frontsLayer?.setWorldData(world);
+  }
+  function startFrontsPolling() {
+    if (frontsPollTimer) return;
+    loadFrontsData(); // pull the document now so the overlay paints immediately
+    pollFrontsManifest(); // immediate first manifest check (drives later reloads)
+    frontsPollTimer = setInterval(pollFrontsManifest, 5 * 60 * 1000);
+  }
+  function stopFrontsPolling() {
+    if (frontsPollTimer) {
+      clearInterval(frontsPollTimer);
+      frontsPollTimer = null;
+    }
+    if (frontsDataRetry) {
+      clearTimeout(frontsDataRetry);
+      frontsDataRetry = null;
+    }
+  }
+
   let mapRef = null;
   let activePopup = null;
 
@@ -224,20 +375,15 @@
     return directHeardWithin(station, cutoffMs);
   }
 
-  // RF Only predicate: a station qualifies if at least one position was
-  // heard over the air (RX) and did not arrive via Internet-to-RF gating
-  // (the `gated` flag, set on the inner packet of a third-party gate).
-  // Unlike Direct RX this keeps RF-digipeated stations; it only drops
-  // points that are merely Internet traffic some iGate pushed onto RF.
-  function isRfOnly(station) {
-    const pts = station?.positions;
-    if (!Array.isArray(pts) || pts.length === 0) return false;
-    for (const p of pts) {
-      if (p.direction === 'RX' && !p.gated) return true;
-    }
-    return false;
-  }
-  let timerangeSec = $state(Math.floor(dataStore.timerangeMs / 1000));
+  // RF Only predicate lives in rf-only-core.js: a station qualifies when its
+  // current fix (positions[0]) arrived over the air (RX) and was not
+  // Internet-to-RF gated. Evaluating the current fix rather than the whole
+  // trail keeps the filter consistent with the marker/popup, which label a
+  // station by its newest reception (graywolf #394).
+  // Seed from the persisted per-browser preference so a non-default time
+  // range survives reload/navigation. The $effect below pushes it into the
+  // data store and writes any change back to mapState.
+  let timerangeSec = $state(mapState.timerange);
   let coordText = $state('');
   let zoomLevel = $state(null);
 
@@ -462,6 +608,16 @@
       // toggles opacity instead of refetching tiles every cycle.
       frames: radarFrames.frames.map((f) => f.ts),
     });
+    // Surface fronts ride just above radar in the GL stack (lines + pip symbols
+    // over the reflectivity fill) and below the station/trail markers.
+    frontsLayer = mountFrontsLayer(map, { visible: layerToggles.fronts });
+    // Debug hooks for live front-symbology tuning from the browser console:
+    //   window.gwFronts.tune({ pipSize: 0.7, statSpacing: 30, lineWidth: 3 })
+    //   window.gwFronts.info()   window.gwMap.getZoom()
+    if (typeof window !== 'undefined') {
+      window.gwMap = map;
+      window.gwFronts = frontsLayer;
+    }
     // Trails first so the line sits beneath the (DOM) station markers
     // and below the weather labels in symbol-layer order.
     trailsLayer = mountTrailsLayer(map, () => dataStore.stations, {
@@ -545,6 +701,7 @@
     windBarbsLayer.setVisible(layerToggles.weather);
     myPositionLayer.setVisible(layerToggles.myPosition);
     fixedPointsLayer.setVisible(layerToggles.fixedPoints);
+    frontsLayer.setVisible(layerToggles.fronts);
     const initialPred = layerToggles.directRxOnly
       ? isDirectRx
       : layerToggles.rfOnly
@@ -705,6 +862,7 @@
     const _myPos = dataStore.myPosition; // track
     const _tick = tickNow; // 1s clock drives time-based layer refresh
     if (radarLayer) radarLayer.refresh();
+    if (frontsLayer) frontsLayer.refresh();
     if (stationsLayer) stationsLayer.refresh();
     if (trailsLayer) trailsLayer.refresh();
     if (weatherLayer) weatherLayer.refresh();
@@ -803,6 +961,15 @@
     const v = layerToggles.fixedPoints;
     fixedPointsLayer?.setVisible(v);
   });
+  // Surface fronts: toggle visibility, and run the slow manifest poll only while
+  // the overlay is on (mirrors the radar manifest poll being gated on its
+  // visibility). Reading `v` before the optional-chain registers the dep.
+  $effect(() => {
+    const v = layerToggles.fronts;
+    frontsLayer?.setVisible(v);
+    if (v) startFrontsPolling();
+    else stopFrontsPolling();
+  });
   // RF reachability filter: predicate is shared across stations/trails/
   // weather/wind-barbs so the layers stay in lockstep. my-position is the
   // operator's own beacon and is intentionally exempt. Direct RX is the
@@ -819,9 +986,11 @@
     windBarbsLayer?.setFilter(pred);
   });
 
-  // Push the timerange into the data store.
+  // Push the timerange into the data store and persist the selection so it
+  // is restored on the next load.
   $effect(() => {
     dataStore.setTimerange(timerangeSec * 1000);
+    mapState.timerange = timerangeSec;
   });
 
   // One-shot recenter on the station's "My Position" as soon as the data
@@ -951,7 +1120,9 @@
     dataStore.stop();
     closePopup();
     radarFrames.destroy();
+    stopFrontsPolling();
     radarLayer?.destroy();
+    frontsLayer?.destroy();
     stationsLayer?.destroy();
     trailsLayer?.destroy();
     weatherLayer?.destroy();
@@ -960,6 +1131,7 @@
     myPositionLayer?.destroy();
     fixedPointsLayer?.destroy();
     radarLayer = null;
+    frontsLayer = null;
     stationsLayer = null;
     trailsLayer = null;
     weatherLayer = null;
@@ -986,133 +1158,153 @@
   />
 
   {#snippet panelBody()}
-    <div class="layer-toggles">
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          checked={layerToggles.stations}
-          onchange={(e) => (layerToggles.stations = e.currentTarget.checked)}
-        />
-        <span>Stations</span>
-      </label>
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          checked={layerToggles.trails}
-          onchange={(e) => (layerToggles.trails = e.currentTarget.checked)}
-        />
-        <span>Trails</span>
-      </label>
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          checked={layerToggles.weather}
-          onchange={(e) => (layerToggles.weather = e.currentTarget.checked)}
-        />
-        <span>Weather</span>
-      </label>
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          checked={layerToggles.myPosition}
-          onchange={(e) => (layerToggles.myPosition = e.currentTarget.checked)}
-        />
-        <span>My Position</span>
-      </label>
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          checked={layerToggles.fixedPoints}
-          onchange={(e) => (layerToggles.fixedPoints = e.currentTarget.checked)}
-        />
-        <span>Fixed Points</span>
-      </label>
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          checked={layerToggles.directRxOnly}
-          onchange={(e) => (layerToggles.directRxOnly = e.currentTarget.checked)}
-        />
-        <span>Direct RX</span>
-      </label>
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          checked={layerToggles.rfOnly}
-          onchange={(e) => (layerToggles.rfOnly = e.currentTarget.checked)}
-        />
-        <span>RF Only</span>
-      </label>
-      <label class="toggle-row">
-        <input
-          type="checkbox"
-          checked={radarSettings.visible}
-          onchange={(e) => (radarSettings.visible = e.currentTarget.checked)}
-        />
-        <span>Radar</span>
-      </label>
-    </div>
-
-    <label class="timerange-label" for="radar-opacity-range">
-      Radar opacity: {Math.round(radarSettings.opacity * 100)}%
-    </label>
-    <input
-      id="radar-opacity-range"
-      type="range"
-      min="0.1"
-      max="1.0"
-      step="0.05"
-      class="radar-opacity-range"
-      bind:value={radarSettings.opacity}
-    />
-
-    {#if radarSettings.visible}
-      <!-- Radar loop animation: two text buttons [Play/Pause][Reset] and a
-           frame-position slider. Disabled until the manifest yields >1 frame. -->
-      <div class="radar-anim-buttons">
-        <button
-          type="button"
-          class="radar-anim-btn"
-          onclick={() => radarFrames.toggle()}
-          disabled={radarFrames.count <= 1}
-          aria-label={radarFrames.playing ? 'Pause radar loop' : 'Play radar loop'}
-        >
-          {radarFrames.playing ? 'Pause' : 'Play'}
-        </button>
-        <button
-          type="button"
-          class="radar-anim-btn"
-          onclick={() => radarFrames.stop()}
-          disabled={radarFrames.count <= 1}
-          aria-label="Reset radar loop and jump to the latest frame"
-        >
-          Reset
-        </button>
+    <!-- APRS: station/trail/position layers + the time-range filter. -->
+    <section class="layer-section">
+      <h3 class="layer-section-title">APRS</h3>
+      <div class="layer-toggles">
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            checked={layerToggles.stations}
+            onchange={(e) => (layerToggles.stations = e.currentTarget.checked)}
+          />
+          <span>Stations</span>
+        </label>
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            checked={layerToggles.weather}
+            onchange={(e) => (layerToggles.weather = e.currentTarget.checked)}
+          />
+          <span>Weather Stations</span>
+        </label>
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            checked={layerToggles.trails}
+            onchange={(e) => (layerToggles.trails = e.currentTarget.checked)}
+          />
+          <span>Trails</span>
+        </label>
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            checked={layerToggles.myPosition}
+            onchange={(e) => (layerToggles.myPosition = e.currentTarget.checked)}
+          />
+          <span>My Position</span>
+        </label>
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            checked={layerToggles.fixedPoints}
+            onchange={(e) => (layerToggles.fixedPoints = e.currentTarget.checked)}
+          />
+          <span>Fixed Points</span>
+        </label>
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            checked={layerToggles.directRxOnly}
+            onchange={(e) => (layerToggles.directRxOnly = e.currentTarget.checked)}
+          />
+          <span>Direct RX</span>
+        </label>
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            checked={layerToggles.rfOnly}
+            onchange={(e) => (layerToggles.rfOnly = e.currentTarget.checked)}
+          />
+          <span>RF Only</span>
+        </label>
       </div>
-      <label class="timerange-label" for="radar-frame-range">{radarFrameLabel}</label>
-      <input
-        id="radar-frame-range"
-        type="range"
-        class="radar-frame-range"
-        min="0"
-        max={Math.max(0, radarFrames.count - 1)}
-        step="1"
-        value={radarFrames.index}
-        oninput={(e) => radarFrames.seek(Number(e.currentTarget.value))}
-        disabled={radarFrames.count <= 1}
-      />
-    {/if}
 
-    <label class="timerange-label" for="map-timerange-select">Time range</label>
-    <select
-      id="map-timerange-select"
-      class="map-timerange-select"
-      bind:value={timerangeSec}
-    >
-      {#each TIMERANGES_S as opt}
-        <option value={opt.value}>{opt.label}</option>
-      {/each}
-    </select>
+      <label class="timerange-label" for="map-timerange-select">Time range</label>
+      <select
+        id="map-timerange-select"
+        class="map-timerange-select"
+        bind:value={timerangeSec}
+      >
+        {#each TIMERANGES_S as opt}
+          <option value={opt.value}>{opt.label}</option>
+        {/each}
+      </select>
+    </section>
+
+    <!-- Weather: fronts + radar overlays and their controls. (The surface-obs
+         layer toggle is "Weather Stations", grouped under APRS with Stations.) -->
+    <section class="layer-section">
+      <h3 class="layer-section-title">Weather</h3>
+      <div class="layer-toggles">
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            checked={layerToggles.fronts}
+            onchange={(e) => (layerToggles.fronts = e.currentTarget.checked)}
+          />
+          <span>Fronts</span>
+        </label>
+        <label class="toggle-row">
+          <input
+            type="checkbox"
+            checked={radarSettings.visible}
+            onchange={(e) => (radarSettings.visible = e.currentTarget.checked)}
+          />
+          <span>Radar</span>
+        </label>
+      </div>
+
+      <label class="timerange-label" for="radar-opacity-range">
+        Radar opacity: {Math.round(radarSettings.opacity * 100)}%
+      </label>
+      <input
+        id="radar-opacity-range"
+        type="range"
+        min="0.1"
+        max="1.0"
+        step="0.05"
+        class="radar-opacity-range"
+        bind:value={radarSettings.opacity}
+      />
+
+      {#if radarSettings.visible}
+        <!-- Radar loop animation: two text buttons [Play/Pause][Reset] and a
+             frame-position slider. Disabled until the manifest yields >1 frame. -->
+        <div class="radar-anim-buttons">
+          <button
+            type="button"
+            class="radar-anim-btn"
+            onclick={() => radarFrames.toggle()}
+            disabled={radarFrames.count <= 1}
+            aria-label={radarFrames.playing ? 'Pause radar loop' : 'Play radar loop'}
+          >
+            {radarFrames.playing ? 'Pause' : 'Play'}
+          </button>
+          <button
+            type="button"
+            class="radar-anim-btn"
+            onclick={() => radarFrames.stop()}
+            disabled={radarFrames.count <= 1}
+            aria-label="Reset radar loop and jump to the latest frame"
+          >
+            Reset
+          </button>
+        </div>
+        <label class="timerange-label" for="radar-frame-range">{radarFrameLabel}</label>
+        <input
+          id="radar-frame-range"
+          type="range"
+          class="radar-frame-range"
+          min="0"
+          max={Math.max(0, radarFrames.count - 1)}
+          step="1"
+          value={radarFrames.index}
+          oninput={(e) => radarFrames.seek(Number(e.currentTarget.value))}
+          disabled={radarFrames.count <= 1}
+        />
+      {/if}
+    </section>
   {/snippet}
 
   {#if isMobile}
@@ -1327,6 +1519,22 @@
     padding: 10px 12px;
   }
 
+  /* Grouped sections (APRS, Weather) within the layers pane. A divider +
+     uppercase label separates the groups so the pane reads as two columns of
+     related controls rather than one long list. */
+  .layer-section + .layer-section {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--map-overlay-border);
+  }
+  .layer-section-title {
+    margin: 0 0 8px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--color-text-muted);
+  }
   .layer-toggles {
     display: flex;
     flex-direction: column;
