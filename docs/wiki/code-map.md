@@ -184,6 +184,19 @@ See [invariant 23](invariants.md) for the TX-gating contract.
 | `app/{auth_store,gpsmanager,adapters,wiring,modem,flags,config,shutdown,platform_*}` | Wiring helpers |
 | `internal/{backoff,dedup,ratelimit,testsync,testtx}` | Internal utilities |
 
+## Go binary entry point (`cmd/graywolf/`)
+
+| File | Purpose |
+|---|---|
+| `main.go` | Entry point; startup flag parsing, logger setup, service wiring. Contains `//go:generate goversioninfo -o resource_windows.syso versioninfo.json` — run `go generate .` here (after installing `goversioninfo`) to regenerate the Windows resource object. |
+| `versioninfo.json` | Source of truth for the Windows PE resource metadata: product name, version numbers (kept in sync by `make bump-*`), copyright, and `IconPath: "graywolf.ico"`. Edit this file and re-run `go generate` to change the embedded version or icon. |
+| `graywolf.ico` | Application icon embedded into the Windows `.exe`. Shown in Explorer, Task Manager, and the taskbar. |
+| `resource_windows.syso` | Pre-compiled Windows resource object generated from `versioninfo.json` + `graywolf.ico` by `goversioninfo`. **Committed to the repo** so that `go build` on any platform embeds the correct icon and version metadata without requiring `goversioninfo` to be installed. Go automatically links `*_windows.syso` files when cross-compiling for Windows. Regenerate with: `go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest && cd cmd/graywolf && go generate .` |
+| `authcli/` | CLI helpers for auth-related subcommands (password reset, etc.) |
+| `parentwatch.go` | Watchdog: exits the Go process when the parent PID disappears (Android / supervised-process use) |
+| `android_config.go` | Android-specific config path and environment setup |
+| `flare.go` | `graywolf flare` CLI subcommand wiring (see flare CLI section below) |
+
 ## Go service: diagnostic flare CLI
 
 | Concern | File |
