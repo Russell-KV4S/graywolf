@@ -202,6 +202,8 @@ See [invariant 23](invariants.md) for the TX-gating contract.
 | Concern | File |
 |---|---|
 | `graywolf flare` CLI subcommand entry | `cmd/graywolf/flare.go` |
+| `graywolf auth {set-password,list-users,delete-user}` CLI | `cmd/graywolf/authcli/authcli.go` |
+| Subcommand dispatch (`auth`/`flare`/`version` must be `os.Args[1]`) | `cmd/graywolf/main.go` |
 | Diagnostic-flare orchestration (`Collect`, `Options`) | `pkg/diagcollect/collect.go` |
 | Flare DB discovery (graywolf.db) | `pkg/diagcollect/dbpath.go` |
 | Modem locator + listing exec helper | `pkg/diagcollect/modem.go` |
@@ -237,7 +239,7 @@ and embedded via `go:embed all:dist` -- see [invariant 12](invariants.md).
 | `src/App.svelte`, `src/main.js` | App shell, route table |
 | `src/routes/` | One Svelte route per page (Dashboard, LiveMapV2, Channels, Beacons, Digipeater, Igate, Kiss, Agw, Ptt, Gps, AudioDevices, Messages, **Bulletins**, Terminal + TerminalTranscripts, PositionLog, MapsSettings, Preferences, MessagesSettings, Login, About, Logs, Simulation) |
 | `src/components/terminal/` | AX.25 terminal pieces: `TerminalViewport` (xterm.js host, 80x24 fixed), `PreConnectForm` (channel + CALL[-N] + advanced timers), `StatusBar`, `TabBar`, `CommandBar` (Ctrl-] command line: `disconnect`, `transcript on/off`, etc.), `MacroToolbar` + `MacroEditor` (operator-defined byte-payload buttons), `RawPacketView` (APRS-only channels show packetlog raw-tail in lieu of LAPB session), `TelemetryPanel` (live `link_stats` side panel: V(S)/V(R)/V(A), N2 retry, RTT EWMA, busy flags) |
-| `src/lib/terminal/` | Terminal client state: `session.svelte.js` (one WebSocket per link), `sessions.svelte.js` (multi-tab map, cap 6, focus + visibility tracking), `palette.ts` + `theme.js` (CSS-var-resolved xterm ITheme; `theme.test.js` covers the resolver), `presets.ts` (classic / phosphor-green / phosphor-amber), `envelope.js` (b64 ↔ Uint8Array), `macros.svelte.js` (singleton-config-backed macro store), `profiles.svelte.js` (saved + recent connection profiles store), `lineendings.js` (stateful inbound CR/LF→CRLF normalizer wired into `TerminalViewport`'s `onDataRX`; xterm runs `convertEol:false` and only rewrites bare LF, so this is what lets bare-CR BBS streams advance lines instead of overwriting. Bare-CR-as-in-place-overwrite (progress bars) is intentionally collapsed to a line advance -- AX.25 BBSes are line-oriented; ANSI CSI cursor moves still pass through untouched. `lineendings.test.js`) |
+| `src/lib/terminal/` | Terminal client state: `session.svelte.js` (one WebSocket per link), `sessions.svelte.js` (multi-tab map, cap 6, focus + visibility tracking), `palette.ts` + `theme.js` (CSS-var-resolved xterm ITheme; `theme.test.js` covers the resolver), `presets.ts` (classic / phosphor-green / phosphor-amber), `envelope.js` (b64 ↔ Uint8Array), `macros.svelte.js` (singleton-config-backed macro store), `profiles.svelte.js` (saved + recent connection profiles store), `lineendings.js` (stateful inbound CR/LF→CRLF normalizer wired into `TerminalViewport`'s `onDataRX`; xterm runs `convertEol:false` and only rewrites bare LF, so this is what lets bare-CR BBS streams advance lines instead of overwriting. Bare-CR-as-in-place-overwrite (progress bars) is intentionally collapsed to a line advance -- AX.25 BBSes are line-oriented; ANSI CSI cursor moves still pass through untouched. `lineendings.test.js`), `localecho.js` (local echo of operator keystrokes on the outbound path: maps Enter->CRLF, BS/DEL->`\b \b`, drops control/escape sequences, prints the rest; AX.25 BBSes don't echo so this restores the classic TNC `ECHO ON` default. Wired into `TerminalViewport`'s `onData`, gated by per-session `state.localEcho` (default true), toggled via the Ctrl-] `echo on/off` command. `localecho.test.js`) |
 | `src/lib/stores/terminal.svelte.js` | Sidebar-facing summary: unread-bytes total across non-focused sessions for the Sidebar `NotificationBadge` |
 | `public/fonts/saucecodepro-nerd/` | SauceCodePro Nerd Font face declarations for the terminal viewport. Ships with `local()` fallbacks; the woff2 binaries are pending vendoring (see `VERSION.txt` in that directory) |
 | `src/components/` | Reusable: ConfirmDialog, DataTable, FormField, Modal, NewsPopup, PacketLogViewer, PacketInspector, PageHeader, ReleaseNoteCard, Sidebar, StationCallsignBanner, SymbolPicker, UpdateAvailableBanner. `PacketInspector` is the deep packet-inspection modal opened from the APRS Logs tab (a subtle loupe button in each `PacketLogViewer` row footer, gated behind its `inspectable` prop so the Dashboard stays uncluttered); it decodes `Entry.raw` (base64 AX.25 frame) into a hex/ASCII dump + frame-structure summary + anomaly list (malformed Mic-E, invalid addresses, unexpected control/PID) via the pure helpers in `src/lib/packetInspect.js` (`packetInspect.test.js`). Each `PacketLogViewer` row also shows a **scope-reticle locate button** in the Src→Dst cell whenever the packet carries coordinates (`Entry.lat`/`Entry.lon`, surfaced by `pkg/webapi/packets.go` `enrichPacket`/`packetPosition` for position, Mic-E, weather, object, and item reports alike — independent of the local station's own GPS, unlike `distance_mi`); clicking it deep-links to the live map framed on that fix via `#/map?focus=CALL&lat=…&lon=…` (the reverse of the station popup's "APRS logs" link; GH #350). The reticle is the consistent cross-type "has a position" affordance, so Mic-E and weather transmissions get it too. |
@@ -280,6 +282,23 @@ PMTiles infrastructure (manifest gen, R2 sync, Cloudflare Worker) is in
 
 [`../../pkg/updatescheck/checker.go`](../../pkg/updatescheck/checker.go)
 polls GitHub Releases once per day and serves the snapshot via webapi `/api/updates`.
+
+Distinct from that "a newer release exists upstream" check is the
+**"the server you're talking to changed underneath you"** check, which
+catches an operator upgrading/rebuilding graywolf while a tab is open.
+`GET /api/version` returns `{version, commit}` (commit added so a
+same-version rebuild is still detected; sourced from `Config.GitCommit`
+via [`pkg/app/wiring.go`](../../pkg/app/wiring.go) → `webapi.Config.Commit`).
+The web client captures that identity at load and re-checks it from
+[`web/src/lib/stores/server-version.svelte.js`](../../web/src/lib/stores/server-version.svelte.js)
+(pure latch/identity logic in
+[`server-version-core.js`](../../web/src/lib/server-version-core.js)); on a
+change it raises `ServerUpdatedBanner` app-wide with a Reload button. The
+re-check is **driven by the shared `online` connection store**: an upgrade
+restarts the process, which trips `online` false→true, and that reconnect
+edge triggers the version fetch (a slow interval poll is the fallback). So
+the version watch is coupled to the same disconnect/reconnect signal that
+[`web/src/lib/api.js`](../../web/src/lib/api.js) feeds.
 
 ## Android Kotlin platform service (`android/app/`)
 

@@ -3654,6 +3654,15 @@ export interface components {
         };
         "webapi.VersionResponse": {
             /**
+             * @description Commit is the build-time git commit of the running server. The web
+             *     UI captures (version, commit) at load and re-checks this endpoint to
+             *     notice when the server binary changed underneath it (e.g. the
+             *     operator upgraded graywolf) so it can prompt a reload. Including the
+             *     commit — not just the release version — means a same-version rebuild
+             *     from source is still detected.
+             */
+            commit?: string;
+            /**
              * @description Platform is runtime.GOOS of the server process — "windows", "linux",
              *     "darwin", etc. The UI uses it to surface platform-specific guidance
              *     (e.g. the Windows app-volume warning on the Audio Devices page).

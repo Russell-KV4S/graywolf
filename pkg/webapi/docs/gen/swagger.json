@@ -11742,6 +11742,10 @@
         "webapi.VersionResponse": {
             "type": "object",
             "properties": {
+                "commit": {
+                    "description": "Commit is the build-time git commit of the running server. The web\nUI captures (version, commit) at load and re-checks this endpoint to\nnotice when the server binary changed underneath it (e.g. the\noperator upgraded graywolf) so it can prompt a reload. Including the\ncommit — not just the release version — means a same-version rebuild\nfrom source is still detected.",
+                    "type": "string"
+                },
                 "platform": {
                     "description": "Platform is runtime.GOOS of the server process — \"windows\", \"linux\",\n\"darwin\", etc. The UI uses it to surface platform-specific guidance\n(e.g. the Windows app-volume warning on the Audio Devices page).",
                     "type": "string"
