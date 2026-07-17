@@ -1266,11 +1266,26 @@ qualifies. RF Only is the looser companion to Direct RX (#48): it keeps
 RF-digipeated stations (`hops > 0`) and drops only APRS-IS and Internet-to-RF
 gated current fixes.
 
+*Surfacing the divergence in the popup (graywolf #482).* The badge-vs-`positions[0]`
+divergence above reads as a filter bug to operators: a station badged `APRS-IS`
+that stays visible under RF Only looks wrong even though it is correct. #482 was
+the second report of exactly this. The popup now renders an `RF-reachable`
+note (`popup.js`, class `.stn-rf-reachable`) whenever
+`rfReachableDespiteNonRfLatest(s)` holds -- the plotted fix (`positions[0]`)
+qualifies as RF-heard while the **latest** packet did not arrive over RF
+(`s.direction !== 'RX' || s.gated`). The RF Only toggle also carries a `title`
+tooltip stating the "ever RF-reachable at the current fix" semantics. This is a
+labeling affordance only; it does **not** change the predicate. If you ever make
+RF Only key on current-packet recency instead (the #482 option 2), retire this
+note too.
+
 Source: [`../../web/src/lib/map/rf-only-core.js`](../../web/src/lib/map/rf-only-core.js)
-(`isRfOnly`),
+(`isRfOnly`, `rfReachableDespiteNonRfLatest`),
 [`../../web/src/lib/map/rf-only-core.test.js`](../../web/src/lib/map/rf-only-core.test.js),
 [`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
-(filter `$effect`, `rfOnlyStationCount`),
+(filter `$effect`, `rfOnlyStationCount`, RF Only toggle `title`, `.stn-rf-reachable` CSS),
+[`../../web/src/lib/map/popup.js`](../../web/src/lib/map/popup.js)
+(`.stn-rf-reachable` note),
 [`../../web/src/lib/map/popup-helpers.js`](../../web/src/lib/map/popup-helpers.js)
 (`viaText`).
 
@@ -1414,6 +1429,29 @@ Source: [`../../cmd/graywolf/main.go`](../../cmd/graywolf/main.go)
 [`../../pkg/app/flags.go`](../../pkg/app/flags.go)
 (leftover-positional hint),
 [`../../cmd/graywolf/authcli/authcli.go`](../../cmd/graywolf/authcli/authcli.go).
+
+### 56b. Password length policy has one source of truth and is enforced only at creation
+
+*Why:* `webauth.MinPasswordBytes` (8) and `webauth.MaxPasswordBytes` (72) are
+the single source of truth for the password-length policy. Every
+*creation* path routes through `webauth.HashPassword`, which rejects both
+bounds, so the web setup form (`POST /api/auth/setup`), the `graywolf auth
+set-password` CLI, and the server handler can never disagree — the bug in
+graywolf#476 was setup accepting a sub-8 password the web login then
+refused. Enforcement is at creation ONLY: `HandleLogin` and `CheckPassword`
+do not length-check, so an account whose password predates the minimum
+still authenticates (a login-side minimum locked such users out). The web
+`Login.svelte` mirrors this — it validates min/max/confirm only in
+`setupMode`, never on sign-in. If you change a bound, change the constant
+and the operator docs (`docs/handbook/installation.html`), not a scattered
+literal.
+
+Source: [`../../pkg/webauth/auth.go`](../../pkg/webauth/auth.go)
+(constants + `HashPassword`),
+[`../../pkg/webauth/handlers.go`](../../pkg/webauth/handlers.go)
+(`CreateFirstUser` vs `HandleLogin`),
+[`../../web/src/routes/Login.svelte`](../../web/src/routes/Login.svelte)
+(`validate`).
 
 ### 57. A station's own beacon reaches the map via the TX path, so every transmit leg must feed the station cache
 

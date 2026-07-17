@@ -7,6 +7,49 @@
 # route the body references via [text](link) markdown; renderer only
 # accepts internal #/... routes.
 
+- version: "0.14.11"
+  date: "2026-07-17"
+  style: info
+  schema_version: 1
+  link: "#/map"
+  title: "Live GPS blue dot, message blocklist, per-message TX channel, and map fixes"
+  body: |
+    The map now tracks your live position. The blue dot follows your GPS
+    in real time instead of sitting where you first loaded the page.
+
+    You can block messages from specific call signs now. Add a call sign
+    to the blocklist and its messages stop showing up in your
+    conversations.
+
+    You can pick the transmit channel for a single message right from the
+    new-message dialog, without changing your default channel.
+
+    APRS-IS-only stations now appear on your local map, and a new
+    direct-RX heatmap layer shows where you're hearing stations directly
+    off the air. The station popup also explains when a station is
+    reachable directly by RF.
+
+    Connected-mode AX.25 can be exposed through KISS with the new
+    "allow_connected_mode" setting, so a hardware TNC or an external app
+    can drive it.
+
+    The AX.25 terminal is more reliable: connect failures, stale
+    sessions, and the Ctrl-] menu are all fixed. Each conversation also
+    gets its own send path with a resend control.
+
+    The live map recovers on its own if the browser drops its graphics
+    context, instead of going blank until you reload.
+
+    Smaller fixes: the Digirig Lite tone PTT no longer shows greyed out
+    on Android; SignaLink USB users are no longer steered toward serial
+    PTT; the packet log keeps object and item name spacing aligned; the
+    conversation routing menu no longer leaks state between threads; the
+    Android top nav bar no longer hides behind the system status bar; a
+    password set during first-time setup now uses the same 8-character
+    minimum as the login screen, so a short one can't lock you out; and
+    when your beacon call sign isn't set it shows in red and links
+    straight to the settings page to fix it.
+
 - version: "0.14.10"
   date: "2026-06-30"
   style: info
