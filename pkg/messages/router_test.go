@@ -360,6 +360,95 @@ func TestRouterDMInboundNotForUsDropped(t *testing.T) {
 	}
 }
 
+func TestRouterDMDifferentSSIDOfOurBaseNotClaimed(t *testing.T) {
+	// We run as K0TFU-1. A message addressed to K0TFU-7 belongs to a
+	// distinct peer sharing our base call. It must NOT be filed locally
+	// or auto-ACKed — otherwise the sender receives a false delivery
+	// confirmation for a message that never reached K0TFU-7 (graywolf#490).
+	r, store, sink, _, _, _, cleanup := buildRouter(t, "K0TFU-1", nil)
+	defer cleanup()
+
+	pkt := makeMessagePacket(t, "W1ABC", "K0TFU-7", "for the other SSID", "001", aprs.DirectionRF)
+	_ = r.SendPacket(context.Background(), pkt)
+	time.Sleep(50 * time.Millisecond)
+
+	ms, _, _ := store.List(context.Background(), Filter{})
+	if len(ms) != 0 {
+		t.Fatalf("expected no persist for a different SSID of our base, got %d rows", len(ms))
+	}
+	if got := len(sink.list()); got != 0 {
+		t.Fatalf("expected no auto-ACK for a different SSID of our base, got %d", got)
+	}
+}
+
+func TestRouterDMExactSSIDMatchClaimed(t *testing.T) {
+	// We run as K0TFU-1. A message addressed to our exact full call must
+	// be claimed and auto-ACKed.
+	r, store, sink, _, _, _, cleanup := buildRouter(t, "K0TFU-1", nil)
+	defer cleanup()
+
+	pkt := makeMessagePacket(t, "W1ABC", "K0TFU-1", "for us exactly", "001", aprs.DirectionRF)
+	_ = r.SendPacket(context.Background(), pkt)
+
+	waitFor(t, time.Second, func() bool {
+		ms, _, _ := store.List(context.Background(), Filter{})
+		return len(ms) == 1
+	}, "row persisted for exact SSID match")
+	waitFor(t, time.Second, func() bool {
+		return len(sink.list()) >= 1
+	}, "auto-ACK submitted for exact SSID match")
+}
+
+func TestRouterDMBareBaseCallAddressClaimed(t *testing.T) {
+	// We run as K0TFU-1. A bare base-call address (no SSID) is generic
+	// and answered by any station sharing that base call, so we claim it.
+	r, store, sink, _, _, _, cleanup := buildRouter(t, "K0TFU-1", nil)
+	defer cleanup()
+
+	pkt := makeMessagePacket(t, "W1ABC", "K0TFU", "for the base call", "001", aprs.DirectionRF)
+	_ = r.SendPacket(context.Background(), pkt)
+
+	waitFor(t, time.Second, func() bool {
+		ms, _, _ := store.List(context.Background(), Filter{})
+		return len(ms) == 1
+	}, "row persisted for bare base-call address")
+	waitFor(t, time.Second, func() bool {
+		return len(sink.list()) >= 1
+	}, "auto-ACK submitted for bare base-call address")
+}
+
+func TestMatchAddresseeSSIDAware(t *testing.T) {
+	tac := NewTacticalSet()
+	tac.Store(map[string]struct{}{"NET": {}})
+
+	cases := []struct {
+		name      string
+		ourCall   string
+		addressee string
+		wantForUs bool
+		wantTac   bool
+	}{
+		{"exact full call", "K0TFU-1", "K0TFU-1", true, false},
+		{"different ssid same base", "K0TFU-1", "K0TFU-7", false, false},
+		{"bare base call for ssid station", "K0TFU-1", "K0TFU", true, false},
+		{"ssid station for bare our call", "K0TFU", "K0TFU-1", false, false},
+		{"exact bare match", "K0TFU", "K0TFU", true, false},
+		{"case insensitive", "k0tfu-1", "k0tfu-1", true, false},
+		{"different base", "K0TFU-1", "W1ABC", false, false},
+		{"tactical alias", "K0TFU-1", "NET", true, true},
+		{"empty addressee", "K0TFU-1", "", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MatchAddressee(tc.ourCall, tc.addressee, tac)
+			if got.IsForUs != tc.wantForUs || got.IsTactical != tc.wantTac {
+				t.Fatalf("MatchAddressee(%q,%q) = %+v, want ForUs=%v Tactical=%v",
+					tc.ourCall, tc.addressee, got, tc.wantForUs, tc.wantTac)
+			}
+		})
+	}
+}
+
 func TestRouterTacticalInboundPersistsNoAutoACK(t *testing.T) {
 	r, store, sink, _, _, _, cleanup := buildRouter(t, "N0CALL", []string{"NET"})
 	defer cleanup()

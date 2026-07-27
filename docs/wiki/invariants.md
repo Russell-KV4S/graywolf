@@ -1601,3 +1601,110 @@ Source: [`../../pkg/ax25conn/session.go`](../../pkg/ax25conn/session.go)
 (`submit` tx-failed emit),
 [`../../pkg/ax25conn/manager_test.go`](../../pkg/ax25conn/manager_test.go)
 (`TestManager_FreesTripleAfterFailedConnect`).
+
+### 60. IS→RF third-party wrap emits exactly one `TCPIP` marker
+
+The inner header `wrapThirdParty` builds for an IS→RF third-party packet
+ends in a single canonical `,TCPIP,IGATECALL*` marker. Because the frame
+arrived from APRS-IS, its inbound path may **already** carry a `TCPIP`
+(or `TCPXX`) element ahead of the `qA*` construct, so the wrapper drops
+any inbound `TCPIP`/`TCPXX` path elements (matched on `Address.Call`, so
+an `*` H-bit marker doesn't defeat the match) before appending its own.
+Legitimate elements like `WIDEn-N` are preserved.
+
+*Why:* re-emitting the inbound `TCPIP` produced a duplicated
+`...,TCPIP,TCPIP,IGATECALL*:` inner path (graywolf #488). Kenwood
+handheld radios (e.g. TH-D75) reject that malformed path and silently
+drop the message -- never displaying it or acking it -- breaking IS→RF
+message delivery. Direwolf emits only a single `TCPIP`; matching that is
+what makes the frame acceptable to strict parsers.
+
+*How to apply:* the strip lives in the path loop of
+[`wrapThirdParty`](../../pkg/igate/third_party.go). Never append a second
+`TCPIP` and never trust the inbound path to be marker-free.
+
+Source: [`../../pkg/igate/third_party.go`](../../pkg/igate/third_party.go)
+(`wrapThirdParty`),
+[`../../pkg/igate/third_party_test.go`](../../pkg/igate/third_party_test.go)
+(`TestWrapThirdPartyStripsInboundTCPIP`,
+`TestWrapThirdPartyStripsInboundTCPIPHBit`,
+`TestWrapThirdPartyStripsInboundTCPXX`).
+
+### 61. Directed-message addressee matching is SSID-aware, symmetric with the self-filter
+
+The router only claims a directed (DM) message as its own when the
+addressee is an **exact full-call match** of our station call, or a
+**bare base-call address** (no SSID) sharing our base call. A distinct
+SSID of our base call is a separate peer: running as `K0TFU-1` we do
+**not** claim, file, or auto-ACK a message addressed to `K0TFU-7`. Both
+`Router.classify` and the exported `MatchAddressee` helper (used by the
+Actions classifier) route through `callAddressedToUs`, so the DM match
+uses the same SSID granularity as the router self-filter (which already
+compared full calls).
+
+*Why:* the self-filter compared full calls but the addressee match
+compared only base calls, an asymmetry that let one station steal a
+sibling SSID's traffic. The sender then received a false delivery
+confirmation -- a bot ACKed by `K0TFU-1` believed its message reached
+`K0TFU-7` when it never did (graywolf #490). Two stations under one base
+call with different SSIDs are distinct peers by design (same principle as
+invariant on same-base delivery -- `NW5W-5` ↔ `NW5W-13`).
+
+*How to apply:* never reintroduce a base-call-only DM addressee compare.
+A bare base-call address stays generic on purpose -- every station
+sharing the base call answers it. Route any new addressee-matching call
+site through `callAddressedToUs` / `MatchAddressee`, never a hand-rolled
+`baseCall(addr) == baseCall(our)`.
+
+Source: [`../../pkg/messages/router.go`](../../pkg/messages/router.go)
+(`Router.classify`, `MatchAddressee`, `callAddressedToUs`),
+[`../../pkg/messages/router_test.go`](../../pkg/messages/router_test.go)
+(`TestRouterDMDifferentSSIDOfOurBaseNotClaimed`,
+`TestRouterDMExactSSIDMatchClaimed`,
+`TestRouterDMBareBaseCallAddressClaimed`,
+`TestMatchAddresseeSSIDAware`),
+[`../../pkg/actions/classifier.go`](../../pkg/actions/classifier.go)
+(`Classify`).
+
+### 62. Inbound connected-mode frames decode with the owning session's negotiated modulus
+
+The RX fanout hands every non-UI frame to `ax25conn.Manager.DispatchRaw`,
+which resolves the owning session from the address header (modulus-
+independent), reads that session's negotiated modulus race-free via
+`Session.Mod128()`, and only then decodes the control field. The fanout
+goroutine must **not** decode with a fixed modulus: a mod-128 (SABME)
+link's I- and S-frames carry a **2-octet** control field, and decoding
+them as mod-8 corrupts `N(S)`/`N(R)` so every inbound frame is dropped
+and the link stalls.
+
+Two sub-invariants make this work:
+
+- **Control-field width is variable under mod-128.** U-frames
+  (SABM/SABME/UA/DM/DISC/FRMR/UI/XID/TEST) stay **1 octet** under either
+  modulus (v2.2 §4.2.2); only I/S frames grow to 2 octets. `Decode` sizes
+  the control field by peeking the low two bits of the first control
+  octet (`11` => U-frame => 1 octet). Assuming 2 octets for all mod-128
+  frames rejects every U-frame — including the UA that completes the
+  handshake — with "missing control field."
+- **The modulus mirror is atomic.** The session goroutine negotiates the
+  modulus at SABM/SABME time; `DispatchRaw` reads it from another
+  goroutine. All writes go through `Session.setMod128`, which mirrors
+  `cfg.Mod128` into an `atomic.Bool` that `Mod128()` reads, so the
+  cross-goroutine read never races the negotiation write.
+
+*Why:* the web AX.25 terminal exposes a "Negotiate modulo-128 (SABME)"
+toggle, so mod-128 links are reachable in production. Before this, the
+fanout decoded every connected-mode frame as mod-8, so an operator who
+enabled extended mode received the BBS welcome but never any further
+frames (graywolf #456).
+
+Source: [`../../pkg/app/rxfanout.go`](../../pkg/app/rxfanout.go)
+(`dispatchRxFrame` -> `DispatchRaw`),
+[`../../pkg/ax25conn/manager.go`](../../pkg/ax25conn/manager.go)
+(`DispatchRaw`),
+[`../../pkg/ax25conn/frame.go`](../../pkg/ax25conn/frame.go)
+(`Decode` control-width peek),
+[`../../pkg/ax25conn/session.go`](../../pkg/ax25conn/session.go)
+(`setMod128`, `Mod128`),
+[`../../pkg/ax25conn/manager_test.go`](../../pkg/ax25conn/manager_test.go)
+(`TestManager_DispatchRawMod128Delivers`).

@@ -7,6 +7,37 @@
 # route the body references via [text](link) markdown; renderer only
 # accepts internal #/... routes.
 
+- version: "0.14.12"
+  date: "2026-07-23"
+  style: info
+  schema_version: 1
+  link: "#/igate"
+  title: "Configurable IS-to-RF digipeater path, terminal fixes, and message fixes"
+  body: |
+    You can set the digipeater path that igated messages carry when they
+    go from the internet out to RF. A new "IS->RF Digipeater Path" field
+    on the iGate page stamps a via-path like WIDE1-1 on those frames;
+    leave it empty to keep sending them direct, which matches how it
+    worked before.
+
+    The connected-mode terminal works with more packet BBSes. Sessions
+    that negotiate the larger mod-128 window no longer stall right after
+    connecting, so frames keep flowing for the whole session instead of
+    stopping after the handshake. The Ctrl-] command bar also opens
+    reliably while the terminal has focus.
+
+    Messages you igate out to RF reach Kenwood radios again. A malformed
+    path on outbound third-party frames was making radios like the TH-D75
+    silently drop igated messages without showing or acking them. The
+    path is built correctly now and those messages come through.
+
+    Direct messages meant for another station that shares your base call
+    sign but uses a different SSID are no longer treated as your own. If
+    you run as K0TFU-1, a message addressed to K0TFU-7 is no longer
+    grabbed, filed, and auto-acked by your station, so the sender stops
+    getting a false delivery confirmation for a message you never
+    received.
+
 - version: "0.14.11"
   date: "2026-07-17"
   style: info

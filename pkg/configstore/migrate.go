@@ -204,6 +204,14 @@ type migration struct {
 //	    direction index for list queries, next_send_at index for the
 //	    outbound scheduler). The Bulletin model is NOT in the AutoMigrate
 //	    list; this migration is the single source of truth for its schema.
+//	31 — igate_is_tx_via: replace the inert i_gate_configs.max_msg_hops
+//	    WIDE-hop count with the is_tx_via literal via-path string
+//	    (Direwolf-style IGTXVIA). AutoMigrate adds is_tx_via (empty
+//	    default) from the Go struct; this migration drops the dead
+//	    max_msg_hops column. No backfill: IS->RF always transmitted with
+//	    an empty path before the fix, so an empty is_tx_via preserves
+//	    behavior exactly. Post-AutoMigrate, guarded by columnExists
+//	    (issue #489).
 var schemaMigrations = []migration{
 	{version: 1, name: "beacon_compress_default", phase: postAutoMigrate, run: migrateBeaconCompressDefault},
 	{version: 2, name: "channel_device_fields", phase: preAutoMigrate, run: migrateChannelDeviceFields},
@@ -235,6 +243,7 @@ var schemaMigrations = []migration{
 	{version: 28, name: "bulletins_table", phase: postAutoMigrate, run: migrateBulletinsTable},
 	{version: 29, name: "bulletin_interval", phase: postAutoMigrate, run: migrateBulletinInterval},
 	{version: 30, name: "bulletin_row_interval", phase: postAutoMigrate, run: migrateBulletinRowInterval},
+	{version: 31, name: "igate_is_tx_via", phase: postAutoMigrate, run: migrateIGateIsTxVia},
 }
 
 // runMigrations applies every pending migration in the given phase,

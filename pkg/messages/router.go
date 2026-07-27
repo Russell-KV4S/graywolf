@@ -42,23 +42,23 @@ type BulletinSink interface {
 // RouterConfig captures the router's collaborators. All fields except
 // Logger, Registerer, and Clock are required.
 type RouterConfig struct {
-	Store         *Store
-	TxSink        txgovernor.TxSink
-	IGateSender   IGateLineSender
-	OurCall       func() string // returns our primary callsign (possibly with SSID)
-	LocalTxRing   *LocalTxRing
-	TacticalSet   *TacticalSet
+	Store       *Store
+	TxSink      txgovernor.TxSink
+	IGateSender IGateLineSender
+	OurCall     func() string // returns our primary callsign (possibly with SSID)
+	LocalTxRing *LocalTxRing
+	TacticalSet *TacticalSet
 	// BlockedSet is the enabled call-sign blocklist. Optional: when nil
 	// the router constructs an empty set so nothing is blocked. Swapped
 	// by Service.ReloadBlockedCallsigns on CRUD mutations.
-	BlockedSet    *BlocklistSet
-	EventHub      *EventHub
-	Logger        *slog.Logger
-	Registerer    prometheus.Registerer
-	Clock         RouterClock
+	BlockedSet *BlocklistSet
+	EventHub   *EventHub
+	Logger     *slog.Logger
+	Registerer prometheus.Registerer
+	Clock      RouterClock
 	// BulletinSink receives inbound BLN* packets. Optional; nil disables
 	// bulletin ingestion (packets are still silently dropped).
-	BulletinSink  BulletinSink
+	BulletinSink BulletinSink
 	// AutoAckChannel is the RF channel used when submitting auto-ACKs.
 	// Defaults to 1 (mirrors IGateConfig.TxChannel semantics). Forwarded
 	// into Preflight when Preflight is nil.
@@ -385,12 +385,17 @@ func (r *Router) classify(ctx context.Context, pkt *aprs.DecodedAPRSPacket) {
 	}
 
 	addressee := strings.ToUpper(strings.TrimSpace(effMsg.Addressee))
-	baseAddressee := baseCall(addressee)
 
-	// Step 5 — addressee match determines thread_kind.
+	// Step 5 — addressee match determines thread_kind. The DM match is
+	// SSID-aware (see callAddressedToUs), mirroring the self-filter: a
+	// message to a different SSID of our base call (e.g. we are K0TFU-1,
+	// addressee K0TFU-7) belongs to a distinct peer and must NOT be
+	// claimed, filed, or auto-ACKed by us. Matching only on the base
+	// call here would let us send the sender a false delivery
+	// confirmation for a message that never reached the intended station.
 	var threadKind, threadKey string
 	switch {
-	case ourCall != "" && baseAddressee == ourCall:
+	case callAddressedToUs(addressee, ourCallFull):
 		threadKind = ThreadKindDM
 		threadKey = source
 	case r.cfg.TacticalSet.Contains(addressee):
@@ -834,20 +839,46 @@ type AddresseeMatch struct {
 }
 
 // MatchAddressee reports whether addressee is one we should handle.
-// ourCall is the primary station callsign (with or without SSID); the
-// match against ourCall is base-call only. tactical may be nil.
+// ourCall is the primary station callsign (with or without SSID). The
+// match against ourCall is SSID-aware (see callAddressedToUs): an exact
+// full-call match, or a bare base-call address with no SSID. A distinct
+// SSID of our base call is a separate peer and does not match. tactical
+// may be nil.
 func MatchAddressee(ourCall, addressee string, tactical *TacticalSet) AddresseeMatch {
 	addr := strings.ToUpper(strings.TrimSpace(addressee))
 	if addr == "" {
 		return AddresseeMatch{}
 	}
-	base := baseCall(addr)
-	our := baseCallUpper(ourCall)
-	if our != "" && base == our {
+	if callAddressedToUs(addr, ourCall) {
 		return AddresseeMatch{IsForUs: true}
 	}
 	if tactical != nil && tactical.Contains(addr) {
 		return AddresseeMatch{IsForUs: true, IsTactical: true}
 	}
 	return AddresseeMatch{}
+}
+
+// callAddressedToUs reports whether a directed-message addressee targets
+// our station, SSID-aware. It matches when the addressee is an exact
+// full-call match of our call, or a bare base-call address (no SSID)
+// whose base equals our base call. A different SSID of our base call
+// (e.g. our K0TFU-1 vs addressee K0TFU-7) is a distinct peer and does
+// NOT match — this mirrors the router self-filter's full-call logic so
+// addressee matching and self-filtering treat SSIDs consistently. Both
+// arguments may carry or omit an SSID and need not be pre-normalized.
+func callAddressedToUs(addressee, ourCall string) bool {
+	addr := strings.ToUpper(strings.TrimSpace(addressee))
+	our := strings.ToUpper(strings.TrimSpace(ourCall))
+	if addr == "" || our == "" {
+		return false
+	}
+	if addr == our {
+		return true
+	}
+	// A bare base-call address (no SSID) is generic: any station sharing
+	// that base call answers it. addr has no '-', so addr == baseCall(addr).
+	if !strings.ContainsRune(addr, '-') && addr == baseCall(our) {
+		return true
+	}
+	return false
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/chrissnell/graywolf/pkg/ax25"
 )
 
 // TestWrapThirdPartyPositionPacket exercises the happy path for a plain
@@ -15,7 +17,7 @@ func TestWrapThirdPartyPositionPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseTNC2: %v", err)
 	}
-	wrapped, err := wrapThirdParty(inner, "KE7XYZ")
+	wrapped, err := wrapThirdParty(inner, "KE7XYZ", nil)
 	if err != nil {
 		t.Fatalf("wrapThirdParty: %v", err)
 	}
@@ -42,7 +44,7 @@ func TestWrapThirdPartyMessagePacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseTNC2: %v", err)
 	}
-	wrapped, err := wrapThirdParty(inner, "KE7XYZ")
+	wrapped, err := wrapThirdParty(inner, "KE7XYZ", nil)
 	if err != nil {
 		t.Fatalf("wrapThirdParty: %v", err)
 	}
@@ -69,7 +71,7 @@ func TestWrapThirdPartyPreservesBinaryInfo(t *testing.T) {
 	}
 	inner.Info = []byte{'h', 0x00, 'i'}
 
-	wrapped, err := wrapThirdParty(inner, "KE7XYZ")
+	wrapped, err := wrapThirdParty(inner, "KE7XYZ", nil)
 	if err != nil {
 		t.Fatalf("wrapThirdParty: %v", err)
 	}
@@ -93,7 +95,7 @@ func TestWrapThirdPartyPreservesPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseTNC2: %v", err)
 	}
-	wrapped, err := wrapThirdParty(inner, "KE7XYZ")
+	wrapped, err := wrapThirdParty(inner, "KE7XYZ", nil)
 	if err != nil {
 		t.Fatalf("wrapThirdParty: %v", err)
 	}
@@ -110,9 +112,118 @@ func TestWrapThirdPartyPreservesPath(t *testing.T) {
 	}
 }
 
+// TestWrapThirdPartyStripsInboundTCPIP verifies that a TCPIP element
+// already present on the inbound APRS-IS path is not re-emitted, so the
+// inner header carries exactly one canonical ",TCPIP,IGATECALL*" marker.
+// A duplicated "TCPIP,TCPIP" causes Kenwood radios (e.g. TH-D75) to
+// silently drop the igated message (graywolf #488).
+func TestWrapThirdPartyStripsInboundTCPIP(t *testing.T) {
+	inner, err := parseTNC2("W5ABC-7>APZ100,TCPIP,IGATE*,qAC,SERVER::KE7XYZ   :hi{1")
+	if err != nil {
+		t.Fatalf("parseTNC2: %v", err)
+	}
+	wrapped, err := wrapThirdParty(inner, "KE7XYZ", nil)
+	if err != nil {
+		t.Fatalf("wrapThirdParty: %v", err)
+	}
+	got := string(wrapped.Info)
+	want := "}W5ABC-7>APZ100,IGATE,TCPIP,KE7XYZ*::KE7XYZ   :hi{1"
+	if got != want {
+		t.Fatalf("inner info mismatch:\n got: %s\nwant: %s", got, want)
+	}
+	if strings.Contains(got, "TCPIP,TCPIP") {
+		t.Fatalf("duplicate TCPIP not stripped: %s", got)
+	}
+}
+
+// TestWrapThirdPartyStripsInboundTCPIPHBit ensures the strip matches a
+// TCPIP element whose H-bit '*' marker is still set. The frame is built
+// directly (not via parseTNC2, which clears the H-bit) so the address
+// reaches wrapThirdParty with Repeated=true — its String() renders
+// "TCPIP*", which would defeat a String()-based match but not the
+// Call-based one this fix uses.
+func TestWrapThirdPartyStripsInboundTCPIPHBit(t *testing.T) {
+	src, err := ax25.ParseAddress("W5ABC-7")
+	if err != nil {
+		t.Fatalf("ParseAddress src: %v", err)
+	}
+	dest, err := ax25.ParseAddress("APZ100")
+	if err != nil {
+		t.Fatalf("ParseAddress dest: %v", err)
+	}
+	path := []ax25.Address{{Call: "TCPIP", Repeated: true}}
+	inner, err := ax25.NewUIFrame(src, dest, path, []byte("!3725.00N/12158.00W>hi"))
+	if err != nil {
+		t.Fatalf("NewUIFrame: %v", err)
+	}
+	wrapped, err := wrapThirdParty(inner, "KE7XYZ", nil)
+	if err != nil {
+		t.Fatalf("wrapThirdParty: %v", err)
+	}
+	got := string(wrapped.Info)
+	want := "}W5ABC-7>APZ100,TCPIP,KE7XYZ*:!3725.00N/12158.00W>hi"
+	if got != want {
+		t.Fatalf("inner info mismatch:\n got: %s\nwant: %s", got, want)
+	}
+	if strings.Contains(got, "TCPIP,TCPIP") || strings.Contains(got, "TCPIP*,") {
+		t.Fatalf("inbound H-bit TCPIP not stripped: %s", got)
+	}
+}
+
+// TestWrapThirdPartyStripsInboundTCPXX mirrors the TCPIP case for the
+// TCPXX marker (unverified-login APRS-IS traffic).
+func TestWrapThirdPartyStripsInboundTCPXX(t *testing.T) {
+	inner, err := parseTNC2("W5ABC-7>APZ100,TCPXX,qAX,SERVER:!3725.00N/12158.00W>hi")
+	if err != nil {
+		t.Fatalf("parseTNC2: %v", err)
+	}
+	wrapped, err := wrapThirdParty(inner, "KE7XYZ", nil)
+	if err != nil {
+		t.Fatalf("wrapThirdParty: %v", err)
+	}
+	got := string(wrapped.Info)
+	if strings.Contains(got, "TCPXX") {
+		t.Fatalf("inbound TCPXX not stripped: %s", got)
+	}
+	want := "}W5ABC-7>APZ100,TCPIP,KE7XYZ*:!3725.00N/12158.00W>hi"
+	if got != want {
+		t.Fatalf("inner info mismatch:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestWrapThirdPartyAppliesVia verifies the operator-configured IS→RF
+// via-path lands on the OUTER frame (so digipeaters actually relay the
+// downlink) without disturbing the inner third-party header. This is the
+// fix for issue #489, where the outer path was hardcoded empty.
+func TestWrapThirdPartyAppliesVia(t *testing.T) {
+	inner, err := parseTNC2("W5ABC-7>APRS::KE7XYZ   :hello{1")
+	if err != nil {
+		t.Fatalf("parseTNC2: %v", err)
+	}
+	via, err := ax25.ParseVia("WIDE1-1,WIDE2-1")
+	if err != nil {
+		t.Fatalf("ParseVia: %v", err)
+	}
+	wrapped, err := wrapThirdParty(inner, "KE7XYZ", via)
+	if err != nil {
+		t.Fatalf("wrapThirdParty: %v", err)
+	}
+	if len(wrapped.Path) != 2 {
+		t.Fatalf("outer path len = %d, want 2: %v", len(wrapped.Path), wrapped.Path)
+	}
+	if wrapped.Path[0].String() != "WIDE1-1" || wrapped.Path[1].String() != "WIDE2-1" {
+		t.Fatalf("outer path = %v, want [WIDE1-1 WIDE2-1]", wrapped.Path)
+	}
+	// The via-path must not leak into the inner third-party header.
+	want := "}W5ABC-7>APRS,TCPIP,KE7XYZ*::KE7XYZ   :hello{1"
+	if string(wrapped.Info) != want {
+		t.Fatalf("inner info mismatch:\n got: %s\nwant: %s", wrapped.Info, want)
+	}
+}
+
 // TestWrapThirdPartyRejectsNilFrame checks the guard clauses.
 func TestWrapThirdPartyRejectsNilFrame(t *testing.T) {
-	if _, err := wrapThirdParty(nil, "KE7XYZ"); err == nil {
+	if _, err := wrapThirdParty(nil, "KE7XYZ", nil); err == nil {
 		t.Fatal("expected error for nil inner frame")
 	}
 }
@@ -124,10 +235,10 @@ func TestWrapThirdPartyRejectsEmptyCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseTNC2: %v", err)
 	}
-	if _, err := wrapThirdParty(inner, ""); err == nil {
+	if _, err := wrapThirdParty(inner, "", nil); err == nil {
 		t.Fatal("expected error for empty igate callsign")
 	}
-	if _, err := wrapThirdParty(inner, "   "); err == nil {
+	if _, err := wrapThirdParty(inner, "   ", nil); err == nil {
 		t.Fatal("expected error for blank igate callsign")
 	}
 }
