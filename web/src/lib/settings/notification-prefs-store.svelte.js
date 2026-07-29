@@ -14,17 +14,19 @@
 // docs/wiki/code-map.md's Android section), so NotificationsSettings.svelte
 // hides the os/both options there while still offering plain toast popups.
 //
-// messageEnabled/bulletinEnabled are independent master switches, on by
-// default — turning both off is "notifications off"; turning off just one
-// mutes that type's popups (toast + OS) and sound while leaving the other
-// alone. Gates messagesTransport.js's maybeNotifyInbound and
-// bulletinsTransport.js's poll() ahead of the toast/OS/sound calls.
+// messageEnabled/bulletinEnabled/stationEmergencyEnabled are independent
+// master switches, on by default — turning all off is "notifications
+// off"; turning off just one mutes that type's popups (toast + OS) and
+// sound while leaving the others alone. Gates messagesTransport.js's
+// maybeNotifyInbound, bulletinsTransport.js's poll(), and
+// stationAlertsTransport.js's poll() ahead of the toast/OS/sound calls.
 
 import { parseMode, parseEnabledFlag, resolveModeAfterPermission } from './notification-prefs-core.js';
 
 const LS_MODE = 'gw-notification-mode';
 const LS_MESSAGE_ENABLED = 'gw-notification-message-enabled';
 const LS_BULLETIN_ENABLED = 'gw-notification-bulletin-enabled';
+const LS_STATION_EMERGENCY_ENABLED = 'gw-notification-station-emergency-enabled';
 
 function readMode() {
   try {
@@ -62,6 +64,7 @@ export const notificationPrefsState = (() => {
   let mode = $state(readMode());
   let messageEnabled = $state(readEnabled(LS_MESSAGE_ENABLED));
   let bulletinEnabled = $state(readEnabled(LS_BULLETIN_ENABLED));
+  let stationEmergencyEnabled = $state(readEnabled(LS_STATION_EMERGENCY_ENABLED));
   const supported = typeof window !== 'undefined' && typeof Notification !== 'undefined';
 
   return {
@@ -86,6 +89,9 @@ export const notificationPrefsState = (() => {
     get bulletinEnabled() {
       return bulletinEnabled;
     },
+    get stationEmergencyEnabled() {
+      return stationEmergencyEnabled;
+    },
     setMessageEnabled(v) {
       messageEnabled = !!v;
       writeEnabled(LS_MESSAGE_ENABLED, messageEnabled);
@@ -93,6 +99,10 @@ export const notificationPrefsState = (() => {
     setBulletinEnabled(v) {
       bulletinEnabled = !!v;
       writeEnabled(LS_BULLETIN_ENABLED, bulletinEnabled);
+    },
+    setStationEmergencyEnabled(v) {
+      stationEmergencyEnabled = !!v;
+      writeEnabled(LS_STATION_EMERGENCY_ENABLED, stationEmergencyEnabled);
     },
     /**
      * Called from the Preferences mode picker. Requesting 'os'/'both'

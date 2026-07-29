@@ -55,6 +55,16 @@ type StationDTO struct {
 	Channel uint32 `json:"channel"`
 	// Comment is the free-form comment field from the most recent packet.
 	Comment string `json:"comment"`
+	// StatusCode is the Mic-E message code (APRS101 ch 10 table 8) from the most
+	// recent packet: 0 = Emergency, 1 = Priority, 2 = Special, 3 = Committed,
+	// 4 = Returning, 5 = In Service, 6 = En Route, 7 = Off Duty, or -1 when no
+	// status is known. Deliberately NOT omitempty -- 0 is a meaningful value
+	// (Emergency), so omitting zero values would silently hide it.
+	StatusCode int `json:"status_code"`
+	// StatusText is the label for StatusCode ("Emergency", "Priority", ...) when
+	// it came from a Mic-E packet, or the raw free-form text of a '>' status
+	// report when there's no Mic-E code to classify it. Empty when unknown.
+	StatusText string `json:"status_text,omitempty"`
 	// Weather is optional weather telemetry; present only when include=weather is requested and the station reports weather.
 	Weather *WeatherDTO `json:"weather,omitempty"`
 }
@@ -132,6 +142,7 @@ type WeatherDTO struct {
 func RegisterStations(srv *Server, mux *http.ServeMux, cache StationCache) {
 	_ = srv // kept in signature for consistency with other RegisterXxx
 	mux.HandleFunc("GET /api/stations", listStations(cache))
+	mux.HandleFunc("GET /api/stations/alerts", listStationAlerts(cache))
 }
 
 // listStations returns APRS stations whose most-recent fix falls inside
@@ -254,6 +265,70 @@ func listStations(cache StationCache) http.HandlerFunc {
 	}
 }
 
+// worldBBox spans every valid latitude/longitude. listStationAlerts uses
+// it to query the whole cache regardless of what the operator's map
+// viewport happens to be scrolled to -- an Emergency broadcast from a
+// station outside the current view must still surface a notification.
+var worldBBox = stationcache.BBox{SwLat: -90, SwLon: -180, NeLat: 90, NeLon: 180}
+
+// alertWindow bounds how far back listStationAlerts looks for a station
+// still asserting Emergency status. Matches the default /stations
+// timerange; a station that hasn't been heard in an hour is treated as
+// no longer actively broadcasting the alert.
+const alertWindow = time.Hour
+
+// StationAlertDTO is one station currently asserting an alert-worthy
+// Mic-E status (today: Emergency only). Deliberately compact -- this
+// endpoint is polled on a fixed interval by every connected browser
+// tab regardless of what the operator is looking at, so the payload
+// should stay small even on a busy IS feed.
+type StationAlertDTO struct {
+	Callsign   string    `json:"callsign"`
+	StatusCode int       `json:"status_code"`
+	StatusText string    `json:"status_text"`
+	Lat        float64   `json:"lat"`
+	Lon        float64   `json:"lon"`
+	LastHeard  time.Time `json:"last_heard"`
+}
+
+// listStationAlerts returns stations currently in Emergency status
+// (Mic-E message code 0, APRS101 ch 10 table 8) heard within
+// alertWindow, regardless of the requester's map viewport. Polled by
+// web/src/lib/stationAlertsTransport.js to drive the popup/OS/sound
+// notification -- see docs/wiki/notifications.md.
+//
+// @Summary  List stations currently in Emergency status
+// @Tags     stations
+// @ID       listStationAlerts
+// @Produce  json
+// @Success  200 {array} webapi.StationAlertDTO
+// @Security CookieAuth
+// @Router   /stations/alerts [get]
+func listStationAlerts(cache StationCache) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		stations := cache.QueryBBox(worldBBox, alertWindow)
+
+		out := make([]StationAlertDTO, 0, len(stations))
+		for _, s := range stations {
+			if s.StatusCode != 0 || len(s.Positions) == 0 {
+				continue
+			}
+			out = append(out, StationAlertDTO{
+				Callsign:   s.Callsign,
+				StatusCode: s.StatusCode,
+				StatusText: s.StatusText,
+				Lat:        s.Positions[0].Lat,
+				Lon:        s.Positions[0].Lon,
+				LastHeard:  s.LastHeard,
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache, no-store")
+		_ = json.NewEncoder(w).Encode(out)
+	}
+}
+
 func parseBBox(s string) (stationcache.BBox, error) {
 	if s == "" {
 		return stationcache.BBox{}, fmt.Errorf("bbox is required")
@@ -321,6 +396,8 @@ func stationToDTO(s stationcache.Station, isDelta, includeWeather bool, digiPos 
 		Gated:           s.Gated,
 		Channel:         s.Channel,
 		Comment:         s.Comment,
+		StatusCode:      s.StatusCode,
+		StatusText:      s.StatusText,
 	}
 
 	// Positions — delta mode returns only positions[0]

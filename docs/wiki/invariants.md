@@ -1770,3 +1770,125 @@ Source: [`../../web/src/lib/duplicate-echo-core.js`](../../web/src/lib/duplicate
 (`sourceBadges`),
 [`../../pkg/messages/router.go`](../../pkg/messages/router.go) (`classify`),
 [`../../pkg/messages/bots.go`](../../pkg/messages/bots.go).
+
+### 65. Mic-E `StatusCode` must never rely on Go/JSON's int zero value — use the `-1` "none" sentinel explicitly
+
+APRS101 ch 10 table 8's wire encoding is inverted vs. intuition: message
+code `0` is **Emergency**, code `7` is Off Duty. `stationcache.CacheEntry`/
+`Station.StatusCode` and `webapi.StationDTO.StatusCode` therefore can't
+use Go's normal "zero value = absent" convention, because zero is a real,
+alarming value. Every construction path that produces one of these types
+MUST set `StatusCode: -1` explicitly when no status is known:
+`buildStationEntry`/`buildObjectEntry` (`pkg/stationcache/extract.go`),
+`MemCache.Update`'s new-station branch (`pkg/stationcache/memcache.go`),
+and `historydb.LoadRecent`'s hydration (`pkg/historydb/historydb.go` —
+status isn't persisted there yet, so every restored station must default
+to "unknown", not "Emergency"). The same trap exists one layer up in
+`configstore.Beacon.MicEMessageCode`/`webapi/dto.BeaconRequest`: it's
+stored as a **named string enum** (`"off_duty"`, `"emergency"`, ...)
+rather than the raw int specifically so gorm's zero-value-skips-INSERT
+default behavior can't silently coerce an operator's deliberate
+"Emergency" selection into the column default.
+
+*Why:* `StationDTO.StatusCode` is deliberately NOT `omitempty` for the
+same reason — `omitempty` drops a JSON field whose value is the language
+zero value, which for `int` is `0`, which here means Emergency. Tagging
+it `omitempty` would silently hide every Emergency station from the API
+response. Any new consumer of these types (a test fixture, a new cache
+entry constructor, a new DTO) that leaves `StatusCode` unset gets `0` =
+Emergency by accident, not "no status" — grep for `StatusCode: -1` for
+the existing safe-default call sites before adding a new one.
+
+Source: [`../../pkg/stationcache/extract.go`](../../pkg/stationcache/extract.go),
+[`../../pkg/stationcache/memcache.go`](../../pkg/stationcache/memcache.go),
+[`../../pkg/stationcache/store.go`](../../pkg/stationcache/store.go),
+[`../../pkg/historydb/historydb.go`](../../pkg/historydb/historydb.go),
+[`../../pkg/webapi/stations.go`](../../pkg/webapi/stations.go),
+[`../../pkg/beacon/mice.go`](../../pkg/beacon/mice.go) (`micEMessageCodesByName`),
+[`../../pkg/configstore/models.go`](../../pkg/configstore/models.go),
+[`../../pkg/webapi/dto/beacon.go`](../../pkg/webapi/dto/beacon.go).
+
+### 66. `#/map?focus=CALL` deep-links must always carry `&lat=…&lon=…` — the callsign alone is silently discarded
+
+`LiveMapV2.svelte`'s `parseFocusFromHash()` parses `focus`/`lat`/`lon`
+together and returns `null` -- not a partial result -- if `lat`/`lon`
+are missing or non-finite, even when `focus` is present:
+
+```js
+if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+return { callsign: params.get('focus') || '', lat, lon };
+```
+
+This isn't just a camera-framing nicety: the returned value also gates
+whether the "open this station's popup once it loads" effect runs at
+all (`if (!pendingFocus?.callsign || ...) return;`). Omit `lat`/`lon`
+and the link silently does nothing on the Map page -- no camera move,
+no popup, no error, because `pendingFocus` was never non-null to begin
+with.
+
+*Why documented as an invariant:* `stationAlertsTransport.js`'s
+Emergency-alert deep-link shipped on 2026-07-29 with `#/map?focus=CALL`
+only (no `lat`/`lon`), and the omission wasn't caught by any test --
+there's no e2e/Playwright coverage of the click-through in this repo
+(see `docs/wiki/notifications.md`'s Test coverage section), only unit
+tests of the pure diffing logic that decides *whether* to notify, not
+*what happens on click*. The operator caught it by testing manually.
+Any future code constructing a `#/map?focus=` link (a new notification
+type, a new deep-link source) must supply real `lat`/`lon` -- pull them
+from wherever the station's last-known position already lives (e.g.
+`StationDTO`/`StationAlertDTO.Lat/.Lon`, or `GET /api/position` for the
+operator's own station) rather than assuming `focus=CALL` alone works.
+
+Source: [`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
+(`parseFocusFromHash`, the focus-popup `$effect`),
+[`../../web/src/lib/stationAlertsTransport.js`](../../web/src/lib/stationAlertsTransport.js),
+[`../../web/src/routes/NotificationsSettings.svelte`](../../web/src/routes/NotificationsSettings.svelte)
+(`sendTestEmergencyNotification`).
+
+### 67. `#/map?focus=` popup-open is a bounded-retry, not a single-shot, poll match — the first poll almost always misses
+
+Even with `lat`/`lon` supplied correctly (invariant #66), the focused
+station's popup did not open on the first attempt after this deep-link
+was added for station-emergency alerts (2026-07-29): the map recentered
+but no popup appeared. Root cause is poll/viewport sequencing in
+`onMapReady`, not the DTO:
+
+1. `updateBounds()` runs synchronously (line ~786) and sets `bbox` from
+   the map's **pre-focus** viewport (whatever was on screen before this
+   navigation -- the last-saved view or the default planet view).
+2. `dataStore.start()` (line ~900) immediately fires the first
+   `/api/stations` poll using that stale bbox.
+3. Only *after* `start()` does the `pendingFocus` block call
+   `map.easeTo(...)` (line ~909), which fires `moveend` asynchronously
+   (~600ms animation) → `updateBounds()` → `dataStore.setBounds()` →
+   a forced bbox-corrected refetch.
+
+A target station outside the pre-focus viewport is absent from poll #1
+and only appears in poll #2 (or later). The original popup-open effect
+set `focusPopupDone = true` unconditionally on its first run regardless
+of a hit or miss, so it always consumed its one shot on the pre-focus
+poll and never got to see the corrected-bbox result.
+
+Fixed by making the effect retry up to `MAX_FOCUS_POPUP_ATTEMPTS` (4)
+poll cycles before giving up, only marking `focusPopupDone` on an
+actual hit or after exhausting the attempt budget -- still bounded (a
+station heard minutes later doesn't surprise the operator with a late
+popup, preserving the original one-shot intent), but tolerant of the
+one-poll-cycle bbox-correction race every `#/map?focus=` navigation
+goes through.
+
+*Why documented as an invariant:* the failure mode is silent (no error,
+just "nothing happened") and only reproduces when the focus target
+isn't already within the current map viewport -- exactly the case for
+any notification-driven deep-link (the operator is rarely already
+looking at the right spot on the map when a Message/Emergency/etc.
+notification fires), but easy to miss when testing from the Map page
+itself with the target already in view. Any future change to the poll
+cadence, `onMapReady`'s setup order, or the attempt cap should re-verify
+this race is still covered.
+
+Source: [`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
+(`onMapReady`'s `updateBounds`/`dataStore.start()`/`easeTo` ordering,
+the focus-popup `$effect`'s `MAX_FOCUS_POPUP_ATTEMPTS`),
+[`../../web/src/lib/map/data-store.svelte.js`](../../web/src/lib/map/data-store.svelte.js)
+(`setBounds`'s forced refetch on bbox change).

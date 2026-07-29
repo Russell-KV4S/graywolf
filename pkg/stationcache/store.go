@@ -53,7 +53,14 @@ type Station struct {
 	Gated     bool       // Internet-to-RF gated (inner of a third-party packet)
 	Channel   uint32
 	Comment   string
-	Weather   *Weather // nil if not a weather station
+	// StatusCode is the Mic-E message code (APRS101 ch 10 table 8, 0..7)
+	// from the most recent packet, or -1 when no status is known. 0 =
+	// Emergency, 7 = Off Duty -- see CacheEntry.StatusCode. StatusText
+	// is the matching label, or a '>' status report's raw free text
+	// when there's no Mic-E code.
+	StatusCode int
+	StatusText string
+	Weather    *Weather // nil if not a weather station
 	LastHeard time.Time
 	// LastDirectHeard is the timestamp of the most recent reception heard
 	// directly on RF (RX, zero digi hops). Set only by direct receptions and

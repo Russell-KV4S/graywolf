@@ -24,7 +24,7 @@ import {
   fallbackPresetId,
 } from './notification-sound-core.js';
 
-const DEFAULT_PRESET = { message: 'aprs-message', bulletin: 'aprs-bulletin' };
+const DEFAULT_PRESET = { message: 'aprs-message', bulletin: 'aprs-bulletin', stationEmergency: 'emergency-mp3' };
 const LS_PREFIX = 'gw-notification-sound-';
 
 export { MAX_SOUND_BYTES };
@@ -110,6 +110,10 @@ function makeKindState(kind) {
     get customName() {
       return customName;
     },
+    /** True when the current selection is already this kind's shipped default (not a custom upload or a different preset). */
+    get isDefault() {
+      return presetId === defaultId;
+    },
     setEnabled(v) {
       enabled = !!v;
       write(enabledKey, enabled ? '1' : '0');
@@ -118,6 +122,16 @@ function makeKindState(kind) {
       if (id !== 'custom' && !isValidPresetId(id)) return;
       presetId = id;
       write(presetKey, id);
+    },
+    /**
+     * Switch back to this kind's shipped default preset (`aprs-message`,
+     * `aprs-bulletin`, `siren`). Only changes which sound is active --
+     * does not delete an uploaded custom sound, so the operator can
+     * still switch back to "Custom" from the dropdown afterward.
+     */
+    resetToDefault() {
+      presetId = defaultId;
+      write(presetKey, defaultId);
     },
     /**
      * @param {File} file must be an audio/* MIME type and under MAX_SOUND_BYTES.
@@ -161,4 +175,5 @@ function makeKindState(kind) {
 export const notificationSoundState = {
   message: makeKindState('message'),
   bulletin: makeKindState('bulletin'),
+  stationEmergency: makeKindState('stationEmergency'),
 };

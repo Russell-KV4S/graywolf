@@ -1145,17 +1145,35 @@
     if (fitToStations()) didAutoFit = true;
   });
 
-  // Focus deep-link popup: after the first poll completes, make one attempt to
-  // open the focused station's popup. One-shot (focusPopupDone) so a station
-  // heard minutes later doesn't surprise the operator with a popup; if the
-  // station isn't in the store (older than the time-range), the camera fly in
-  // onMapReady already framed its coordinates, which is enough.
+  // Focus deep-link popup: try to open the focused station's popup over
+  // the first few polls, then give up. Bounded (not unbounded) retry so
+  // a station heard minutes later doesn't surprise the operator with a
+  // popup; if the station isn't in the store after MAX_FOCUS_POPUP_ATTEMPTS
+  // (older than the time-range), the camera fly in onMapReady already
+  // framed its coordinates, which is enough.
+  //
+  // More than one attempt is required, not just a nicety: onMapReady's
+  // updateBounds() runs synchronously with the map's PRE-focus viewport
+  // before dataStore.start() -- the pendingFocus easeTo hasn't fired its
+  // 'moveend' yet, so the first /api/stations poll almost always queries
+  // the wrong bbox and misses a target outside the original view. The
+  // 'moveend' from that easeTo triggers a forced bbox-corrected refetch
+  // moments later (see setBounds), which is what a single-attempt
+  // one-shot missed here (graywolf, 2026-07-29: centered but never
+  // opened the popup for the station-emergency deep-link).
+  const MAX_FOCUS_POPUP_ATTEMPTS = 4;
+  let focusPopupAttempts = 0;
   $effect(() => {
     const t = dataStore.lastFetchAt;
     if (!pendingFocus?.callsign || !mapRef || !t || focusPopupDone) return;
-    focusPopupDone = true;
     const target = dataStore.stations.get(pendingFocus.callsign);
-    if (target) openStationPopup(mapRef, target);
+    if (target) {
+      focusPopupDone = true;
+      openStationPopup(mapRef, target);
+      return;
+    }
+    focusPopupAttempts += 1;
+    if (focusPopupAttempts >= MAX_FOCUS_POPUP_ATTEMPTS) focusPopupDone = true;
   });
 
   function fitToStations() {
@@ -2211,6 +2229,14 @@
   :global(.stn-popup .b-rx) { background: rgba(63, 185, 80, 0.15); color: var(--color-success); }
   :global(.stn-popup .b-tx) { background: rgba(210, 153, 34, 0.15); color: var(--color-warning); }
   :global(.stn-popup .b-is) { background: rgba(195, 155, 255, 0.15); color: #c39bff; }
+  /* Mic-E status badge (APRS101 ch 10 table 8) / '>' status report text.
+     b-emergency is reserved for status_code 0 (Emergency) -- the same
+     threshold stationAlertsTransport.js uses to raise a popup/OS/sound
+     notification. Every other non-routine status (Priority, Special,
+     Committed, Returning, En Route, or free-form status text) gets the
+     neutral b-status styling: informative, not alarming. */
+  :global(.stn-popup .b-emergency) { background: rgba(248, 81, 73, 0.18); color: var(--color-danger, #f85149); }
+  :global(.stn-popup .b-status) { background: rgba(139, 148, 158, 0.18); color: var(--color-text-dim); }
 
   /* Wind barbs -- inline SVG glyph rendered per station by
      wind-barbs.js. The marker is inert so it never steals clicks from

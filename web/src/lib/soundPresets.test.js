@@ -32,6 +32,12 @@ describe('SOUND_PRESETS', () => {
     assert.match(bulletin.url, /^\/sounds\/.+\.wav$/);
   });
 
+  it('the shipped emergency-mp3 default (station emergency) points under /sounds/', () => {
+    const emergency = SOUND_PRESETS.find((p) => p.id === 'emergency-mp3');
+    assert.ok(emergency, 'emergency-mp3 preset must exist');
+    assert.match(emergency.url, /^\/sounds\/.+\.mp3$/);
+  });
+
   it('tone presets carry a positive freq and dur on every tone', () => {
     for (const p of SOUND_PRESETS) {
       if (!p.tones) continue;

@@ -31,8 +31,15 @@ type CacheEntry struct {
 	Gated     bool // arrived as the inner packet of an Internet-to-RF third-party gate
 	Channel   uint32
 	Comment   string
-	Weather   *Weather
-	Timestamp time.Time
+	// StatusCode is the Mic-E message code (APRS101 ch 10 table 8, 0..7;
+	// 0 = Emergency, 7 = Off Duty) when known, or -1 when this entry
+	// carries no status. StatusText is the matching label ("Emergency",
+	// "Priority", ...) for a Mic-E code, or the raw free-form text of a
+	// '>' status report when there's no Mic-E code to classify it.
+	StatusCode int
+	StatusText string
+	Weather    *Weather
+	Timestamp  time.Time
 }
 
 // ExtractEntry converts a decoded APRS packet into cache update(s).
@@ -84,7 +91,7 @@ func ExtractEntry(decoded *aprs.DecodedAPRSPacket, source, dir string, ch uint32
 		// Also emit a station entry for the originator if we have
 		// a top-level position (rare but possible in some encodings).
 		if pkt.Position != nil {
-			entries = append(entries, buildStationEntry(pkt.Source, pkt.Position, pkt.Comment, via, path, hops, dir, gated, ch, ts, pkt.Weather))
+			entries = append(entries, buildStationEntry(pkt.Source, pkt.Position, pkt.Comment, via, path, hops, dir, gated, ch, ts, pkt.Weather, pkt.MicE, pkt.Status))
 		}
 		return entries
 	}
@@ -101,25 +108,44 @@ func ExtractEntry(decoded *aprs.DecodedAPRSPacket, source, dir string, ch uint32
 	// Normal station packet — position may come from Position field
 	// (includes Mic-E, which the parser copies to pkt.Position).
 	if pkt.Position != nil || pkt.Weather != nil {
-		entries = append(entries, buildStationEntry(pkt.Source, pkt.Position, pkt.Comment, via, path, hops, dir, gated, ch, ts, pkt.Weather))
+		entries = append(entries, buildStationEntry(pkt.Source, pkt.Position, pkt.Comment, via, path, hops, dir, gated, ch, ts, pkt.Weather, pkt.MicE, pkt.Status))
+		return entries
+	}
+
+	// A bare '>' status report (APRS101 ch 16) carries no position, but
+	// for an already-known station it's still worth recording as a
+	// metadata-only update -- MemCache.Update's !e.HasPos && exists
+	// branch handles this without touching the station's plotted
+	// position/trail. An unknown station is skipped (nowhere to plot
+	// it, same rule the weather-only case follows in MemCache.Update).
+	if pkt.Status != "" {
+		entries = append(entries, buildStationEntry(pkt.Source, nil, pkt.Comment, via, path, hops, dir, gated, ch, ts, nil, pkt.MicE, pkt.Status))
 		return entries
 	}
 
 	return nil
 }
 
-func buildStationEntry(callsign string, pos *aprs.Position, comment, via string, path []string, hops int, dir string, gated bool, ch uint32, ts time.Time, wx *aprs.Weather) CacheEntry {
+func buildStationEntry(callsign string, pos *aprs.Position, comment, via string, path []string, hops int, dir string, gated bool, ch uint32, ts time.Time, wx *aprs.Weather, mic *aprs.MicE, status string) CacheEntry {
 	e := CacheEntry{
-		Key:       "stn:" + callsign,
-		Callsign:  callsign,
-		Via:       via,
-		Path:      path,
-		Hops:      hops,
-		Direction: dir,
-		Gated:     gated,
-		Channel:   ch,
-		Comment:   comment,
-		Timestamp: ts,
+		Key:        "stn:" + callsign,
+		Callsign:   callsign,
+		Via:        via,
+		Path:       path,
+		Hops:       hops,
+		Direction:  dir,
+		Gated:      gated,
+		Channel:    ch,
+		Comment:    comment,
+		StatusCode: -1,
+		Timestamp:  ts,
+	}
+	switch {
+	case mic != nil:
+		e.StatusCode = mic.MessageCode
+		e.StatusText = mic.MessageText
+	case status != "":
+		e.StatusText = status
 	}
 	if pos != nil {
 		e.HasPos = true
@@ -140,19 +166,20 @@ func buildStationEntry(callsign string, pos *aprs.Position, comment, via string,
 
 func buildObjectEntry(name, source string, live bool, pos *aprs.Position, comment, via string, path []string, hops int, dir string, gated bool, ch uint32, ts time.Time) CacheEntry {
 	e := CacheEntry{
-		Key:       "obj:" + name,
-		Callsign:  name,
-		Source:    source,
-		IsObject:  true,
-		Killed:    !live,
-		Via:       via,
-		Path:      path,
-		Hops:      hops,
-		Direction: dir,
-		Gated:     gated,
-		Channel:   ch,
-		Comment:   comment,
-		Timestamp: ts,
+		Key:        "obj:" + name,
+		Callsign:   name,
+		Source:     source,
+		IsObject:   true,
+		Killed:     !live,
+		Via:        via,
+		Path:       path,
+		Hops:       hops,
+		Direction:  dir,
+		Gated:      gated,
+		Channel:    ch,
+		Comment:    comment,
+		StatusCode: -1, // objects/items carry no Mic-E status; -1 is "none" (0 would misread as Emergency)
+		Timestamp:  ts,
 	}
 	if pos != nil {
 		e.HasPos = true

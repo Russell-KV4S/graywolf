@@ -31,13 +31,30 @@
       <div
         class="notification-card"
         class:clickable={!!n.href}
+        class:notification-card-alarm={n.kind === 'station-emergency'}
         role="button"
         tabindex="0"
         onclick={() => onCardClick(n)}
         onkeydown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onCardClick(n); } }}
       >
-        <span class="notification-icon" aria-hidden="true">
-          {#if n.kind === 'bulletin'}
+        <span class="notification-icon" class:notification-icon-alarm={n.kind === 'station-emergency'} aria-hidden="true">
+          {#if n.kind === 'station-emergency'}
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.75"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M12 9v4" />
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+              <path d="M12 17h.01" />
+            </svg>
+          {:else if n.kind === 'bulletin'}
             <svg
               xmlns="http://www.w3.org/2000/svg"
               width="18"
@@ -111,6 +128,15 @@
     border-color: var(--accent, #7bb8e8);
   }
 
+  .notification-card-alarm {
+    border-color: var(--color-danger, #d33);
+  }
+
+  .notification-card-alarm.clickable:hover,
+  .notification-card-alarm.clickable:focus-visible {
+    border-color: var(--color-danger, #d33);
+  }
+
   .notification-icon {
     display: inline-flex;
     align-items: center;
@@ -120,6 +146,10 @@
     flex-shrink: 0;
     margin-top: 2px;
     color: var(--accent, #7bb8e8);
+  }
+
+  .notification-icon-alarm {
+    color: var(--color-danger, #d33);
   }
 
   .notification-body {

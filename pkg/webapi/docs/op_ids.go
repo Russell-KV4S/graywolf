@@ -200,7 +200,8 @@ const (
 
 // Stations — /api/stations.
 const (
-	OpListStations = "listStations"
+	OpListStations       = "listStations"
+	OpListStationAlerts  = "listStationAlerts"
 )
 
 // Station config — /api/station/config. Singleton holding the station

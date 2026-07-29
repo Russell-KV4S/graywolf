@@ -78,8 +78,9 @@ func testStation(callsign string, lat, lon float64, lastHeard time.Time) station
 		Positions: []stationcache.Position{
 			{Lat: lat, Lon: lon, Timestamp: lastHeard},
 		},
-		Direction: "RX",
-		LastHeard: lastHeard,
+		Direction:  "RX",
+		StatusCode: -1, // no status; 0 would misread as Emergency
+		LastHeard:  lastHeard,
 	}
 }
 
@@ -593,5 +594,138 @@ func TestStationToDTO_LastDirectHeard(t *testing.T) {
 	dto := stationToDTO(s, false, false, nil, time.Now().Add(-time.Hour))
 	if !dto.LastDirectHeard.Equal(direct) {
 		t.Fatalf("LastDirectHeard not mapped: got %v want %v", dto.LastDirectHeard, direct)
+	}
+}
+
+// TestStationToDTO_StatusEmergencyNotOmitted locks in that status_code
+// is never tagged omitempty: 0 is the Emergency wire code (APRS101 ch
+// 10 table 8), which is also Go's int zero value, so omitempty would
+// silently drop an Emergency station's status_code from the response.
+func TestStationToDTO_StatusEmergencyNotOmitted(t *testing.T) {
+	s := stationcache.Station{
+		Callsign:   "W1EMG-9",
+		StatusCode: 0,
+		StatusText: "Emergency",
+		LastHeard:  time.Now(),
+		Positions: []stationcache.Position{
+			{Lat: 40, Lon: -105, Direction: "RX", Timestamp: time.Now()},
+		},
+	}
+	dto := stationToDTO(s, false, false, nil, time.Now().Add(-time.Hour))
+	body, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw["status_code"]; !ok {
+		t.Fatal("status_code missing from JSON output for an Emergency station (omitempty would drop the 0 value)")
+	}
+	if dto.StatusCode != 0 || dto.StatusText != "Emergency" {
+		t.Errorf("StatusCode/StatusText = %d/%q, want 0/Emergency", dto.StatusCode, dto.StatusText)
+	}
+}
+
+func TestStationToDTO_StatusNoneDefaults(t *testing.T) {
+	s := stationcache.Station{
+		Callsign:   "W1PLAIN",
+		StatusCode: -1,
+		LastHeard:  time.Now(),
+		Positions: []stationcache.Position{
+			{Lat: 40, Lon: -105, Direction: "RX", Timestamp: time.Now()},
+		},
+	}
+	dto := stationToDTO(s, false, false, nil, time.Now().Add(-time.Hour))
+	if dto.StatusCode != -1 || dto.StatusText != "" {
+		t.Errorf("StatusCode/StatusText = %d/%q, want -1/\"\"", dto.StatusCode, dto.StatusText)
+	}
+}
+
+// --- /api/stations/alerts ---
+
+func alertsHandler(cache StationCache) http.Handler {
+	mux := http.NewServeMux()
+	RegisterStations(nil, mux, cache)
+	return mux
+}
+
+func getStationAlerts(t *testing.T, handler http.Handler) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/stations/alerts", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestStationAlerts_EmergencyOnly(t *testing.T) {
+	now := time.Now()
+	cache := &mockStationCache{
+		stations: []stationcache.Station{
+			{
+				Callsign:   "W1EMG-9",
+				StatusCode: 0,
+				StatusText: "Emergency",
+				LastHeard:  now,
+				Positions:  []stationcache.Position{{Lat: 40.0, Lon: -105.0, Timestamp: now}},
+			},
+			{
+				Callsign:   "W1PRI-9",
+				StatusCode: 1,
+				StatusText: "Priority",
+				LastHeard:  now,
+				Positions:  []stationcache.Position{{Lat: 41.0, Lon: -106.0, Timestamp: now}},
+			},
+			{
+				Callsign:   "W1OFF-9",
+				StatusCode: -1,
+				LastHeard:  now,
+				Positions:  []stationcache.Position{{Lat: 42.0, Lon: -107.0, Timestamp: now}},
+			},
+		},
+	}
+	rec := getStationAlerts(t, alertsHandler(cache))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var out []StationAlertDTO
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 alert (Emergency only), got %d: %+v", len(out), out)
+	}
+	if out[0].Callsign != "W1EMG-9" || out[0].StatusCode != 0 {
+		t.Errorf("unexpected alert: %+v", out[0])
+	}
+}
+
+func TestStationAlerts_NoPositionExcluded(t *testing.T) {
+	// A station flagged Emergency via a positionless status update (no
+	// prior position on record) can't be usefully surfaced on the map,
+	// so it's excluded rather than shipped with a zero lat/lon.
+	cache := &mockStationCache{
+		stations: []stationcache.Station{
+			{Callsign: "W1NOPOS", StatusCode: 0, StatusText: "Emergency", LastHeard: time.Now()},
+		},
+	}
+	rec := getStationAlerts(t, alertsHandler(cache))
+	var out []StationAlertDTO
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("expected 0 alerts, got %d", len(out))
+	}
+}
+
+func TestStationAlerts_EmptyIsEmptyArrayNotNull(t *testing.T) {
+	rec := getStationAlerts(t, alertsHandler(&mockStationCache{}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if body := rec.Body.String(); body != "[]\n" {
+		t.Errorf("expected empty JSON array, got %q", body)
 	}
 }

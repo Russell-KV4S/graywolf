@@ -33,6 +33,11 @@ type packetDTO struct {
 	// depend on the local station having its own GPS fix.
 	Lat *float64 `json:"lat,omitempty"`
 	Lon *float64 `json:"lon,omitempty"`
+	// StatusText is the Mic-E message label ("Emergency", "Priority", ...;
+	// APRS101 ch 10 table 8) when this packet is a Mic-E position report,
+	// or the raw free-form text of a '>' status report (APRS101 ch 16).
+	// Omitted for packet types that carry neither.
+	StatusText string `json:"status_text,omitempty"`
 }
 
 // RegisterPackets installs a GET /api/packets handler backed by the
@@ -153,6 +158,16 @@ func enrichPacket(dto *packetDTO, havePos bool, myLat, myLon float64) {
 	} else if d.MicE != nil && d.MicE.Manufacturer != "" {
 		// Fall back to mic-e manufacturer string already decoded
 		dto.Device = &aprs.DeviceInfo{Model: d.MicE.Manufacturer}
+	}
+
+	// Status/message text -- checked ahead of the positionless early
+	// return below so a bare '>' status report (which carries no fix)
+	// still surfaces its text in the log/inspector.
+	switch {
+	case d.MicE != nil && d.MicE.MessageText != "":
+		dto.StatusText = d.MicE.MessageText
+	case d.Status != "":
+		dto.StatusText = d.Status
 	}
 
 	// Coordinates: surfaced for every transmission type that carries a fix,

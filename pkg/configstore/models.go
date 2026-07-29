@@ -611,6 +611,15 @@ type Beacon struct {
 	Symbol       string  `gorm:"not null;default:'-'" json:"symbol"`
 	Overlay      string  `json:"overlay"`                                 // alternate symbol table overlay character
 	PositionFormat string `gorm:"not null;default:'compressed'" json:"position_format"` // compressed | uncompressed | mic_e (APRS101 ch 9/6/10)
+	// MicEMessageCode is the Mic-E status/message code (APRS101 ch 10
+	// table 8), only meaningful when PositionFormat == "mic_e". Stored as
+	// a named string enum rather than the raw 0-7 wire value: the wire
+	// encoding is inverted (0 = Emergency, 7 = Off Duty), so a safe
+	// zero-value default would require the DB column default to coincide
+	// with Go's int zero value, which is Emergency. A string enum with a
+	// named default sidesteps that trap entirely -- see PositionFormat/
+	// SendPath above for the same pattern in this struct.
+	MicEMessageCode string `gorm:"not null;default:'off_duty'" json:"mic_e_message_code"` // off_duty|en_route|in_service|returning|committed|special|priority|emergency
 	Messaging    bool    `gorm:"not null;default:false" json:"messaging"` // '=' instead of '!' prefix
 	Comment      string  `json:"comment"`
 	CommentCmd   string  `json:"comment_cmd"`                      // shell command whose stdout is appended as comment

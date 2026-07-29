@@ -27,6 +27,16 @@ export function renderStationPopupHTML(s, { hasStation = null } = {}) {
   if (s.direction !== 'IS') {
     html += `<span class="badge ${dirCls}">${esc(s.direction)}</span>`;
   }
+  // Mic-E status (APRS101 ch 10 table 8) or '>' status report text.
+  // "Off Duty" is the routine default and not worth a badge; status_code
+  // 0 is Emergency -- the one status that also raises a popup/OS/sound
+  // notification (stationAlertsTransport.js) -- so it gets the alarming
+  // b-emergency style. Everything else (Priority, Special, Committed,
+  // Returning, En Route, or a free-form status string) is informational.
+  if (s.status_text && s.status_text !== 'Off Duty') {
+    const statusCls = s.status_code === 0 ? 'b-emergency' : 'b-status';
+    html += `<span class="badge ${statusCls}">${esc(s.status_text)}</span>`;
+  }
   html += `</div>`;
 
   // For an object/item, the header is the object NAME, not a station — so
