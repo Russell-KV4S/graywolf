@@ -3,7 +3,8 @@
 // count and Bulletins.svelte's own inbound fetch). Populates
 // bulletinsStore.svelte.js and, on newly-unread rows, raises a
 // new-activity notification (in-app popup and/or OS notification,
-// per the operator's notification-prefs-store mode).
+// per the operator's notification-prefs-store mode) plus a notification
+// sound per notification-sound-store's bulletin settings.
 //
 // Lifecycle: start() is called once at App startup (see App.svelte),
 // alongside messagesTransport's start(). Polling is always-on for the
@@ -15,6 +16,7 @@ import { notifications } from './notificationsStore.svelte.js';
 import { shouldNotifyBulletin } from './notification-rules-core.js';
 import { fireOsNotification } from './osNotify.js';
 import { notificationPrefsState } from './settings/notification-prefs-store.svelte.js';
+import { notificationSoundState } from './settings/notification-sound-store.svelte.js';
 
 const POLL_MS = 30_000;
 
@@ -28,6 +30,7 @@ async function poll() {
     const rows = await listBulletins({ direction: 'in' });
     const newly = bulletinsStore.replaceInbound(rows || []);
     for (const b of newly) {
+      if (!notificationPrefsState.bulletinEnabled) continue;
       if (!shouldNotifyBulletin({ pageActive: bulletinsStore.pageActive })) continue;
       const href = `#/bulletins?focus=${b.id}`;
       if (notificationPrefsState.toastEnabled) {
@@ -41,6 +44,7 @@ async function poll() {
       fireOsNotification(`Bulletin from ${b.from_call}`, b.text, () => {
         window.location.hash = href;
       });
+      notificationSoundState.bulletin.play();
     }
   } catch {
     // Leave state as-is; the next poll retries.

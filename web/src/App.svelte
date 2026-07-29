@@ -35,6 +35,7 @@
   import Preferences from './routes/Preferences.svelte';
   import MapsSettings from './routes/MapsSettings.svelte';
   import MessagesSettings from './routes/MessagesSettings.svelte';
+  import NotificationsSettings from './routes/NotificationsSettings.svelte';
   import Messages from './routes/Messages.svelte';
   import Terminal from './routes/Terminal.svelte';
   import TerminalTranscripts from './routes/TerminalTranscripts.svelte';
@@ -68,6 +69,7 @@
     '/preferences': Preferences,
     '/preferences/maps': MapsSettings,
     '/preferences/messages': MessagesSettings,
+    '/preferences/notifications': NotificationsSettings,
     '/about': About,
   };
   const routes = (() => {

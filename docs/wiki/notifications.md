@@ -54,8 +54,8 @@ operator preference).
 | Notification queue (push/cap/dismiss) | `web/src/lib/notifications-core.js` (pure) + `web/src/lib/notificationsStore.svelte.js` (runes wrapper, module singleton) |
 | Popup UI | `web/src/components/NotificationPopup.svelte` — mounted unconditionally in `App.svelte` (not gated like `NewsPopup`), since it must be live on every route including the full-bleed map/messages views. Chonky-ui's `toast()`/`<Toaster/>` only accepts a plain string (no click handler, no markup), so this is a small purpose-built component rather than a wrapper around that primitive. |
 | Suppression rules (pure) | `web/src/lib/notification-rules-core.js` — `shouldNotifyMessage` (false if the thread is muted or is the currently-open thread), `shouldNotifyBulletin` (false while `Bulletins.svelte` is mounted), `shouldFireOsNotification` (enabled + granted + (hidden or forced)) |
-| Messages trigger | `web/src/lib/messagesTransport.js` `applyChange()` -> `maybeNotifyInbound(msg)` — the single funnel both the poll and SSE paths already call. Dedups by message id (bounded `Set`, cleared past 500 entries) so a redelivered message doesn't double-notify. |
-| Bulletins trigger | `web/src/lib/bulletinsTransport.js` `poll()` — diffs via `bulletinsStore.replaceInbound()` (uses `diffNewlyUnread`), gates via `shouldNotifyBulletin` |
+| Messages trigger | `web/src/lib/messagesTransport.js` `applyChange()` -> `maybeNotifyInbound(msg)` — the single funnel both the poll and SSE paths already call. Dedups by message id (bounded `Set`, cleared past 500 entries) so a redelivered message doesn't double-notify. Gated first by `notificationPrefsState.messageEnabled` (the per-type master switch, below), then by `shouldNotifyMessage`. |
+| Bulletins trigger | `web/src/lib/bulletinsTransport.js` `poll()` — diffs via `bulletinsStore.replaceInbound()` (uses `diffNewlyUnread`), gated first by `notificationPrefsState.bulletinEnabled`, then by `shouldNotifyBulletin` |
 | Bulletin deep-link | `#/bulletins?focus=<id>` — mirrors the `#/map?focus=CALL&lat=…&lon=…` convention. `Bulletins.svelte` parses `focus` from `querystring`, scrolls the matching row into view, and applies a transient `.is-focused` highlight. |
 | Message deep-link | `#/messages?thread=<kind>:<key>` — the existing convention already used throughout `Messages.svelte`. |
 
@@ -66,9 +66,27 @@ per-device browser-permission concept):
 
 | Concern | Where |
 |---|---|
-| Mode store | `web/src/lib/settings/notification-prefs-store.svelte.js` — `mode`: `'toast'` (default) \| `'os'` \| `'both'`. `setMode('os'|'both')` triggers the browser permission prompt; a denial falls back to `'toast'` so the operator never lands silently in a dead mode. `supported` feature-detects `window.Notification` rather than hardcoding a platform list — false inside the Android build's in-process WebView (see code-map.md's Android section), so `os`/`both` are hidden from the picker there while toast stays available. |
+| Mode store | `web/src/lib/settings/notification-prefs-store.svelte.js` — `mode`: `'toast'` (default) \| `'os'` \| `'both'`. `setMode('os'|'both')` triggers the browser permission prompt; a denial falls back to `'toast'` so the operator never lands silently in a dead mode (decision logic factored into the pure `resolveModeAfterPermission` in `notification-prefs-core.js`, unit-tested in `notification-prefs-core.test.js` alongside `parseMode`/`parseEnabledFlag`). `supported` feature-detects `window.Notification` rather than hardcoding a platform list — false inside the Android build's in-process WebView (see code-map.md's Android section), so `os`/`both` are hidden from the picker there while toast stays available. |
+| Per-type master switch | Same store — `messageEnabled`/`bulletinEnabled` (`setMessageEnabled`/`setBulletinEnabled`), both **on by default**. Independent of `mode`: gates whether a type notifies at all (popup + OS + sound), ahead of the mute/active-thread/page-open suppression rules. Turning both off is "notifications off"; turning off one mutes just that type. |
 | OS notification firer | `web/src/lib/osNotify.js` `fireOsNotification(title, body, onClick, {force})` — only fires when the tab is hidden/unfocused, unless `force: true`. This gate exists so the operator isn't double-signaled (in-app popup + OS banner) while already looking at the tab. |
-| Preferences UI | `web/src/routes/Preferences.svelte` — "Notifications" `Box`: a mode picker plus a **"Send test notification" button**, usable by any operator (not a dev-only affordance), that fires a real sample through whichever mode is currently selected via `{force: true}` — so the operator can preview exactly what they'll get before relying on it. |
+| Preferences UI | `web/src/routes/NotificationsSettings.svelte` at `/preferences/notifications` (own sidebar entry, not under General/`Preferences.svelte`) — "Popup notifications" `Box`: the two per-type toggles, a mode picker, plus a **"Send test notification" button**, usable by any operator (not a dev-only affordance), that fires a real sample through whichever mode is currently selected via `{force: true}` — so the operator can preview exactly what they'll get before relying on it. |
+
+### Notification sounds (per-type, device-local, custom upload)
+
+Separate sound settings for messages and bulletins, alongside the mode
+picker in `NotificationsSettings.svelte`'s "Message sounds" / "Bulletin
+sounds" boxes. Device-local like the toast/OS mode above (see
+`notification-prefs-store.svelte.js`'s header comment for why) — no
+backend involved, so a custom upload doesn't sync across an operator's
+other devices.
+
+| Concern | Where |
+|---|---|
+| Built-in sounds | `web/src/lib/soundPresets.js` — `SOUND_PRESETS`. `aprs-message`/`aprs-bulletin` are shipped wav files (`web/public/sounds/aprs-message.wav`, `aprs-bulletin.wav` — the station operator's own recordings) and are the **shipped defaults** for message/bulletin sound respectively (`DEFAULT_PRESET` in `notification-sound-store.svelte.js`); `chime`/`ping`/`alert` are synthesized at play time via `AudioContext` oscillators rather than shipped as assets. `playPreset(id)` plays either kind — url-based presets via `new Audio(url).play()`, tone-based via oscillators — and no-ops (rather than throwing) outside a browser, so it's callable from `node --test`. `resolvePreset(id)` is the pure id->preset lookup, unit-tested in `soundPresets.test.js`. |
+| Custom upload storage | `web/src/lib/notificationSoundsDb.js` — tiny IndexedDB wrapper (`putCustomSound`/`getCustomSound`/`deleteCustomSound`), keyed by `'message'` \| `'bulletin'`. IndexedDB rather than localStorage because the value is a binary `Blob` (the uploaded audio file) and localStorage can't hold one / has too small a quota. Untested (no `fake-indexeddb` dependency in this repo) — covered by the manual checklist below, same as `osNotify.js`'s browser-API calls. |
+| Pure decision logic | `web/src/lib/settings/notification-sound-core.js` — runes-free so it's unit-testable under `node --test` (mirrors `channelsCore.js`/`releaseNotesCore.js`): `isValidPresetId`, `parsePresetId`/`parseEnabledFlag` (localStorage value parsing with on-by-default/preset-default fallbacks), `validateUploadFile` (audio/* MIME + `MAX_SOUND_BYTES` 2 MB cap), `fallbackPresetId` (what to actually play/show when `'custom'` is selected but the upload is missing — e.g. IndexedDB cleared independently of localStorage). See `notification-sound-core.test.js`. |
+| Settings + play logic | `web/src/lib/settings/notification-sound-store.svelte.js` — the `$state` wrapper around the core above. `notificationSoundState.message` / `.bulletin`, each exposing `enabled`, `presetId` (a `SOUND_PRESETS` id \| `'custom'`), `hasCustom`, `customName`, and methods `setEnabled`, `setPreset`, `upload(file)`, `removeCustom`, `play()` (real trigger path, no-ops when disabled), `preview()` (always plays — used by the Test sound button, mirrors `fireOsNotification`'s `force` convention). `enabled`/`presetId` persist to localStorage; the audio bytes live in IndexedDB. |
+| Trigger wiring | `messagesTransport.js`'s `maybeNotifyInbound` calls `notificationSoundState.message.play()` right after the toast/OS calls, gated by `notificationPrefsState.messageEnabled` then `shouldNotifyMessage` (muted thread / active thread suppress the sound too). `bulletinsTransport.js`'s `poll()` calls `notificationSoundState.bulletin.play()` inside the `bulletinEnabled` + `shouldNotifyBulletin` loop, same gating as the popup. The "Send test notification" button (`NotificationsSettings.svelte`) also plays both `notificationSoundState.message.play()` and `.bulletin.play()` (staggered 350ms) alongside the toast/OS preview, each gated by its own master switch — so the button demonstrates the exact combination the operator has configured, not just the popup half. |
 
 ## Troubleshooting: OS notification granted but nothing appears
 
@@ -113,8 +131,14 @@ repo):
 - `bulletins-diff-core.test.js`
 - `notifications-core.test.js`
 - `notification-rules-core.test.js`
+- `settings/notification-prefs-core.test.js`
+- `settings/notification-sound-core.test.js`
+- `soundPresets.test.js`
 
 UI/permission behavior (popup placement, OS-notification permission
 flows, Android graceful degradation) is covered by the manual checklist
-in `docs/superpowers/plans/2026-07-27-unread-notifications.md`, not by
-automated tests.
+in `docs/superpowers/plans/2026-07-27-unread-notifications.md`. Sound
+playback, custom-upload persistence across a reload, and the per-type
+master toggles are covered by
+`docs/superpowers/plans/2026-07-29-notification-sounds-manual-test-plan.md` —
+neither is automatable without a real `AudioContext`/`IndexedDB`.

@@ -54,6 +54,7 @@
     { path: '/kiss', label: 'KISS' },
     { path: '/preferences/maps', label: 'Maps' },
     { path: '/preferences/messages', label: 'Messaging' },
+    { path: '/preferences/notifications', label: 'Notifications' },
     { path: '/position-log', label: 'Position Log' },
     { path: '/ptt', label: 'PTT' },
     { path: '/simulation', label: 'Simulation' },

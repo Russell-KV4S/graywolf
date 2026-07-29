@@ -40,6 +40,7 @@ import { notifications } from './notificationsStore.svelte.js';
 import { shouldNotifyMessage } from './notification-rules-core.js';
 import { fireOsNotification } from './osNotify.js';
 import { notificationPrefsState } from './settings/notification-prefs-store.svelte.js';
+import { notificationSoundState } from './settings/notification-sound-store.svelte.js';
 
 const POLL_BASE_MS = 5_000;
 const POLL_MAX_MS = 60_000;
@@ -83,6 +84,8 @@ function maybeNotifyInbound(msg) {
   notifiedMessageIds.add(msg.id);
   if (notifiedMessageIds.size > MAX_NOTIFIED_IDS) notifiedMessageIds.clear();
 
+  if (!notificationPrefsState.messageEnabled) return;
+
   const threadId = messages.threadIdFor(msg.thread_kind, msg.thread_key);
   const thread = messages.conversations.get(threadId);
   if (!shouldNotifyMessage({ muted: !!thread?.muted, isActiveThread: messages.activeThreadId === threadId })) {
@@ -102,6 +105,7 @@ function maybeNotifyInbound(msg) {
   fireOsNotification(`New message from ${label}`, msg.text, () => {
     window.location.hash = href;
   });
+  notificationSoundState.message.play();
 }
 
 /** Apply a single MessageChange frame to the store. */

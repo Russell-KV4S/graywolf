@@ -11,15 +11,24 @@
 // in a mode that silently does nothing. `supported` feature-detects the
 // Notification API rather than hardcoding a platform list — it's false
 // inside the Android build's in-process WebView (see
-// docs/wiki/code-map.md's Android section), so Preferences.svelte hides
-// the os/both options there while still offering plain toast popups.
+// docs/wiki/code-map.md's Android section), so NotificationsSettings.svelte
+// hides the os/both options there while still offering plain toast popups.
+//
+// messageEnabled/bulletinEnabled are independent master switches, on by
+// default — turning both off is "notifications off"; turning off just one
+// mutes that type's popups (toast + OS) and sound while leaving the other
+// alone. Gates messagesTransport.js's maybeNotifyInbound and
+// bulletinsTransport.js's poll() ahead of the toast/OS/sound calls.
+
+import { parseMode, parseEnabledFlag, resolveModeAfterPermission } from './notification-prefs-core.js';
 
 const LS_MODE = 'gw-notification-mode';
+const LS_MESSAGE_ENABLED = 'gw-notification-message-enabled';
+const LS_BULLETIN_ENABLED = 'gw-notification-bulletin-enabled';
 
 function readMode() {
   try {
-    const v = localStorage.getItem(LS_MODE);
-    return v === 'os' || v === 'both' ? v : 'toast';
+    return parseMode(localStorage.getItem(LS_MODE));
   } catch {
     return 'toast';
   }
@@ -33,8 +42,26 @@ function writeMode(v) {
   }
 }
 
+function readEnabled(key) {
+  try {
+    return parseEnabledFlag(localStorage.getItem(key));
+  } catch {
+    return true;
+  }
+}
+
+function writeEnabled(key, v) {
+  try {
+    localStorage.setItem(key, v ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+}
+
 export const notificationPrefsState = (() => {
   let mode = $state(readMode());
+  let messageEnabled = $state(readEnabled(LS_MESSAGE_ENABLED));
+  let bulletinEnabled = $state(readEnabled(LS_BULLETIN_ENABLED));
   const supported = typeof window !== 'undefined' && typeof Notification !== 'undefined';
 
   return {
@@ -52,6 +79,20 @@ export const notificationPrefsState = (() => {
     },
     get osEnabled() {
       return supported && (mode === 'os' || mode === 'both') && Notification.permission === 'granted';
+    },
+    get messageEnabled() {
+      return messageEnabled;
+    },
+    get bulletinEnabled() {
+      return bulletinEnabled;
+    },
+    setMessageEnabled(v) {
+      messageEnabled = !!v;
+      writeEnabled(LS_MESSAGE_ENABLED, messageEnabled);
+    },
+    setBulletinEnabled(v) {
+      bulletinEnabled = !!v;
+      writeEnabled(LS_BULLETIN_ENABLED, bulletinEnabled);
     },
     /**
      * Called from the Preferences mode picker. Requesting 'os'/'both'
