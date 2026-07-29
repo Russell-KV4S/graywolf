@@ -4,28 +4,17 @@
   import { location } from 'svelte-spa-router';
   import { Icon, NotificationBadge, Drawer } from '@chrissnell/chonky-ui';
   import { messages } from '../lib/messagesStore.svelte.js';
+  import { bulletinsStore } from '../lib/bulletinsStore.svelte.js';
   import { terminalSidebar } from '../lib/stores/terminal.svelte.js';
   import { updates } from '../lib/updatesStore.svelte.js';
   import { Platform } from '../lib/platform.js';
-  import { listBulletins } from '../api/bulletins.js';
   import logoUrl from '../assets/graywolf.svg';
 
-  let bulletinUnread = $state(0);
-
-  // Poll for unread bulletin count every 30 seconds so the badge stays fresh.
-  onMount(() => {
-    async function fetchBulletinUnread() {
-      try {
-        const rows = await listBulletins({ direction: 'in', unread_only: true });
-        bulletinUnread = Array.isArray(rows) ? rows.length : 0;
-      } catch (_) {
-        // Backend not ready yet — leave count as-is.
-      }
-    }
-    fetchBulletinUnread();
-    const t = setInterval(fetchBulletinUnread, 30_000);
-    return () => clearInterval(t);
-  });
+  // bulletinsTransport.js (started app-wide from App.svelte) owns the
+  // shared poll; this is just a reactive read so the badge stays in
+  // lockstep with whatever Bulletins.svelte does to the same store —
+  // no more independent polling loop here.
+  let bulletinUnread = $derived(bulletinsStore.unreadTotal);
 
   // Surfaces deferred or unsupported on Android. Hidden from the
   // sidebar so operators don't tap into a non-functional surface:

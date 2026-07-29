@@ -5,9 +5,11 @@
   import { Platform } from './lib/platform.js';
   import Sidebar from './components/Sidebar.svelte';
   import NewsPopup from './components/NewsPopup.svelte';
+  import NotificationPopup from './components/NotificationPopup.svelte';
   import ServerUpdatedBanner from './components/ServerUpdatedBanner.svelte';
   import { serverVersion } from './lib/stores/server-version.svelte.js';
   import { start as startMessagesTransport } from './lib/messagesTransport.js';
+  import { start as startBulletinsTransport } from './lib/bulletinsTransport.js';
   import { releaseNotes } from './lib/releaseNotesStore.svelte.js';
   import { unitsState } from './lib/settings/units-store.svelte.js';
   import { themeState } from './lib/settings/theme-store.svelte.js';
@@ -144,6 +146,7 @@
     if (authChecked && authValid && currentPath !== '' && !isLoginPage && !messagesTransportStarted) {
       messagesTransportStarted = true;
       startMessagesTransport();
+      startBulletinsTransport();
       // Watch for the server build changing underneath this tab (operator
       // upgraded graywolf) and surface a reload banner. Idempotent.
       serverVersion.start();
@@ -165,6 +168,7 @@
   <Router {routes} />
 {:else if authChecked}
   <ServerUpdatedBanner />
+  <NotificationPopup />
   <div class="app-layout">
     <Sidebar />
     <main class="main-content" class:full-bleed={currentPath === '/map' || currentPath === '/messages' || currentPath.startsWith('/messages/')}>

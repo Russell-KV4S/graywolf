@@ -1708,3 +1708,65 @@ Source: [`../../pkg/app/rxfanout.go`](../../pkg/app/rxfanout.go)
 (`setMod128`, `Mod128`),
 [`../../pkg/ax25conn/manager_test.go`](../../pkg/ax25conn/manager_test.go)
 (`TestManager_DispatchRawMod128Delivers`).
+
+### 63. Unread-signal stores are updated optimistically, not solely by the rollup poll
+
+`messagesStore.svelte.js`'s `unreadTotal` and `bulletinsStore.svelte.js`'s
+`unreadTotal` must be decremented at the exact point a mark-read (or
+mark-all-read) action succeeds locally — `MessageThread.svelte`'s
+`flushBatch` calls `store.decrementUnread(threadId, n)` before the
+`markRead` POST even resolves, and `Bulletins.svelte`'s `handleMarkRead`/
+`handleMarkAllRead` call `bulletinsStore.markRead`/`markAllRead`
+synchronously. The periodic rollup poll
+(`messagesTransport.js`'s 30s `refreshConversations()`,
+`bulletinsTransport.js`'s 30s snapshot) is reconciliation for drift, not
+the primary signal path.
+
+*Why:* neither backend mark-read endpoint publishes an event
+(`pkg/messages/service.go`'s `MarkRead`/`MarkUnread` and
+`pkg/webapi/bulletins.go`'s `markBulletinRead`/`markAllBulletinsRead` are
+plain REST, no `EventHub.Publish`), so any unread surface that waits on
+the rollup poll instead of updating optimistically will lag up to 30s
+behind what the operator already read — this is exactly the bug reported
+against the Messages and Bulletins unread badges before the fix in
+[notifications.md](notifications.md). A future unread surface (e.g. a
+per-channel Actions inbox) must follow the same optimistic-update
+pattern, with rollback on a failed request, rather than reintroducing
+the poll-only lag.
+
+Source: [`../../web/src/lib/messagesStore.svelte.js`](../../web/src/lib/messagesStore.svelte.js)
+(`decrementUnread`, `incrementUnread`),
+[`../../web/src/components/messages/MessageThread.svelte`](../../web/src/components/messages/MessageThread.svelte)
+(`flushBatch`),
+[`../../web/src/lib/bulletinsStore.svelte.js`](../../web/src/lib/bulletinsStore.svelte.js)
+(`markRead`, `markAllRead`, `markUnreadLocal`),
+[`notifications.md`](notifications.md).
+
+### 64. Collapsed IS/RF-echo bubbles must mark every merged row read, not just the primary
+
+`messages.Router`'s inbound dedup (invariant #27) only fires when the
+packet carries a `MessageID` (`pkg/messages/router.go`'s `classify`,
+`if effMsg.MessageID != ""`). Well-known no-ack bots
+(`pkg/messages/bots.go`'s `WellKnownBots` — WXBOT and friends) send
+unnumbered messages, so the same packet heard on multiple paths (RF
+direct + APRS-IS gate, or a digipeater re-tx) persists as separate rows
+with no server-side dedup. `duplicate-echo-core.js`'s
+`collapseDuplicateEchoes` merges these into one display bubble
+(multiple source badges) purely for readability — it does not touch
+the underlying rows. Any code that marks a collapsed bubble read
+(`MessageThread.svelte`'s dwell-driven `flushBatch`) MUST iterate the
+bubble's `mergedIds`, not just its primary `id`.
+
+*Why:* if only the primary id is marked read, the hidden duplicate
+rows stay unread server-side forever — the thread's unread badge would
+never reach zero for a WXBOT-style thread, and the optimistic
+decrement (invariant #63) would get overwritten back up by the next
+30s conversations rollup, which still counts the un-marked duplicates.
+
+Source: [`../../web/src/lib/duplicate-echo-core.js`](../../web/src/lib/duplicate-echo-core.js),
+[`../../web/src/components/messages/MessageThread.svelte`](../../web/src/components/messages/MessageThread.svelte)
+(`displayBubbles`, IntersectionObserver dwell handler),
+[`../../web/src/components/messages/MessageBubble.svelte`](../../web/src/components/messages/MessageBubble.svelte)
+(`sourceBadges`),
+[`../../pkg/messages/router.go`](../../pkg/messages/router.go) (`classify`),
+[`../../pkg/messages/bots.go`](../../pkg/messages/bots.go).

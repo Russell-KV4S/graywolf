@@ -36,6 +36,10 @@ import {
   listConversations,
   listTacticals,
 } from '../api/messages.js';
+import { notifications } from './notificationsStore.svelte.js';
+import { shouldNotifyMessage } from './notification-rules-core.js';
+import { fireOsNotification } from './osNotify.js';
+import { notificationPrefsState } from './settings/notification-prefs-store.svelte.js';
 
 const POLL_BASE_MS = 5_000;
 const POLL_MAX_MS = 60_000;
@@ -61,6 +65,45 @@ function shouldUseSSE() {
   }
 }
 
+// Dedup set so a message already seen (e.g. re-delivered on a
+// reconnect, or present in both the delta and a conversations rollup
+// window) doesn't raise a second popup. Bounded so a long session
+// doesn't grow this unboundedly.
+const notifiedMessageIds = new Set();
+const MAX_NOTIFIED_IDS = 500;
+
+/**
+ * Raise a new-activity notification for a genuinely new inbound unread
+ * message, subject to the mute/active-thread suppression rules and the
+ * operator's notification mode (toast/os/both).
+ */
+function maybeNotifyInbound(msg) {
+  if (!msg || msg.direction !== 'in' || !msg.unread || typeof msg.id !== 'number') return;
+  if (notifiedMessageIds.has(msg.id)) return;
+  notifiedMessageIds.add(msg.id);
+  if (notifiedMessageIds.size > MAX_NOTIFIED_IDS) notifiedMessageIds.clear();
+
+  const threadId = messages.threadIdFor(msg.thread_kind, msg.thread_key);
+  const thread = messages.conversations.get(threadId);
+  if (!shouldNotifyMessage({ muted: !!thread?.muted, isActiveThread: messages.activeThreadId === threadId })) {
+    return;
+  }
+
+  const label = messages.isTactical(threadId) ? (thread?.alias || msg.thread_key) : msg.from_call;
+  const href = `#/messages?thread=${encodeURIComponent(threadId)}`;
+  if (notificationPrefsState.toastEnabled) {
+    notifications.push({
+      kind: 'message',
+      title: `New message from ${label}`,
+      body: (msg.text || '').slice(0, 140),
+      href,
+    });
+  }
+  fireOsNotification(`New message from ${label}`, msg.text, () => {
+    window.location.hash = href;
+  });
+}
+
 /** Apply a single MessageChange frame to the store. */
 function applyChange(change) {
   if (!change || typeof change.id === 'undefined') return;
@@ -68,7 +111,10 @@ function applyChange(change) {
     messages.markDeleted(change.id);
     return;
   }
-  if (change.message) messages.upsertMessage(change.message);
+  if (change.message) {
+    messages.upsertMessage(change.message);
+    maybeNotifyInbound(change.message);
+  }
 }
 
 async function fetchDelta() {

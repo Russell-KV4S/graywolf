@@ -126,12 +126,29 @@ in the handbook.
 - Mark-all-read button on the Received tab.
 - Per-row: slot tag, from_call (inbound) or send status (outbound), timestamp,
   delete button.
-- 30-second poll for new inbound data.
+- Received tab supports `#/bulletins?focus=<id>` deep-linking (scrolls to
+  and briefly highlights the target row) — see the shared-store paragraph
+  below.
+- 30-second poll for its own outbound list only; inbound data comes from
+  the shared `bulletinsStore` (see below), not a page-local poll.
 
 Sidebar in `web/src/components/Sidebar.svelte` shows a Bulletins nav item
 with an inline SVG clipboard icon (the chonky-ui `rss` icon is not in the
-component's allowlist, so `svgIcon: 'bulletins'` is used instead). An unread
-badge count is polled every 30 s via `GET /api/bulletins?direction=in&unread_only=true`.
+component's allowlist, so `svgIcon: 'bulletins'` is used instead). The
+unread badge reads `web/src/lib/bulletinsStore.svelte.js`'s
+`unreadTotal` — a shared reactive store, not an independent poll (see
+[notifications.md](notifications.md) for why this changed: Sidebar used
+to run its own separate 30s unread-only poll, decoupled from
+`Bulletins.svelte`'s own list, so marking a bulletin read on the page
+could take up to 30s to clear the sidebar dot). The single shared poll
+now lives in `web/src/lib/bulletinsTransport.js` (30s cadence,
+unchanged), started app-wide from `App.svelte`; `Bulletins.svelte` only
+polls its own outbound list. Marking read/unread/all-read/delete go
+through `bulletinsStore`'s methods so both surfaces update in the same
+tick. A newly-arrived unread bulletin also raises a notification (per
+the operator's notification mode) that deep-links to
+`#/bulletins?focus=<id>`, which `Bulletins.svelte` resolves by
+scrolling to and briefly highlighting the matching row.
 
 **Digipeater path** is a station-level setting shared by all outbound APRS
 traffic — both directed messages and bulletins. It reflects your antenna,

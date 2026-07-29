@@ -1,5 +1,6 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { querystring } from 'svelte-spa-router';
   import { Button, Input } from '@chrissnell/chonky-ui';
   import PageHeader from '../components/PageHeader.svelte';
   import {
@@ -9,11 +10,15 @@
     markBulletinRead,
     markAllBulletinsRead,
   } from '../api/bulletins.js';
+  import { bulletinsStore } from '../lib/bulletinsStore.svelte.js';
   import { toasts } from '../lib/stores.js';
 
   // --- view state ---
   let tab = $state('inbound');           // 'inbound' | 'outbound'
-  let inbound = $state([]);
+  // Inbound comes from the shared store (populated by bulletinsTransport.js's
+  // single app-wide poll) so marking read here is instantly visible in the
+  // Sidebar badge too, and vice versa — no more page-local inbound state.
+  let inbound = $derived(bulletinsStore.inboundList);
   let outbound = $state([]);
   let loading = $state(true);
 
@@ -33,13 +38,11 @@
   let textOver = $derived(textLen > MAX_TEXT);
   let isAnnouncement = $derived(!BULLETIN_SLOTS.includes(slot));
 
-  async function load() {
+  // Inbound is owned by bulletinsStore/bulletinsTransport.js now; this page
+  // only loads its own outbound list.
+  async function loadOutboundOnly() {
     try {
-      const [inRows, outRows] = await Promise.all([
-        listBulletins({ direction: 'in' }),
-        listBulletins({ direction: 'out' }),
-      ]);
-      inbound = Array.isArray(inRows) ? inRows : [];
+      const outRows = await listBulletins({ direction: 'out' });
       outbound = Array.isArray(outRows) ? outRows : [];
     } catch (e) {
       toasts.add({ kind: 'error', message: 'Failed to load bulletins.' });
@@ -55,7 +58,7 @@
       await sendBulletin({ slot, text: text.trim(), interval_mins: isAnnouncement ? 0 : intervalMins });
       text = '';
       toasts.add({ kind: 'success', message: `Bulletin ${slot} queued for transmission.` });
-      await load();
+      await loadOutboundOnly();
       tab = 'outbound';
     } catch (e) {
       toasts.add({ kind: 'error', message: e?.message || 'Send failed.' });
@@ -67,24 +70,32 @@
   async function handleDelete(id) {
     try {
       await deleteBulletin(id);
-      await load();
+      // The id could belong to either tab — removeLocal is a harmless
+      // no-op if it wasn't an inbound row.
+      bulletinsStore.removeLocal(id);
+      await loadOutboundOnly();
     } catch (e) {
       toasts.add({ kind: 'error', message: 'Delete failed.' });
     }
   }
 
   async function handleMarkRead(id) {
+    bulletinsStore.markRead(id);
     try {
       await markBulletinRead(id);
-      inbound = inbound.map(b => b.id === id ? { ...b, unread: false } : b);
-    } catch (_) {}
+    } catch (_) {
+      bulletinsStore.markUnreadLocal(id);
+    }
   }
 
   async function handleMarkAllRead() {
+    const previouslyUnread = inbound.filter((b) => b.unread).map((b) => b.id);
+    bulletinsStore.markAllRead();
     try {
       await markAllBulletinsRead();
-      inbound = inbound.map(b => ({ ...b, unread: false }));
-    } catch (_) {}
+    } catch (_) {
+      for (const id of previouslyUnread) bulletinsStore.markUnreadLocal(id);
+    }
   }
 
   function slotLabel(b) {
@@ -108,13 +119,52 @@
   }
 
   onMount(() => {
-    load();
-    const t = setInterval(load, 30_000);
-    return () => clearInterval(t);
+    bulletinsStore.setPageActive(true);
+    loadOutboundOnly();
+    const t = setInterval(loadOutboundOnly, 30_000);
+    return () => {
+      clearInterval(t);
+      bulletinsStore.setPageActive(false);
+    };
   });
 
   let unreadCount = $derived(inbound.filter(b => b.unread).length);
   let shown = $derived(tab === 'inbound' ? inbound : outbound);
+
+  // --- #/bulletins?focus=<id> deep-link (from a notification popup) ---
+  // Mirrors the #/map?focus=CALL&lat=…&lon=… convention already used by
+  // the live map's station-popup / packet-log reticle deep-links.
+  let qs = $state('');
+  $effect(() => {
+    const unsub = querystring.subscribe((v) => { qs = v || ''; });
+    return unsub;
+  });
+  const focusId = $derived.by(() => {
+    const n = Number(new URLSearchParams(qs).get('focus'));
+    return Number.isFinite(n) ? n : null;
+  });
+
+  /** @type {Map<number, HTMLElement>} */
+  const rowRefs = new Map();
+  function rowRef(node, id) {
+    rowRefs.set(id, node);
+    return {
+      destroy() { rowRefs.delete(id); },
+    };
+  }
+
+  $effect(() => {
+    const id = focusId;
+    if (id == null || !bulletinsStore.loaded) return;
+    tab = 'inbound';
+    tick().then(() => {
+      const el = rowRefs.get(id);
+      if (!el) return;
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.classList.add('is-focused');
+      setTimeout(() => el.classList.remove('is-focused'), 1500);
+    });
+  });
 </script>
 
 <div class="page bulletins-page">
@@ -214,7 +264,7 @@
   {:else}
     <div class="bulletin-list">
       {#each shown as b (b.id)}
-        <div class="bulletin-row" class:unread={b.unread}>
+        <div class="bulletin-row" class:unread={b.unread} use:rowRef={b.id}>
           <div class="bulletin-header">
             <span class="slot-tag">{slotLabel(b)}</span>
             {#if tab === 'inbound'}
@@ -413,6 +463,19 @@
 
   .bulletin-row.unread {
     border-left: 3px solid var(--color-accent, #7bb8e8);
+  }
+
+  /* Transient highlight when arriving via a #/bulletins?focus=<id> deep
+     link (e.g. clicking a notification popup). `is-focused` is added
+     imperatively via classList in the focus $effect, not through a
+     template `class:` directive, so Svelte's compiler can't statically
+     prove it's used — :global() keeps the rule from being stripped as
+     dead scoped CSS (confirmed via `npm run build`: without :global()
+     the selector produced zero bytes of output CSS). */
+  .bulletin-row:global(.is-focused) {
+    outline: 2px solid var(--color-accent, #7bb8e8);
+    outline-offset: 2px;
+    transition: outline-color 1.5s ease-out;
   }
 
   .bulletin-header {
