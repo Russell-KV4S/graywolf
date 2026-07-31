@@ -41,6 +41,7 @@ import { shouldNotifyMessage } from './notification-rules-core.js';
 import { fireOsNotification } from './osNotify.js';
 import { notificationPrefsState } from './settings/notification-prefs-store.svelte.js';
 import { notificationSoundState } from './settings/notification-sound-store.svelte.js';
+import { notificationsLogStore } from './notificationsLogStore.svelte.js';
 
 const POLL_BASE_MS = 5_000;
 const POLL_MAX_MS = 60_000;
@@ -94,15 +95,13 @@ function maybeNotifyInbound(msg) {
 
   const label = messages.isTactical(threadId) ? (thread?.alias || msg.thread_key) : msg.from_call;
   const href = `#/messages?thread=${encodeURIComponent(threadId)}`;
+  const title = `New message from ${label}`;
+  const body = (msg.text || '').slice(0, 140);
+  notificationsLogStore.add({ kind: 'message', title, body, href });
   if (notificationPrefsState.toastEnabled) {
-    notifications.push({
-      kind: 'message',
-      title: `New message from ${label}`,
-      body: (msg.text || '').slice(0, 140),
-      href,
-    });
+    notifications.push({ kind: 'message', title, body, href });
   }
-  fireOsNotification(`New message from ${label}`, msg.text, () => {
+  fireOsNotification(title, msg.text, () => {
     window.location.hash = href;
   });
   notificationSoundState.message.play();

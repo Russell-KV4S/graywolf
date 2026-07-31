@@ -8,12 +8,15 @@ import { esc, timeAgo, fmtLat, fmtLon, viaCls, viaText, formatWeatherRows } from
 import { rfReachableDespiteNonRfLatest } from './rf-only-core.js';
 import { unitsState } from '../settings/units-store.svelte.js';
 
-// renderStationPopupHTML(station, { hasStation }) -> HTML string
+// renderStationPopupHTML(station, { hasStation, isFavorite }) -> HTML string
 //
 // hasStation(callsign) is an optional predicate used to decide whether a
 // digipeater entry in the path field renders as a clickable .path-link
 // or plain text. Pass null to render every entry as plain text.
-export function renderStationPopupHTML(s, { hasStation = null } = {}) {
+// isFavorite is whether this callsign is currently on the operator's
+// favorites list (favoriteStationsStore) -- drives the star action's
+// filled/outline state.
+export function renderStationPopupHTML(s, { hasStation = null, isFavorite = false } = {}) {
   const pos = s.positions && s.positions[0];
   if (!pos) return '';
 
@@ -108,7 +111,7 @@ export function renderStationPopupHTML(s, { hasStation = null } = {}) {
     html += `<div class="stn-comment">${esc(s.comment)}</div>`;
   }
 
-  const actions = renderStationActionsHTML(s);
+  const actions = renderStationActionsHTML(s, { isFavorite });
   if (actions) {
     html += `<div class="stn-sep"></div>`;
     html += actions;
@@ -167,16 +170,31 @@ const ICON_QRZ = icon(
     '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>'
 );
 
-// renderStationActionsHTML(station) -> HTML string (or '' to suppress)
+// lucide "star" — the favorites toggle. filled=true renders a solid star
+// (currently a favorite) instead of an outline, mirrors how a filled vs
+// outline heart/star icon reads universally as "already saved" vs "save".
+function iconStar(filled) {
+  return (
+    `<svg class="stn-action-icon" xmlns="http://www.w3.org/2000/svg" ` +
+    `width="14" height="14" viewBox="0 0 24 24" fill="${filled ? 'currentColor' : 'none'}" ` +
+    `stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ` +
+    `aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>`
+  );
+}
+
+// renderStationActionsHTML(station, { isFavorite }) -> HTML string (or '' to suppress)
 //
 // Action rows shown for a real heard station: open a direct message thread,
-// view the APRS packet log filtered to this callsign, and a QRZ database
-// lookup. APRS objects/items aren't operators you can work, so they get no
-// actions. Messages and Logs are internal hash routes; QRZ is the one
-// external link (opens in a new tab). Styled to match the map right-click
-// context menu -- icon + label rows with a hover tint (see .stn-action in
-// LiveMapV2.svelte).
-export function renderStationActionsHTML(s) {
+// view the APRS packet log filtered to this callsign, a QRZ database
+// lookup, and a favorites star toggle. APRS objects/items aren't operators
+// you can work, so they get no actions. Messages and Logs are internal
+// hash routes; QRZ is the one external link (opens in a new tab); the
+// star is a <button> (not a link -- it mutates state via
+// favoriteStationsStore rather than navigating), wired up by
+// LiveMapV2.svelte's popup click delegation the same way .path-link
+// clicks are. Styled to match the map right-click context menu -- icon +
+// label rows with a hover tint (see .stn-action in LiveMapV2.svelte).
+export function renderStationActionsHTML(s, { isFavorite = false } = {}) {
   const call = s.callsign;
   if (!call || s.is_object) return '';
 
@@ -192,6 +210,10 @@ export function renderStationActionsHTML(s) {
   html += `<a class="stn-action stn-msg-link" role="menuitem" href="${msgHref}">${ICON_MESSAGE}<span class="stn-action-label">Message</span></a>`;
   html += `<a class="stn-action stn-log-link" role="menuitem" href="${logHref}">${ICON_LOGS}<span class="stn-action-label">APRS logs</span></a>`;
   html += `<a class="stn-action stn-qrz-link" role="menuitem" href="${qrzHref}" target="_blank" rel="noopener noreferrer">${ICON_QRZ}<span class="stn-action-label">QRZ</span></a>`;
+  html +=
+    `<button type="button" class="stn-action stn-fav-btn${isFavorite ? ' is-favorite' : ''}" role="menuitem" ` +
+    `data-callsign="${esc(upper)}" aria-pressed="${isFavorite}">${iconStar(isFavorite)}` +
+    `<span class="stn-action-label">${isFavorite ? 'Favorited' : 'Favorite'}</span></button>`;
   html += `</div>`;
   return html;
 }

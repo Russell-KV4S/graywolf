@@ -17,6 +17,7 @@ import { shouldNotifyBulletin } from './notification-rules-core.js';
 import { fireOsNotification } from './osNotify.js';
 import { notificationPrefsState } from './settings/notification-prefs-store.svelte.js';
 import { notificationSoundState } from './settings/notification-sound-store.svelte.js';
+import { notificationsLogStore } from './notificationsLogStore.svelte.js';
 
 const POLL_MS = 30_000;
 
@@ -33,13 +34,10 @@ async function poll() {
       if (!notificationPrefsState.bulletinEnabled) continue;
       if (!shouldNotifyBulletin({ pageActive: bulletinsStore.pageActive })) continue;
       const href = `#/bulletins?focus=${b.id}`;
+      const title = `Bulletin from ${b.from_call} (${b.slot})`;
+      notificationsLogStore.add({ kind: 'bulletin', title, body: b.text, href });
       if (notificationPrefsState.toastEnabled) {
-        notifications.push({
-          kind: 'bulletin',
-          title: `Bulletin from ${b.from_call} (${b.slot})`,
-          body: b.text,
-          href,
-        });
+        notifications.push({ kind: 'bulletin', title, body: b.text, href });
       }
       fireOsNotification(`Bulletin from ${b.from_call}`, b.text, () => {
         window.location.hash = href;

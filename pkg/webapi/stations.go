@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -143,6 +144,7 @@ func RegisterStations(srv *Server, mux *http.ServeMux, cache StationCache) {
 	_ = srv // kept in signature for consistency with other RegisterXxx
 	mux.HandleFunc("GET /api/stations", listStations(cache))
 	mux.HandleFunc("GET /api/stations/alerts", listStationAlerts(cache))
+	mux.HandleFunc("GET /api/stations/roster", listStationRoster(cache))
 }
 
 // listStations returns APRS stations whose most-recent fix falls inside
@@ -320,6 +322,202 @@ func listStationAlerts(cache StationCache) http.HandlerFunc {
 				Lat:        s.Positions[0].Lat,
 				Lon:        s.Positions[0].Lon,
 				LastHeard:  s.LastHeard,
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache, no-store")
+		_ = json.NewEncoder(w).Encode(out)
+	}
+}
+
+// stationRosterWindow bounds how far back listStationRoster looks for
+// currently-heard stations. Matches the default /stations timerange --
+// a station silent longer than this ages out of the roster, so a client
+// that hasn't seen it in a while and then hears it again will (harmlessly)
+// treat it as newly heard once more.
+const stationRosterWindow = time.Hour
+
+// StationRosterDTO is one currently-heard station's compact wire form,
+// used by the app-wide "new station heard" notification poll (regardless
+// of the requester's map viewport). Mirrors StationAlertDTO's "keep it
+// small, polled by every tab on a fixed interval" rationale -- this one
+// carries the full roster rather than a rare filtered subset, so trails,
+// weather, comment, and path are deliberately left off.
+type StationRosterDTO struct {
+	Callsign    string  `json:"callsign"`
+	SymbolTable string  `json:"symbol_table"`
+	SymbolCode  string  `json:"symbol_code"`
+	Lat         float64 `json:"lat"`
+	Lon         float64 `json:"lon"`
+	// Direction/Gated describe positions[0] (the current-fix, rfRank-
+	// protected copy), NOT the station-level latest-packet fields --
+	// this is deliberate so the client can apply the exact same RF Only
+	// predicate it uses on the map (web/src/lib/map/rf-only-core.js's
+	// isRfOnly checks positions[0] for the same reason; see its header
+	// comment).
+	Direction string `json:"direction"`
+	Gated     bool   `json:"gated,omitempty"`
+	// LastDirectHeard backs the client's Direct RX Only predicate
+	// (web/src/lib/map/direct-rx-core.js's directHeardWithin) the same
+	// way StationDTO.LastDirectHeard does for the map.
+	LastDirectHeard time.Time `json:"last_direct_heard"`
+	LastHeard       time.Time `json:"last_heard"`
+	// IsDigipeater is true when this station looks like a digipeater by any
+	// of three heuristics (isDigipeaterHeuristic): it appears as an H-bit
+	// path entry ("*"-suffixed) in some station's current path or trail
+	// within the roster window (i.e. it's currently observed repeating
+	// traffic for others); its symbol code is '#' (Digipeater) in EITHER
+	// table, or an overlaid numbered-digi icon (table byte replaced by the
+	// overlay '1'..'9', code still '#'); or its beacon comment
+	// self-identifies as one (case-insensitive "digi" substring -- e.g.
+	// "East Alabama ARC APRS Digi (UIV32N)", graywolf#2026-07-31: a
+	// digipeater that hadn't repeated anything within the roster window
+	// slipped past the path-only check). None of these is a configured
+	// role, just a heuristic -- a digipeater matching none of the three
+	// (hasn't repeated anything recently, uses a non-'#' icon, and
+	// doesn't mention it in its comment) won't be flagged.
+	// stationNewTransport.js's general "new station" path excludes these;
+	// the favorites path does not, since an operator who favorites their
+	// own digipeater still wants to know it's alive.
+	IsDigipeater bool `json:"is_digipeater,omitempty"`
+	// IsWeatherStation is true when this station has reported weather
+	// telemetry (s.Weather != nil, the same "nil if not a weather station"
+	// signal stationcache.Station.Weather already documents) or uses the
+	// primary-table Weather Station icon ('/' + '_', APRS101 ch 20 table 1)
+	// -- e.g. a WXTrak-style fixed weather station like the operator's
+	// AJ4FJ-13 example. Unlike IsDigipeater this is operator-toggleable,
+	// not an unconditional exclusion: notificationPrefsState.stationNewIncludeWeather
+	// (default off) gates whether the general "new station" path skips
+	// these; the favorites path never excludes on this.
+	IsWeatherStation bool `json:"is_weather_station,omitempty"`
+	// IsRepeater is true when this station looks like a voice repeater
+	// (isRepeaterHeuristic): its symbol code is 'r' (Repeater, best-effort
+	// -- unlike '#' for digipeaters, this letter's meaning hasn't been
+	// cross-checked against a second source in this repo, so it's one
+	// signal among several rather than load-bearing alone), its comment
+	// self-identifies with "repeater"/"rptr"/"rpt", or its comment matches
+	// a frequency+tone pattern (e.g. "146.84 T 123.0" -- the operator's
+	// own W4AP-2 example, 2026-07-31). A repeater is infrastructure that
+	// "can message" (autopatch/remote-base capable) but isn't a human
+	// operator, same reasoning as the digipeater exclusion -- unconditional,
+	// not operator-toggleable, and never applied to favorites.
+	IsRepeater bool `json:"is_repeater,omitempty"`
+}
+
+// isDigipeaterHeuristic reports whether s looks like a digipeater by
+// symbol or self-identifying comment text -- the two signals that don't
+// require having observed it repeat traffic within the roster window
+// (unlike the H-bit path-membership check in listStationRoster, which
+// catches only currently-active repeating). See StationRosterDTO.IsDigipeater.
+func isDigipeaterHeuristic(s stationcache.Station) bool {
+	// Symbol code '#' reads as "Digipeater" regardless of table: the
+	// primary table's '#' (APRS101 ch 20 table 1), the alternate table's
+	// '#', AND an overlaid numbered-digi symbol (the WIDEn-N-style
+	// "digi 1".."digi 9" icon, where the table byte becomes the overlay
+	// character -- '1'..'9' -- while the code stays '#') all render as a
+	// digipeater icon in practice. An earlier version of this check
+	// required table=='/' too, which missed both the alternate-table and
+	// overlaid-numbered cases -- caught 2026-07-31 when WA4HR-2, visibly
+	// using a digi-style icon, wasn't flagged.
+	if s.Symbol[1] == '#' {
+		return true
+	}
+	return strings.Contains(strings.ToLower(s.Comment), "digi")
+}
+
+// isWeatherStationHeuristic reports whether s looks like a weather
+// station: it has reported weather telemetry, or uses the Weather
+// Station icon ('_') in either symbol table -- checking code only, not
+// table, for the same reason isDigipeaterHeuristic does (see its
+// comment): a table restriction here was an unverified assumption same
+// as the one that missed WA4HR-2, so it's dropped preemptively rather
+// than waiting for a matching bug report. See StationRosterDTO.IsWeatherStation.
+func isWeatherStationHeuristic(s stationcache.Station) bool {
+	if s.Weather != nil {
+		return true
+	}
+	return s.Symbol[1] == '_'
+}
+
+// repeaterFreqTonePattern matches a frequency + tone comment, the
+// standard way a voice repeater self-identifies in its beacon comment.
+// Two shapes, both seen in real operator examples 2026-07-31:
+//   - repeaterOffsetPattern: a frequency immediately followed by a +/-
+//     repeater offset direction (e.g. "147.180+", "146.940-") -- WR4VR-3's
+//     "147.18+ p1-127.3 NET-Wed8pm D-STAR145.24-". This is the single most
+//     universal convention in ham repeater listings, present even when the
+//     tone isn't shown right next to the frequency.
+//   - repeaterFreqTonePattern: a frequency followed (within a few
+//     characters, not necessarily immediately) by a tone/CTCSS marker --
+//     W4AP-2's "146.84 T 123.0".
+var repeaterOffsetPattern = regexp.MustCompile(`\d{3}\.\d{2,4}\s*[+-]`)
+var repeaterFreqTonePattern = regexp.MustCompile(`(?i)\d{2,3}\.\d{2,4}.{0,8}?(t|pl|dcs)\s*\d`)
+
+// isRepeaterHeuristic reports whether s looks like a voice repeater --
+// infrastructure that "can message" (autopatch/remote-base capable) but
+// isn't a human operator, same reasoning as the digipeater exclusion.
+// See StationRosterDTO.IsRepeater.
+func isRepeaterHeuristic(s stationcache.Station) bool {
+	// Symbol code 'r' (Repeater) is a best-effort signal, not cross-checked
+	// against a second source in this repo the way '#'/'_' were reasoned
+	// through -- kept as one signal among several rather than load-bearing
+	// alone, given this session already found the table-restriction mistake
+	// twice for other icons.
+	if s.Symbol[1] == 'r' {
+		return true
+	}
+	comment := strings.ToLower(s.Comment)
+	if strings.Contains(comment, "repeater") || strings.Contains(comment, "rptr") {
+		return true
+	}
+	return repeaterOffsetPattern.MatchString(s.Comment) || repeaterFreqTonePattern.MatchString(s.Comment)
+}
+
+// listStationRoster returns every currently-heard station (objects/items
+// excluded -- they aren't operators) regardless of the requester's map
+// viewport, flagged with IsDigipeater where applicable, for
+// web/src/lib/stationNewTransport.js to diff against a persisted
+// "last heard at" map and raise a notification once a callsign has gone
+// unheard long enough to count as new again -- see docs/wiki/notifications.md.
+//
+// @Summary  List currently-heard stations (compact, world-scope)
+// @Tags     stations
+// @ID       listStationRoster
+// @Produce  json
+// @Success  200 {array} webapi.StationRosterDTO
+// @Security CookieAuth
+// @Router   /stations/roster [get]
+func listStationRoster(cache StationCache) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		stations := cache.QueryBBox(worldBBox, stationRosterWindow)
+
+		digis := make(map[string]struct{}, len(stations))
+		for _, call := range collectDigiCallsigns(stations) {
+			digis[call] = struct{}{}
+		}
+
+		out := make([]StationRosterDTO, 0, len(stations))
+		for _, s := range stations {
+			if s.IsObject || len(s.Positions) == 0 {
+				continue
+			}
+			p := s.Positions[0]
+			_, pathDigi := digis[s.Callsign]
+			isDigi := pathDigi || isDigipeaterHeuristic(s)
+			out = append(out, StationRosterDTO{
+				Callsign:         s.Callsign,
+				SymbolTable:      string(rune(s.Symbol[0])),
+				SymbolCode:       string(rune(s.Symbol[1])),
+				Lat:              p.Lat,
+				Lon:              p.Lon,
+				Direction:        p.Direction,
+				Gated:            p.Gated,
+				LastDirectHeard:  s.LastDirectHeard,
+				LastHeard:        s.LastHeard,
+				IsDigipeater:     isDigi,
+				IsWeatherStation: isWeatherStationHeuristic(s),
+				IsRepeater:       isRepeaterHeuristic(s),
 			})
 		}
 

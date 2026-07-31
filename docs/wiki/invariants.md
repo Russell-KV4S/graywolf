@@ -1839,7 +1839,11 @@ from wherever the station's last-known position already lives (e.g.
 `StationDTO`/`StationAlertDTO.Lat/.Lon`, or `GET /api/position` for the
 operator's own station) rather than assuming `focus=CALL` alone works.
 
-Source: [`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
+Source: [`../../web/src/lib/map/focus-hash-core.js`](../../web/src/lib/map/focus-hash-core.js)
+(`parseFocusHash` -- pure, unit-tested in `focus-hash-core.test.js`,
+extracted from `LiveMapV2.svelte` 2026-07-31 after a third click-through
+bug in this area, see invariant #68),
+[`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
 (`parseFocusFromHash`, the focus-popup `$effect`),
 [`../../web/src/lib/stationAlertsTransport.js`](../../web/src/lib/stationAlertsTransport.js),
 [`../../web/src/routes/NotificationsSettings.svelte`](../../web/src/routes/NotificationsSettings.svelte)
@@ -1892,3 +1896,78 @@ Source: [`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2
 the focus-popup `$effect`'s `MAX_FOCUS_POPUP_ATTEMPTS`),
 [`../../web/src/lib/map/data-store.svelte.js`](../../web/src/lib/map/data-store.svelte.js)
 (`setBounds`'s forced refetch on bbox change).
+
+### 68. A `#/map?focus=` deep-link clicked while already on `/map` must be re-parsed from `window.location.hash` — the component does not remount
+
+Invariants #66/#67 fixed the deep-link's *first* click. The operator
+then found a second failure mode (2026-07-31): "took me to the person
+fine the 1st time but if I was already on a person and got a new toast
+it didn't move." Root cause is `svelte-spa-router`: `Router.svelte`
+renders the routed page via `<svelte:component this={component} .../>`,
+which only destroys/recreates the component instance when `this`
+(the matched component) changes -- not when only the querystring does.
+Since every `#/map?focus=...` link matches the *same* `/map` route,
+`LiveMapV2.svelte` never remounts on a second focus link; it just keeps
+running with whatever `pendingFocus` it computed once, at initial setup,
+from a one-time `parseFocusFromHash()` call.
+
+Fixed by making `pendingFocus` reactive (`$state`, not a plain `const`)
+and adding a `window.addEventListener('hashchange', handleFocusHashChange)`
+in `onMount` (removed in `onDestroy`) that re-parses the hash on every
+navigation and, for a target that actually differs from the current
+`pendingFocus` (`sameFocus()` compares callsign+lat+lon), claims the
+camera immediately and resets `focusPopupDone`/`focusPopupAttempts` so
+the existing bounded-retry `$effect` from invariant #67 picks up the new
+target exactly as it does on first mount. `push()`
+(`svelte-spa-router`) and every direct `window.location.hash = href`
+assignment in this codebase (`stationAlertsTransport.js`,
+`stationNewTransport.js`, `osNotify.js`'s click callbacks) both fire a
+native `hashchange` event even when the target document/route doesn't
+change, so this one listener catches every delivery path.
+
+*Why documented as an invariant:* like #66/#67, this is silent (no
+error, the map just doesn't move) and only reproduces when the operator
+is *already* on `/map` looking at a different station -- exactly the
+"got a second notification while investigating the first one" case that
+real usage hits constantly but a fresh-navigation manual test doesn't.
+Any component that reads `window.location.hash` (or router-provided
+`params`/`querystring`) once at setup to drive one-shot behavior should
+ask whether a same-route hash change needs to re-trigger that behavior
+too, and if so, listen for `hashchange` rather than assuming a route
+change remounts the component.
+
+**Follow-up (same day):** the fix above updates `pendingFocus` on a new
+focus link, but did nothing when the operator manually recentered the
+map (the "Center on my station" / "Reset to default view" buttons) --
+`pendingFocus` and the `?focus=` URL both stayed pointed at whatever
+deep-link brought them there. No confirmed live re-trigger existed once
+`focusPopupDone` was true (the retry effect from #67 is a no-op past
+that point), but leaving stale `?focus=` state in the URL after an
+explicit manual recenter is itself wrong -- the operator flagged the URL
+not updating as suspicious ("I guess next time the station beacons I go
+back to them"). Both recenter handlers now call a `clearFocus()` helper
+first: it nulls `pendingFocus`, forces `focusPopupDone = true`, and
+strips `?focus=...` back to a plain `#/map` (only when a focus param is
+actually present, so a plain recenter with no prior deep-link doesn't
+add a needless history entry). A manual recenter now always fully wins.
+
+**Second follow-up (same day):** `clearFocus()` alone didn't fully
+resolve the operator's underlying complaint. Clicking either recenter
+button while a station's popup was open left that popup, and the
+hover-path line it pins (`activePopup`'s `'close'` handler clears
+`hoverPathLayer`, but only when the popup actually closes), sitting on
+screen after the camera moved away -- "it needs to release the mouse
+click on them because lines showing the path is still there." `clearFocus()`
+now also calls the existing `closePopup()` helper, which fires that
+`'close'` handler and clears the hover-path line as a side effect. Both
+follow-ups landed in `clearFocus()` because they're the same category of
+bug: state pointing at "some other station" that a manual recenter must
+fully release, not just the camera position.
+
+Source: [`../../web/src/lib/map/focus-hash-core.js`](../../web/src/lib/map/focus-hash-core.js)
+(`parseFocusHash`, `sameFocus` -- pure, unit-tested in
+`focus-hash-core.test.js`), [`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
+(`pendingFocus`, `handleFocusHashChange`, the `onMount`/`onDestroy`
+listener registration), `node_modules/svelte-spa-router/Router.svelte`
+(`push()`'s `window.location.hash` assignment, the `<svelte:component>`
+render).

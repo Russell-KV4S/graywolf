@@ -39,6 +39,7 @@
     { path: '/terminal', label: 'Terminal', svgIcon: 'terminal', badge: 'terminal' },
     { path: '/actions', label: 'Actions', svgIcon: 'zap' },
     { path: '/logs', label: 'APRS Logs', svgIcon: 'logs' },
+    { path: '/notifications-log', label: 'Notifications Log', svgIcon: 'notifications-log' },
     { path: '/system-logs', label: 'System Logs', svgIcon: 'system-logs' },
   ];
 
@@ -274,6 +275,21 @@
                 <path d="M14 3v5h5" />
                 <line x1="9" y1="13" x2="15" y2="13" />
                 <line x1="9" y1="17" x2="15" y2="17" />
+              </svg>
+            {:else if item.svgIcon === 'notifications-log'}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+                <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
               </svg>
             {:else if item.svgIcon === 'system-logs'}
               <svg

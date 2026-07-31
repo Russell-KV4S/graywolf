@@ -200,8 +200,24 @@ const (
 
 // Stations — /api/stations.
 const (
-	OpListStations       = "listStations"
-	OpListStationAlerts  = "listStationAlerts"
+	OpListStations      = "listStations"
+	OpListStationAlerts = "listStationAlerts"
+	OpListStationRoster = "listStationRoster"
+)
+
+// Favorite stations — /api/stations/favorites. Grouped separately from
+// the read-only /api/stations block above since this is a CRUD resource.
+const (
+	OpListFavoriteStations  = "listFavoriteStations"
+	OpCreateFavoriteStation = "createFavoriteStation"
+	OpDeleteFavoriteStation = "deleteFavoriteStation"
+)
+
+// Excluded stations — /api/stations/exclusions.
+const (
+	OpListExcludedStations  = "listExcludedStations"
+	OpCreateExcludedStation = "createExcludedStation"
+	OpDeleteExcludedStation = "deleteExcludedStation"
 )
 
 // Station config — /api/station/config. Singleton holding the station

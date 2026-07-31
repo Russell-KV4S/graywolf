@@ -307,6 +307,8 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	s.registerMessagesConfig(mux)
 	s.registerBulletins(mux)
 	s.registerMessagesBlocklist(mux)
+	s.registerStationFavorites(mux)
+	s.registerStationExclusions(mux)
 	s.registerAX25Terminal(mux)
 	s.registerAX25TerminalConfig(mux)
 	s.registerAX25Profiles(mux)

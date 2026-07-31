@@ -24,7 +24,22 @@ import {
   fallbackPresetId,
 } from './notification-sound-core.js';
 
-const DEFAULT_PRESET = { message: 'aprs-message', bulletin: 'aprs-bulletin', stationEmergency: 'emergency-mp3' };
+// stationNew/stationFavorite default to the quietest built-in presets
+// (ping/chime, both peak gain 0.25) rather than one of the shipped
+// wav/mp3 files -- a new-station notification can fire far more often
+// than a message/bulletin/Emergency on a busy network, so it's meant to
+// be a subtle aside, not something that competes with the louder shipped
+// defaults. The two use different presets purely so a favorite is
+// audibly distinguishable from a plain new-station hit without either
+// one being loud -- favorite gets the (slightly more present) two-tone
+// chime since it's the rarer, more-wanted event of the two.
+const DEFAULT_PRESET = {
+  message: 'aprs-message',
+  bulletin: 'aprs-bulletin',
+  stationEmergency: 'emergency-mp3',
+  stationNew: 'ping',
+  stationFavorite: 'chime',
+};
 const LS_PREFIX = 'gw-notification-sound-';
 
 export { MAX_SOUND_BYTES };
@@ -176,4 +191,6 @@ export const notificationSoundState = {
   message: makeKindState('message'),
   bulletin: makeKindState('bulletin'),
   stationEmergency: makeKindState('stationEmergency'),
+  stationNew: makeKindState('stationNew'),
+  stationFavorite: makeKindState('stationFavorite'),
 };

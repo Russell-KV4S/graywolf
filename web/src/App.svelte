@@ -11,6 +11,9 @@
   import { start as startMessagesTransport } from './lib/messagesTransport.js';
   import { start as startBulletinsTransport } from './lib/bulletinsTransport.js';
   import { start as startStationAlertsTransport } from './lib/stationAlertsTransport.js';
+  import { start as startStationNewTransport } from './lib/stationNewTransport.js';
+  import { favoriteStationsStore } from './lib/favoriteStationsStore.svelte.js';
+  import { excludedStationsStore } from './lib/excludedStationsStore.svelte.js';
   import { releaseNotes } from './lib/releaseNotesStore.svelte.js';
   import { unitsState } from './lib/settings/units-store.svelte.js';
   import { themeState } from './lib/settings/theme-store.svelte.js';
@@ -30,6 +33,7 @@
   import Simulation from './routes/Simulation.svelte';
   import PositionLog from './routes/PositionLog.svelte';
   import Logs from './routes/Logs.svelte';
+  import NotificationsLog from './routes/NotificationsLog.svelte';
   import SystemLogs from './routes/SystemLogs.svelte';
   import LiveMapV2 from './routes/LiveMapV2.svelte';
   import About from './routes/About.svelte';
@@ -66,6 +70,7 @@
     '/simulation': Simulation,
     '/position-log': PositionLog,
     '/logs': Logs,
+    '/notifications-log': NotificationsLog,
     '/system-logs': SystemLogs,
     '/preferences': Preferences,
     '/preferences/maps': MapsSettings,
@@ -151,6 +156,12 @@
       startMessagesTransport();
       startBulletinsTransport();
       startStationAlertsTransport();
+      startStationNewTransport();
+      // Prime the favorites/exclusions lists up front so the map popup's
+      // star state is correct as soon as the operator opens it, rather
+      // than waiting for stationNewTransport.js's first poll.
+      favoriteStationsStore.load();
+      excludedStationsStore.load();
       // Watch for the server build changing underneath this tab (operator
       // upgraded graywolf) and surface a reload banner. Idempotent.
       serverVersion.start();

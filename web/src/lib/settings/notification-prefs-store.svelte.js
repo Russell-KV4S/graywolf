@@ -20,13 +20,58 @@
 // sound while leaving the others alone. Gates messagesTransport.js's
 // maybeNotifyInbound, bulletinsTransport.js's poll(), and
 // stationAlertsTransport.js's poll() ahead of the toast/OS/sound calls.
+//
+// stationNewEnabled (new-station-heard) is the one exception: it defaults
+// OFF. A busy APRS-IS-gated system can hear a genuinely new callsign every
+// few minutes, so unlike a DM/bulletin/Emergency this type would otherwise
+// start spamming every existing install the moment this feature ships.
+// Gates stationNewTransport.js's poll().
+//
+// stationFavoriteEnabled is independent of stationNewEnabled -- an
+// operator can turn the general "new station" firehose off and keep just
+// favorite-station notifications on (or vice versa). Defaults ON: unlike
+// stationNewEnabled, it's harmless by default since it only ever fires
+// for a callsign the operator deliberately added to their favorites list
+// (see favoriteStationsStore.svelte.js) -- an empty list means it never
+// fires at all.
+//
+// stationNewThresholdSecs is shared by both: a station (favorite or not)
+// only counts as "new" again after this much time has passed since this
+// device last recorded hearing it -- see station-new-diff-core.js.
+//
+// stationNewIncludeWeather is a general-path-only filter, off by default:
+// weather stations (StationRosterDTO.is_weather_station) are excluded
+// from the general "new station" notification unless the operator opts
+// in ("some may want to see weather stations", 2026-07-31 -- so this is
+// a toggle, not an unconditional exclusion like the digipeater filter).
+// Never applied to the favorites path -- an operator can still favorite
+// a specific weather station.
 
-import { parseMode, parseEnabledFlag, resolveModeAfterPermission } from './notification-prefs-core.js';
+import {
+  parseMode,
+  parseEnabledFlag,
+  resolveModeAfterPermission,
+  parseStationNewThresholdSecs,
+  DEFAULT_STATION_NEW_THRESHOLD_SECS,
+} from './notification-prefs-core.js';
+
+export {
+  STATION_NEW_THRESHOLDS,
+  stationNewThresholdMs,
+  isPresetThresholdSecs,
+  secsToCustomInput,
+  customInputToSecs,
+  MAX_CUSTOM_THRESHOLD_SECS,
+} from './notification-prefs-core.js';
 
 const LS_MODE = 'gw-notification-mode';
 const LS_MESSAGE_ENABLED = 'gw-notification-message-enabled';
 const LS_BULLETIN_ENABLED = 'gw-notification-bulletin-enabled';
 const LS_STATION_EMERGENCY_ENABLED = 'gw-notification-station-emergency-enabled';
+const LS_STATION_NEW_ENABLED = 'gw-notification-station-new-enabled';
+const LS_STATION_FAVORITE_ENABLED = 'gw-notification-station-favorite-enabled';
+const LS_STATION_NEW_THRESHOLD_SECS = 'gw-notification-station-new-threshold-secs';
+const LS_STATION_NEW_INCLUDE_WEATHER = 'gw-notification-station-new-include-weather';
 
 function readMode() {
   try {
@@ -44,11 +89,11 @@ function writeMode(v) {
   }
 }
 
-function readEnabled(key) {
+function readEnabled(key, def = true) {
   try {
-    return parseEnabledFlag(localStorage.getItem(key));
+    return parseEnabledFlag(localStorage.getItem(key), def);
   } catch {
-    return true;
+    return def;
   }
 }
 
@@ -60,11 +105,23 @@ function writeEnabled(key, v) {
   }
 }
 
+function readThresholdSecs() {
+  try {
+    return parseStationNewThresholdSecs(localStorage.getItem(LS_STATION_NEW_THRESHOLD_SECS));
+  } catch {
+    return DEFAULT_STATION_NEW_THRESHOLD_SECS;
+  }
+}
+
 export const notificationPrefsState = (() => {
   let mode = $state(readMode());
   let messageEnabled = $state(readEnabled(LS_MESSAGE_ENABLED));
   let bulletinEnabled = $state(readEnabled(LS_BULLETIN_ENABLED));
   let stationEmergencyEnabled = $state(readEnabled(LS_STATION_EMERGENCY_ENABLED));
+  let stationNewEnabled = $state(readEnabled(LS_STATION_NEW_ENABLED, false));
+  let stationFavoriteEnabled = $state(readEnabled(LS_STATION_FAVORITE_ENABLED, true));
+  let stationNewThresholdSecs = $state(readThresholdSecs());
+  let stationNewIncludeWeather = $state(readEnabled(LS_STATION_NEW_INCLUDE_WEATHER, false));
   const supported = typeof window !== 'undefined' && typeof Notification !== 'undefined';
 
   return {
@@ -92,6 +149,18 @@ export const notificationPrefsState = (() => {
     get stationEmergencyEnabled() {
       return stationEmergencyEnabled;
     },
+    get stationNewEnabled() {
+      return stationNewEnabled;
+    },
+    get stationFavoriteEnabled() {
+      return stationFavoriteEnabled;
+    },
+    get stationNewThresholdSecs() {
+      return stationNewThresholdSecs;
+    },
+    get stationNewIncludeWeather() {
+      return stationNewIncludeWeather;
+    },
     setMessageEnabled(v) {
       messageEnabled = !!v;
       writeEnabled(LS_MESSAGE_ENABLED, messageEnabled);
@@ -103,6 +172,26 @@ export const notificationPrefsState = (() => {
     setStationEmergencyEnabled(v) {
       stationEmergencyEnabled = !!v;
       writeEnabled(LS_STATION_EMERGENCY_ENABLED, stationEmergencyEnabled);
+    },
+    setStationNewEnabled(v) {
+      stationNewEnabled = !!v;
+      writeEnabled(LS_STATION_NEW_ENABLED, stationNewEnabled);
+    },
+    setStationFavoriteEnabled(v) {
+      stationFavoriteEnabled = !!v;
+      writeEnabled(LS_STATION_FAVORITE_ENABLED, stationFavoriteEnabled);
+    },
+    setStationNewThresholdSecs(secs) {
+      stationNewThresholdSecs = parseStationNewThresholdSecs(String(secs));
+      try {
+        localStorage.setItem(LS_STATION_NEW_THRESHOLD_SECS, String(stationNewThresholdSecs));
+      } catch {
+        /* ignore */
+      }
+    },
+    setStationNewIncludeWeather(v) {
+      stationNewIncludeWeather = !!v;
+      writeEnabled(LS_STATION_NEW_INCLUDE_WEATHER, stationNewIncludeWeather);
     },
     /**
      * Called from the Preferences mode picker. Requesting 'os'/'both'

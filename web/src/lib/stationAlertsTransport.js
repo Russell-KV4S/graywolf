@@ -21,6 +21,7 @@ import { notifications } from './notificationsStore.svelte.js';
 import { fireOsNotification } from './osNotify.js';
 import { notificationPrefsState } from './settings/notification-prefs-store.svelte.js';
 import { notificationSoundState } from './settings/notification-sound-store.svelte.js';
+import { notificationsLogStore } from './notificationsLogStore.svelte.js';
 
 const POLL_MS = 30_000;
 
@@ -51,15 +52,12 @@ async function poll() {
         // pkg/webapi/stations.go's listStationAlerts).
         const href = `#/map?focus=${encodeURIComponent(r.callsign)}&lat=${r.lat}&lon=${r.lon}`;
         const body = r.status_text || 'Emergency';
+        const title = `EMERGENCY: ${r.callsign}`;
+        notificationsLogStore.add({ kind: 'station-emergency', title, body, href });
         if (notificationPrefsState.toastEnabled) {
-          notifications.push({
-            kind: 'station-emergency',
-            title: `EMERGENCY: ${r.callsign}`,
-            body,
-            href,
-          });
+          notifications.push({ kind: 'station-emergency', title, body, href });
         }
-        fireOsNotification(`EMERGENCY: ${r.callsign}`, body, () => {
+        fireOsNotification(title, body, () => {
           window.location.hash = href;
         });
         notificationSoundState.stationEmergency.play();
