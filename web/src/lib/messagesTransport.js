@@ -287,3 +287,16 @@ export function refreshNow() {
   refreshConversations();
   fetchDelta().catch(() => {});
 }
+
+// Vite HMR: without this, editing this file (or anything it imports)
+// while `npm run dev` is running leaves the OLD module instance's
+// timers/EventSource running forever alongside the new one — started
+// never gets reset to false on the stale copy, so every edit stacks
+// another live poll loop, each independently firing its own
+// notifications for the same events (2026-08-01, found via
+// stationNewTransport.js's identical gap producing duplicate
+// notifications during a long dev-testing session). A production
+// build has no import.meta.hot, so this is a no-op there.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => stop());
+}

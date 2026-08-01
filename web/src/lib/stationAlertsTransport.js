@@ -85,3 +85,13 @@ export function stop() {
   clearInterval(timer);
   timer = null;
 }
+
+// Vite HMR: without this, editing this file (or anything it imports)
+// while `npm run dev` is running leaves the OLD module instance's
+// setInterval running forever alongside the new one, stacking duplicate
+// poll loops that each independently fire their own notifications for
+// the same event (2026-08-01, see stationNewTransport.js's identical fix
+// for the report that surfaced this). No-op in a production build.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => stop());
+}

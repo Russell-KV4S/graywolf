@@ -14,7 +14,16 @@
 // in the existing roster) so enabling this doesn't flood an existing
 // roster as if every station were brand new.
 //
-// Exclusions (excludedStationsStore) are checked FIRST, before anything
+// The operator's own station (own-station-core.js's isOwnStation, an
+// exact CALL[-SSID] match against the station's own configured callsign
+// plus any per-beacon callsign overrides -- NOT a base-callsign wildcard,
+// since a separate SSID under the same base call, e.g. a handheld, is a
+// genuinely different station the operator does want alerts for) is
+// checked before even exclusions -- "this is literally me" is more
+// certain than a deliberate exclusion-list entry, so it wins outright,
+// unconditionally, no toggle (2026-08-01).
+//
+// Exclusions (excludedStationsStore) are checked next, before anything
 // else -- an excluded callsign never notifies, full stop, even if it's
 // also a favorite (the more specific "no" wins). This is the manual
 // escape hatch for a station the digipeater/repeater/weather-station
@@ -47,7 +56,9 @@
 // per-type switches, matching the other transports' shape.
 
 import { listStationRoster } from '../api/stations.js';
+import { api } from './api.js';
 import { diffNewlyHeard } from './station-new-diff-core.js';
+import { buildOwnCallsignSet, isOwnStation } from './own-station-core.js';
 import { parseKnownStations, serializeKnownStations } from './known-stations-core.js';
 import { notifications } from './notificationsStore.svelte.js';
 import { fireOsNotification } from './osNotify.js';
@@ -113,6 +124,28 @@ function persistKnown() {
   safeSetItem(LS_KNOWN_KEY, JSON.stringify(serializeKnownStations(known)));
 }
 
+// The operator's own callsign(s), fetched once per page load (not every
+// 30s poll -- unlike favorites/exclusions, changing your own station
+// callsign is a rare admin action, not something to poll for). A fetch
+// failure leaves the set empty (fail-open: nothing gets suppressed by
+// mistake rather than everything).
+let ownCallsigns = new Set();
+let ownCallsignsLoaded = false;
+
+async function loadOwnCallsigns() {
+  try {
+    const [config, beacons] = await Promise.all([
+      api.get('/station/config').catch(() => null),
+      api.get('/beacons').catch(() => null),
+    ]);
+    ownCallsigns = buildOwnCallsignSet(config && config.callsign, beacons);
+  } catch {
+    ownCallsigns = new Set();
+  } finally {
+    ownCallsignsLoaded = true;
+  }
+}
+
 // Mirrors LiveMapV2.svelte's filter effect (RF reachability filter):
 // Direct RX Only is the stricter of the two and wins when both are on;
 // RF Only next; no filter otherwise. Read fresh from localStorage each
@@ -159,6 +192,7 @@ async function poll() {
       listStationRoster(),
       favoriteStationsStore.load(),
       excludedStationsStore.load(),
+      ownCallsignsLoaded ? Promise.resolve() : loadOwnCallsigns(),
     ]);
     const roster = rows || [];
 
@@ -189,6 +223,7 @@ async function poll() {
       // lat/lon required, not just callsign -- see stationAlertsTransport.js's
       // identical note; LiveMapV2.svelte's parseFocusFromHash() discards
       // the whole deep-link if either is missing/non-finite.
+      if (isOwnStation(ownCallsigns, row.callsign)) continue;
       if (excludedStationsStore.has(row.callsign)) continue;
 
       const href = `#/map?focus=${encodeURIComponent(row.callsign)}&lat=${row.lat}&lon=${row.lon}`;
@@ -224,4 +259,21 @@ export function stop() {
   started = false;
   clearInterval(timer);
   timer = null;
+}
+
+// Vite HMR: without this, editing this file (or anything it imports)
+// while `npm run dev` is running leaves the OLD module instance's
+// setInterval running forever alongside the new one -- `started` never
+// gets reset to false on the stale copy, so every edit during a live
+// dev-testing session stacks another concurrent poll loop, each with its
+// own in-memory `known`/`ownCallsigns` state racing to read/write the
+// same localStorage keys. Each stacked loop independently detects and
+// fires its own notification for the same station, which is exactly
+// what produced a burst of duplicate "New station: K4GTE-10" entries a
+// few seconds apart (2026-08-01) despite the per-station gap being well
+// under the configured threshold -- not a threshold-math bug, a stacked-
+// interval artifact from repeated edits to this file during one long
+// dev session. No-op in a production build (no import.meta.hot there).
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => stop());
 }

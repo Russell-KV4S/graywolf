@@ -102,7 +102,11 @@
     padding: 0;
     display: flex;
     flex-direction: column;
+    flex: none;
     gap: 4px;
+  }
+  .log-row-li {
+    flex: none;
   }
   .log-row {
     display: flex;
