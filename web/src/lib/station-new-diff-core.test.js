@@ -75,4 +75,41 @@ describe('diffNewlyHeard', () => {
     assert.deepEqual(diffNewlyHeard(known, [], HOUR_MS), []);
     assert.deepEqual(diffNewlyHeard(known, undefined, HOUR_MS), []);
   });
+
+  describe('resumeSinceMs (catch-up after the app was closed/suspended)', () => {
+    it('fires for a row heard at/after the resume cutoff, even under the per-station threshold', () => {
+      // Heard 5 min before "now" -- well under a 4h threshold -- but that
+      // 5-minute-old packet arrived entirely within the away window, so
+      // the operator never saw it: KV4S-7's reopen-after-a-few-hours report.
+      const known = new Map([['KV4S-7', T0]]);
+      const resumeSinceMs = T0 + 3 * HOUR_MS; // client resumed 3h after last recorded hearing
+      const roster = [row('KV4S-7', new Date(T0 + 3 * HOUR_MS + 5 * 60_000).toISOString())];
+      assert.deepEqual(diffNewlyHeard(known, roster, HOUR_MS * 4, resumeSinceMs), roster);
+    });
+
+    it('does not fire for a row heard before the resume cutoff (already known before the gap)', () => {
+      const known = new Map([['W1ABC-9', T0]]);
+      const resumeSinceMs = T0 + 3 * HOUR_MS;
+      // Heard 10 min before the client resumed -- i.e. the client should
+      // have caught it on a normal poll, this isn't a "missed it" case --
+      // and the per-station gap (just under 3h) is under the 4h threshold.
+      const roster = [row('W1ABC-9', new Date(resumeSinceMs - 10 * 60_000).toISOString())];
+      assert.deepEqual(diffNewlyHeard(known, roster, HOUR_MS * 4, resumeSinceMs), []);
+    });
+
+    it('does not repeatedly re-fire a continuously-active station once resumeSinceMs is null again', () => {
+      // Simulates the poll immediately after the catch-up one: the
+      // transport only passes a non-null resumeSinceMs on the single
+      // poll right after detecting a real gap.
+      const known = new Map([['KV4S-7', T0 + 3 * HOUR_MS + 5 * 60_000]]);
+      const roster = [row('KV4S-7', new Date(T0 + 3 * HOUR_MS + 6 * 60_000).toISOString())]; // 1 min later
+      assert.deepEqual(diffNewlyHeard(known, roster, HOUR_MS * 4, null), []);
+    });
+
+    it('is a no-op when resumeSinceMs is omitted (default behavior unchanged)', () => {
+      const known = new Map([['W1ABC-9', T0]]);
+      const roster = [row('W1ABC-9', '2026-07-31T00:30:00Z')];
+      assert.deepEqual(diffNewlyHeard(known, roster, HOUR_MS * 2), []);
+    });
+  });
 });

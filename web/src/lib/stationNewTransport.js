@@ -64,6 +64,15 @@ import { excludedStationsStore } from './excludedStationsStore.svelte.js';
 
 const POLL_MS = 30_000;
 const LS_KNOWN_KEY = 'gw-known-stations';
+const LS_LAST_POLL_KEY = 'gw-station-new-last-poll';
+
+// Anything longer than this between two polls means the app was closed,
+// backgrounded past the browser's throttle point, or the machine slept --
+// not just an ordinary 30s tick. Only then does the "missed while away"
+// catch-up in diffNewlyHeard() kick in (see its header comment / the
+// KV4S-7 report this fixes). Comfortably above POLL_MS so a normal tab
+// switch or brief tick never triggers it.
+const RESUME_GAP_MS = 5 * 60 * 1000;
 
 let timer = null;
 let started = false;
@@ -90,6 +99,15 @@ let known = parseKnownStations(safeGetItem(LS_KNOWN_KEY));
 // run this poll before -- distinguishes "grandfather the first batch"
 // from "genuinely knows about nothing" on a later, otherwise-empty poll.
 let hasBaseline = safeGetItem(LS_KNOWN_KEY) !== null;
+
+// Wall-clock time this client last completed a poll, persisted so a
+// fresh page load can tell "closed a few hours ago" apart from "just
+// reloaded a few seconds ago". null on a device that's never polled.
+let lastPollAtMs = (() => {
+  const raw = safeGetItem(LS_LAST_POLL_KEY);
+  const n = raw == null ? NaN : parseInt(raw, 10);
+  return Number.isFinite(n) ? n : null;
+})();
 
 function persistKnown() {
   safeSetItem(LS_KNOWN_KEY, JSON.stringify(serializeKnownStations(known)));
@@ -132,6 +150,11 @@ function fire(kind, title, body, href, soundState) {
 async function poll() {
   if (stopped) return;
   try {
+    const nowMs = Date.now();
+    const priorPollAtMs = lastPollAtMs;
+    lastPollAtMs = nowMs;
+    safeSetItem(LS_LAST_POLL_KEY, String(nowMs));
+
     const [rows] = await Promise.all([
       listStationRoster(),
       favoriteStationsStore.load(),
@@ -151,8 +174,15 @@ async function poll() {
       return;
     }
 
+    // Only treated as a real "I was away" gap on the first poll after a
+    // genuine absence -- priorPollAtMs is refreshed every poll, so this
+    // is null again 30s later and a continuously-active station can't
+    // re-trigger it every threshold interval.
+    const resumeSinceMs =
+      priorPollAtMs != null && nowMs - priorPollAtMs >= RESUME_GAP_MS ? priorPollAtMs : null;
+
     const thresholdMs = stationNewThresholdMs(notificationPrefsState.stationNewThresholdSecs);
-    const newly = diffNewlyHeard(known, roster, thresholdMs);
+    const newly = diffNewlyHeard(known, roster, thresholdMs, resumeSinceMs);
     persistKnown();
 
     for (const row of newly) {
