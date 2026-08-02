@@ -38,6 +38,7 @@
   import { parseFocusHash, sameFocus } from '../lib/map/focus-hash-core.js';
   import { boundsAroundMiles, MIN_VIEW_RADIUS_MILES, MAX_VIEW_RADIUS_MILES } from '../lib/map/view-radius-core.js';
   import { favoriteStationsStore } from '../lib/favoriteStationsStore.svelte.js';
+  import { excludedStationsStore } from '../lib/excludedStationsStore.svelte.js';
   import { unitsState } from '../lib/settings/units-store.svelte.js';
   import { mapState, MY_POSITION_ZOOM, WORLD_CENTER, WORLD_ZOOM } from '../lib/map/map-store.svelte.js';
   import {
@@ -547,6 +548,7 @@
     const html = renderStationPopupHTML(station, {
       hasStation: (callsign) => dataStore.stations.has(callsign),
       isFavorite: favoriteStationsStore.has(station.callsign),
+      isExcluded: excludedStationsStore.has(station.callsign),
     });
 
     activePopup = new maplibregl.Popup({
@@ -587,6 +589,16 @@
             // Guard against this exact popup having been closed, or
             // replaced by a different station's popup, while the request
             // was in flight.
+            if (activePopup === thisPopup) openStationPopup(map, station);
+          });
+          return;
+        }
+        const exclBtn = ev.target && ev.target.closest && ev.target.closest('.stn-exclude-btn');
+        if (exclBtn) {
+          ev.preventDefault();
+          const callsign = exclBtn.dataset.callsign;
+          if (!callsign) return;
+          excludedStationsStore.toggle(callsign).then(() => {
             if (activePopup === thisPopup) openStationPopup(map, station);
           });
           return;
@@ -2425,9 +2437,11 @@
     text-decoration: none;
     outline: none;
   }
-  /* .stn-fav-btn is a <button>, unlike the other .stn-action rows'
-     <a> tags -- reset default button chrome so it matches them. */
-  :global(button.stn-fav-btn) {
+  /* .stn-fav-btn and .stn-exclude-btn are <button>s, unlike the other
+     .stn-action rows' <a> tags -- reset default button chrome so they
+     match them. */
+  :global(button.stn-fav-btn),
+  :global(button.stn-exclude-btn) {
     width: 100%;
     background: none;
     border: none;
@@ -2437,6 +2451,10 @@
   :global(.stn-fav-btn.is-favorite),
   :global(.stn-fav-btn.is-favorite .stn-action-icon) {
     color: #e0a72e;
+  }
+  :global(.stn-exclude-btn.is-excluded),
+  :global(.stn-exclude-btn.is-excluded .stn-action-icon) {
+    color: var(--color-danger, #e5534b);
   }
   :global(.stn-weather) { font-size: 12px; }
   :global(.stn-weather-row) {

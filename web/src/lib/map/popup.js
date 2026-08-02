@@ -16,7 +16,10 @@ import { unitsState } from '../settings/units-store.svelte.js';
 // isFavorite is whether this callsign is currently on the operator's
 // favorites list (favoriteStationsStore) -- drives the star action's
 // filled/outline state.
-export function renderStationPopupHTML(s, { hasStation = null, isFavorite = false } = {}) {
+// isExcluded is whether this callsign is currently on the operator's
+// excluded-stations list (excludedStationsStore) -- drives the
+// exclude action's "Exclude"/"Excluded" label and pressed state.
+export function renderStationPopupHTML(s, { hasStation = null, isFavorite = false, isExcluded = false } = {}) {
   const pos = s.positions && s.positions[0];
   if (!pos) return '';
 
@@ -111,7 +114,7 @@ export function renderStationPopupHTML(s, { hasStation = null, isFavorite = fals
     html += `<div class="stn-comment">${esc(s.comment)}</div>`;
   }
 
-  const actions = renderStationActionsHTML(s, { isFavorite });
+  const actions = renderStationActionsHTML(s, { isFavorite, isExcluded });
   if (actions) {
     html += `<div class="stn-sep"></div>`;
     html += actions;
@@ -182,19 +185,32 @@ function iconStar(filled) {
   );
 }
 
-// renderStationActionsHTML(station, { isFavorite }) -> HTML string (or '' to suppress)
+// lucide "bell-off" — the exclude-from-notifications toggle. Excluding a
+// station on excludedStationsStore stops it from ever raising a
+// new-station or favorite notification (stationNewTransport.js checks
+// excludedStationsStore.has() before either notification path), so the
+// bell-with-a-slash reads as "notifications off for this station".
+const ICON_EXCLUDE = icon(
+  '<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/>' +
+    '<path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"/>' +
+    '<path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>' +
+    '<path d="m2 2 20 20"/>'
+);
+
+// renderStationActionsHTML(station, { isFavorite, isExcluded }) -> HTML string (or '' to suppress)
 //
 // Action rows shown for a real heard station: open a direct message thread,
 // view the APRS packet log filtered to this callsign, a QRZ database
-// lookup, and a favorites star toggle. APRS objects/items aren't operators
-// you can work, so they get no actions. Messages and Logs are internal
-// hash routes; QRZ is the one external link (opens in a new tab); the
-// star is a <button> (not a link -- it mutates state via
-// favoriteStationsStore rather than navigating), wired up by
+// lookup, a favorites star toggle, and an exclude-from-notifications
+// toggle. APRS objects/items aren't operators you can work, so they get no
+// actions. Messages and Logs are internal hash routes; QRZ is the one
+// external link (opens in a new tab); the star and bell-off buttons are
+// <button>s (not links -- they mutate state via favoriteStationsStore /
+// excludedStationsStore rather than navigating), wired up by
 // LiveMapV2.svelte's popup click delegation the same way .path-link
 // clicks are. Styled to match the map right-click context menu -- icon +
 // label rows with a hover tint (see .stn-action in LiveMapV2.svelte).
-export function renderStationActionsHTML(s, { isFavorite = false } = {}) {
+export function renderStationActionsHTML(s, { isFavorite = false, isExcluded = false } = {}) {
   const call = s.callsign;
   if (!call || s.is_object) return '';
 
@@ -214,6 +230,10 @@ export function renderStationActionsHTML(s, { isFavorite = false } = {}) {
     `<button type="button" class="stn-action stn-fav-btn${isFavorite ? ' is-favorite' : ''}" role="menuitem" ` +
     `data-callsign="${esc(upper)}" aria-pressed="${isFavorite}">${iconStar(isFavorite)}` +
     `<span class="stn-action-label">${isFavorite ? 'Favorited' : 'Favorite'}</span></button>`;
+  html +=
+    `<button type="button" class="stn-action stn-exclude-btn${isExcluded ? ' is-excluded' : ''}" role="menuitem" ` +
+    `data-callsign="${esc(upper)}" aria-pressed="${isExcluded}">${ICON_EXCLUDE}` +
+    `<span class="stn-action-label">${isExcluded ? 'Excluded' : 'Exclude'}</span></button>`;
   html += `</div>`;
   return html;
 }

@@ -58,6 +58,16 @@ class ExcludedStationsStore {
     await deleteStationExclusion(id);
     await this.load();
   }
+
+  /** Convenience for the map popup exclude toggle: add or remove by callsign. */
+  async toggle(callsign) {
+    const existing = this.find(callsign);
+    if (existing) {
+      await this.remove(existing.id);
+    } else {
+      await this.add(callsign);
+    }
+  }
 }
 
 export const excludedStationsStore = new ExcludedStationsStore();
