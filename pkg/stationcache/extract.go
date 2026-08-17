@@ -39,7 +39,11 @@ type CacheEntry struct {
 	StatusCode int
 	StatusText string
 	Weather    *Weather
-	Timestamp  time.Time
+	// Device is APRS device identification (manufacturer, model) inferred
+	// from the TOCALL field, or the Mic-E manufacturer byte as a fallback.
+	// Nil when neither source resolves to a known device.
+	Device    *aprs.DeviceInfo
+	Timestamp time.Time
 }
 
 // ExtractEntry converts a decoded APRS packet into cache update(s).
@@ -91,7 +95,7 @@ func ExtractEntry(decoded *aprs.DecodedAPRSPacket, source, dir string, ch uint32
 		// Also emit a station entry for the originator if we have
 		// a top-level position (rare but possible in some encodings).
 		if pkt.Position != nil {
-			entries = append(entries, buildStationEntry(pkt.Source, pkt.Position, pkt.Comment, via, path, hops, dir, gated, ch, ts, pkt.Weather, pkt.MicE, pkt.Status))
+			entries = append(entries, buildStationEntry(pkt.Source, pkt.Position, pkt.Comment, via, path, hops, dir, gated, ch, ts, pkt.Weather, pkt.MicE, pkt.Status, deviceFor(pkt)))
 		}
 		return entries
 	}
@@ -108,7 +112,7 @@ func ExtractEntry(decoded *aprs.DecodedAPRSPacket, source, dir string, ch uint32
 	// Normal station packet — position may come from Position field
 	// (includes Mic-E, which the parser copies to pkt.Position).
 	if pkt.Position != nil || pkt.Weather != nil {
-		entries = append(entries, buildStationEntry(pkt.Source, pkt.Position, pkt.Comment, via, path, hops, dir, gated, ch, ts, pkt.Weather, pkt.MicE, pkt.Status))
+		entries = append(entries, buildStationEntry(pkt.Source, pkt.Position, pkt.Comment, via, path, hops, dir, gated, ch, ts, pkt.Weather, pkt.MicE, pkt.Status, deviceFor(pkt)))
 		return entries
 	}
 
@@ -119,14 +123,30 @@ func ExtractEntry(decoded *aprs.DecodedAPRSPacket, source, dir string, ch uint32
 	// position/trail. An unknown station is skipped (nowhere to plot
 	// it, same rule the weather-only case follows in MemCache.Update).
 	if pkt.Status != "" {
-		entries = append(entries, buildStationEntry(pkt.Source, nil, pkt.Comment, via, path, hops, dir, gated, ch, ts, nil, pkt.MicE, pkt.Status))
+		entries = append(entries, buildStationEntry(pkt.Source, nil, pkt.Comment, via, path, hops, dir, gated, ch, ts, nil, pkt.MicE, pkt.Status, deviceFor(pkt)))
 		return entries
 	}
 
 	return nil
 }
 
-func buildStationEntry(callsign string, pos *aprs.Position, comment, via string, path []string, hops int, dir string, gated bool, ch uint32, ts time.Time, wx *aprs.Weather, mic *aprs.MicE, status string) CacheEntry {
+// deviceFor resolves APRS device identification for a station packet,
+// preferring the AX.25 destination (TOCALL) lookup and falling back to
+// the Mic-E manufacturer byte when the tocall pattern is unrecognized.
+// Mirrors webapi.enrichPacket's packet-log device resolution, but keyed
+// off the already-unwrapped (third-party-resolved) packet so a gated
+// station's own device shows, not the gating IGate's.
+func deviceFor(pkt *aprs.DecodedAPRSPacket) *aprs.DeviceInfo {
+	if dev := aprs.LookupTocall(pkt.Dest); dev != nil {
+		return dev
+	}
+	if pkt.MicE != nil && pkt.MicE.Manufacturer != "" {
+		return &aprs.DeviceInfo{Model: pkt.MicE.Manufacturer}
+	}
+	return nil
+}
+
+func buildStationEntry(callsign string, pos *aprs.Position, comment, via string, path []string, hops int, dir string, gated bool, ch uint32, ts time.Time, wx *aprs.Weather, mic *aprs.MicE, status string, device *aprs.DeviceInfo) CacheEntry {
 	e := CacheEntry{
 		Key:        "stn:" + callsign,
 		Callsign:   callsign,
@@ -138,6 +158,7 @@ func buildStationEntry(callsign string, pos *aprs.Position, comment, via string,
 		Channel:    ch,
 		Comment:    comment,
 		StatusCode: -1,
+		Device:     device,
 		Timestamp:  ts,
 	}
 	switch {

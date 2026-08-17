@@ -90,6 +90,64 @@ func TestExtractEntry_NoCourse(t *testing.T) {
 	assertBool(t, "HasCourse", entries[0].HasCourse, false)
 }
 
+func TestExtractEntry_DeviceFromTocall(t *testing.T) {
+	pkt := &aprs.DecodedAPRSPacket{
+		Source: "W1ABC-9",
+		Dest:   "APAT51", // AnyTone AT-D578 in the tocall table
+		Position: &aprs.Position{
+			Latitude:  40.0,
+			Longitude: -105.0,
+			Symbol:    aprs.Symbol{Table: '/', Code: '>'},
+		},
+	}
+	entries := ExtractEntry(pkt, "modem", "RX", 0)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	dev := entries[0].Device
+	if dev == nil {
+		t.Fatal("expected Device to be resolved from tocall, got nil")
+	}
+	assertEqual(t, "Device.Vendor", dev.Vendor, "AnyTone")
+	assertEqual(t, "Device.Model", dev.Model, "AT-D578")
+}
+
+func TestExtractEntry_DeviceFromMicEFallback(t *testing.T) {
+	pkt := &aprs.DecodedAPRSPacket{
+		Source: "W1ABC-9",
+		Dest:   "N0CALL", // not a recognized tocall pattern
+		Position: &aprs.Position{
+			Latitude:  40.0,
+			Longitude: -105.0,
+			Symbol:    aprs.Symbol{Table: '/', Code: '>'},
+		},
+		MicE: &aprs.MicE{Manufacturer: "Some Mic-E Radio"},
+	}
+	entries := ExtractEntry(pkt, "modem", "RX", 0)
+	dev := entries[0].Device
+	if dev == nil {
+		t.Fatal("expected Device to fall back to Mic-E manufacturer, got nil")
+	}
+	assertEqual(t, "Device.Model", dev.Model, "Some Mic-E Radio")
+	assertEqual(t, "Device.Vendor", dev.Vendor, "")
+}
+
+func TestExtractEntry_DeviceUnknown(t *testing.T) {
+	pkt := &aprs.DecodedAPRSPacket{
+		Source: "W1ABC-9",
+		Dest:   "N0CALL",
+		Position: &aprs.Position{
+			Latitude:  40.0,
+			Longitude: -105.0,
+			Symbol:    aprs.Symbol{Table: '/', Code: '>'},
+		},
+	}
+	entries := ExtractEntry(pkt, "modem", "RX", 0)
+	if entries[0].Device != nil {
+		t.Fatalf("expected nil Device for unrecognized tocall with no Mic-E fallback, got %+v", entries[0].Device)
+	}
+}
+
 func TestExtractEntry_Object(t *testing.T) {
 	pkt := &aprs.DecodedAPRSPacket{
 		Source: "W1ABC",

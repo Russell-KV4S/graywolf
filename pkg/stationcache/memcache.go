@@ -301,6 +301,12 @@ func updateMetadata(s *Station, e *CacheEntry, now time.Time) {
 	s.Comment = e.Comment
 	s.StatusCode = e.StatusCode
 	s.StatusText = e.StatusText
+	// Only overwrite from a packet that actually resolved a device, so an
+	// unrecognized tocall on a later packet can't blank a previously
+	// identified device (mirrors the Source guard above).
+	if e.Device != nil {
+		s.Device = e.Device
+	}
 	s.LastHeard = now
 	if isDirectRF(e.Direction, e.Hops) {
 		s.LastDirectHeard = e.Timestamp

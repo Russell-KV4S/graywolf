@@ -2362,6 +2362,10 @@
   :global(.stn-hdr) { display: flex; align-items: center; gap: 8px; }
   :global(.stn-call) { color: #d4a040; font-size: 13px; font-weight: 700; }
   :global(.stn-sub) { color: var(--color-text-dim); font-size: 11px; margin-top: 2px; }
+  /* Device identification line (vendor/model/class inferred from TOCALL),
+     e.g. "Device: Yaesu: FT5D (ht)". Sits with the other sub-header
+     metadata, same weight as .stn-sub. */
+  :global(.stn-device) { color: var(--color-text-dim); font-size: 11px; margin-top: 2px; }
   /* Object/item "from CALLSIGN" line: the originating station beneath the
      object name. Sits directly under the title so source reads first,
      distinct from the relay path (.stn-via / .stn-path) shown lower down. */

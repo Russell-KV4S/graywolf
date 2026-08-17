@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chrissnell/graywolf/pkg/aprs"
 	"github.com/chrissnell/graywolf/pkg/stationcache"
 )
 
@@ -68,6 +69,8 @@ type StationDTO struct {
 	StatusText string `json:"status_text,omitempty"`
 	// Weather is optional weather telemetry; present only when include=weather is requested and the station reports weather.
 	Weather *WeatherDTO `json:"weather,omitempty"`
+	// Device is APRS device identification (manufacturer, model) inferred from the most recent packet's TOCALL (or Mic-E manufacturer byte as a fallback); omitted when unknown.
+	Device *aprs.DeviceInfo `json:"device,omitempty"`
 }
 
 // StationPosDTO is a single position fix in the station wire format.
@@ -596,6 +599,7 @@ func stationToDTO(s stationcache.Station, isDelta, includeWeather bool, digiPos 
 		Comment:         s.Comment,
 		StatusCode:      s.StatusCode,
 		StatusText:      s.StatusText,
+		Device:          s.Device,
 	}
 
 	// Positions — delta mode returns only positions[0]

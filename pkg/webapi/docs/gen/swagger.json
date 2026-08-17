@@ -12278,6 +12278,14 @@
                     "description": "Comment is the free-form comment field from the most recent packet.",
                     "type": "string"
                 },
+                "device": {
+                    "description": "Device is APRS device identification (manufacturer, model) inferred from the most recent packet's TOCALL (or Mic-E manufacturer byte as a fallback); omitted when unknown.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/aprs.DeviceInfo"
+                        }
+                    ]
+                },
                 "direction": {
                     "description": "Direction indicates the source of the most recent packet: \"RX\" (heard on air), \"TX\" (sent by us), or \"IS\" (APRS-IS).",
                     "type": "string"

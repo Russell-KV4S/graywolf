@@ -3801,6 +3801,8 @@ export interface components {
             channel?: number;
             /** @description Comment is the free-form comment field from the most recent packet. */
             comment?: string;
+            /** @description Device is APRS device identification (manufacturer, model) inferred from the most recent packet's TOCALL (or Mic-E manufacturer byte as a fallback); omitted when unknown. */
+            device?: components["schemas"]["aprs.DeviceInfo"];
             /** @description Direction indicates the source of the most recent packet: "RX" (heard on air), "TX" (sent by us), or "IS" (APRS-IS). */
             direction?: string;
             /** @description Gated is true when the most recent packet reached us as Internet-to-RF gated traffic (the inner packet of a third-party gate) rather than heard directly on RF. */

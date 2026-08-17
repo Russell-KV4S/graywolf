@@ -1,6 +1,10 @@
 package stationcache
 
-import "time"
+import (
+	"time"
+
+	"github.com/chrissnell/graywolf/pkg/aprs"
+)
 
 // StationStore is the read interface consumed by the API handler.
 // MemCache implements it for RF-scale traffic; a future DB-backed
@@ -61,6 +65,10 @@ type Station struct {
 	StatusCode int
 	StatusText string
 	Weather    *Weather // nil if not a weather station
+	// Device is APRS device identification (manufacturer, model) inferred
+	// from the most recent packet's TOCALL (or Mic-E manufacturer byte as
+	// a fallback). Nil when neither source resolves to a known device.
+	Device    *aprs.DeviceInfo
 	LastHeard time.Time
 	// LastDirectHeard is the timestamp of the most recent reception heard
 	// directly on RF (RX, zero digi hops). Set only by direct receptions and
