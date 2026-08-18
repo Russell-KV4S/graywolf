@@ -103,6 +103,16 @@ func matches(r Rule, pkt *aprs.DecodedAPRSPacket) bool {
 		if pkt.Message == nil {
 			return false
 		}
+		// A bare `*` means "any addressee". Unlike a broad source-side
+		// rule, this cannot flood RF: the hardcoded tier-1 heard-direct
+		// check (shouldForwardISToRF) already restricts directed-message
+		// delivery to stations physically heard directly on RF within
+		// heardDirectTTL, so the blast radius is bounded by radio
+		// reality. It lets an operator express the textbook iGate
+		// behavior — "deliver to whoever we just heard" — in one rule.
+		if strings.TrimSpace(r.Pattern) == "*" {
+			return true
+		}
 		return matchPattern(r.Pattern, pkt.Message.Addressee)
 	case TypeObject:
 		name := ""

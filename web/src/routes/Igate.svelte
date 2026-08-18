@@ -34,6 +34,7 @@
   // refreshed after every successful save.
   let savedConfig = $state(/** @type {null | object} */ (null));
   let enableSaving = $state(false);
+  let gateIsToRfSaving = $state(false);
 
   // Station callsign (read-only on this page). Loaded alongside the
   // iGate config; failure is non-fatal — we treat a failed load as
@@ -181,8 +182,11 @@
                '`*` is not supported here and will be rejected on save.';
       case 'message_dest':
         return 'Matches the addressee of a message packet. Exact match by ' +
-               'default, or use a trailing `*` as a prefix wildcard ' +
-               '(e.g. NW5W-* matches any SSID of NW5W). See warning above.';
+               'default, a trailing `*` as a prefix wildcard (e.g. NW5W-* ' +
+               'matches any SSID of NW5W), or a bare `*` for any addressee. ' +
+               'All are still bounded by the heard-direct check — a message ' +
+               'only goes out if its addressee was heard directly on RF in ' +
+               'the last 30 minutes.';
       case 'object':
         return 'Matches the object or item name. Exact match by default, or use ' +
                'a trailing `*` as a prefix wildcard (e.g. WX-* matches all WX- ' +
@@ -206,8 +210,17 @@
 
   function validatePattern(type, pattern) {
     const trimmed = (pattern ?? '').trim();
-    if (trimmed === '' || trimmed === '*') {
-      return 'Pattern must not be empty or a bare wildcard.';
+    if (trimmed === '') {
+      return 'Pattern must not be empty.';
+    }
+    // A bare `*` ("any addressee") is only meaningful for message_dest,
+    // where the hardcoded heard-direct check bounds delivery to stations
+    // heard on RF, so it cannot flood. Rejected for every other type.
+    if (trimmed === '*') {
+      if (type !== 'message_dest') {
+        return 'A bare `*` wildcard is only supported for Message Dest.';
+      }
+      return '';
     }
     if (trimmed.includes('*') && (type === 'callsign' || type === 'prefix')) {
       return '`*` wildcard is only supported for Message Dest and Object types.';
@@ -248,7 +261,11 @@
     if (form.type === 'prefix') {
       return p.length > 0 && p.length <= BROAD_PATTERN_MAX_STATIC_CHARS;
     }
-    if (form.type === 'message_dest' || form.type === 'object') {
+    // message_dest is intentionally excluded: a broad addressee rule
+    // (including a bare `*`) can't flood — tier-1's heard-direct check
+    // bounds IS->RF message delivery to stations physically heard on RF.
+    // Only `object` (non-message) rules keep the broad-pattern warning.
+    if (form.type === 'object') {
       if (!p.endsWith('*')) return false;
       const staticPrefix = p.slice(0, -1);
       return staticPrefix.length > 0 && staticPrefix.length <= BROAD_PATTERN_MAX_STATIC_CHARS;
@@ -426,6 +443,28 @@
       toasts.error(err.message || 'Failed to update iGate');
     } finally {
       enableSaving = false;
+    }
+  }
+
+  // Master IS→RF gating toggle auto-save. Like autoSaveEnabled, this
+  // persists only the gate_is_to_rf bit merged onto the last-saved
+  // snapshot, so it never commits unsaved edits to the other fields.
+  // gate_is_to_rf is the real IS→RF on/off switch: with it off the TX
+  // governor is never wired and no packet reaches RF, regardless of the
+  // rule table.
+  async function autoSaveGateIsToRf(next) {
+    if (!savedConfig || next === savedConfig.gate_is_to_rf || gateIsToRfSaving) return;
+    gateIsToRfSaving = true;
+    try {
+      const body = { ...savedConfig, gate_is_to_rf: next };
+      await api.put('/igate/config', body);
+      savedConfig = body;
+      toasts.success(next ? 'IS→RF gating enabled' : 'IS→RF gating disabled');
+    } catch (err) {
+      form.gate_is_to_rf = savedConfig.gate_is_to_rf;
+      toasts.error(err.message || 'Failed to update IS→RF gating');
+    } finally {
+      gateIsToRfSaving = false;
     }
   }
 
@@ -688,8 +727,9 @@
   <p class="tab-doc">
     Two independent controls: the <strong>server filter</strong> tells the APRS-IS
     server which packets to send you, and the <strong>APRS-IS → RF gating rules</strong>
-    decide which of those packets get re-transmitted on RF. Every packet the server
-    sends you appears on the live map regardless of the gating rules.
+    decide which of those packets get re-transmitted on RF. Nothing is transmitted
+    unless <strong>IS→RF gating</strong> is switched on below. Every packet the
+    server sends you appears on the live map regardless of the gating rules.
   </p>
   <Box>
     <form onsubmit={handleSave}>
@@ -718,16 +758,32 @@
   <section class="gating-section" aria-labelledby="gating-heading">
     <h3 id="gating-heading" class="section-heading">APRS-IS &rarr; RF Gating</h3>
 
+    <div class="gate-master-toggle">
+      <Toggle
+        bind:checked={form.gate_is_to_rf}
+        label="Enable IS→RF gating"
+        onCheckedChange={autoSaveGateIsToRf}
+      />
+      <p class="field-note">
+        Master switch for internet-to-RF transmission. When off, no APRS-IS
+        packet is ever re-transmitted on RF, regardless of the rules below.
+      </p>
+    </div>
+
     <div class="rf-danger-panel" role="note">
       <div class="rf-danger-icon" aria-hidden="true">
         <Icon name="alert-circle" size="md" />
       </div>
       <div class="rf-danger-body">
         <strong>This panel transmits packets on the air.</strong>
-        Broad patterns — short prefixes like <code>K</code> or <code>W5</code>, or
-        broad wildcards like <code>B*</code> — can flood your local APRS frequency
-        with gated traffic. Use the most specific rule you can, pair it with a
-        tight server filter above, and test in simulation mode first.
+        Broad <em>callsign</em> or <em>prefix</em> rules — short ones like
+        <code>K</code> or <code>W5</code>, or wildcards like <code>B*</code> —
+        echo arbitrary internet traffic onto RF and can flood your local
+        frequency. <em>Message destination</em> rules are bounded by the
+        heard-direct check below, so even a bare <code>*</code> only reaches
+        stations you actually heard; other packet types are not bounded. Use
+        the most specific rule you can, pair it with a tight server filter
+        above, and test in simulation mode first.
       </div>
     </div>
 
@@ -735,8 +791,12 @@
       <div class="rules-subheader-text">
         <h4 class="rules-title">Rules</h4>
         <p class="rules-subtitle">
-          First matching rule wins; if none match, the packet is not transmitted.
-          These rules only affect RF transmission — they do not hide stations from the map.
+          Two automatic checks run first and aren't editable: directed messages
+          only reach an addressee heard <strong>directly</strong> on RF in the last
+          30 minutes, and non-message traffic only goes out if it's from one of
+          your own other SSIDs. First matching rule below wins; if none match, the
+          packet is not transmitted. These rules only affect RF transmission —
+          they do not hide stations from the map.
         </p>
       </div>
       <div class="rules-subheader-actions">

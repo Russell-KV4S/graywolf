@@ -835,6 +835,19 @@ func (a *App) wireIGate(ctx context.Context) error {
 // log and let the caller treat the iGate as unavailable. Used by both
 // wireIGate at startup and reloadIgate when the operator toggles the
 // iGate on at runtime.
+// igateTxSink resolves the TX governor to wire into the iGate.
+// IGateConfig.GateIsToRf is the master IS->RF switch: when it is off the
+// iGate gets no governor and can never transmit to RF, regardless of the
+// gating rule table (which still default-denies on top of this). Both the
+// boot-time build and the runtime reload path go through here so the
+// on/off condition can't drift between them. See invariant #15.
+func igateTxSink(gateIsToRf bool, gov txgovernor.TxSink) txgovernor.TxSink {
+	if gateIsToRf {
+		return gov
+	}
+	return nil
+}
+
 func (a *App) buildIgateInstance(ctx context.Context, igCfg *configstore.IGateConfig) (*igate.Igate, string, error) {
 	stationCall, err := a.store.ResolveStationCallsign(ctx)
 	if err != nil {
@@ -862,10 +875,7 @@ func (a *App) buildIgateInstance(ctx context.Context, igCfg *configstore.IGateCo
 	}
 
 	serverAddr := fmt.Sprintf("%s:%d", igCfg.Server, igCfg.Port)
-	var igGov txgovernor.TxSink
-	if len(rules) > 0 {
-		igGov = a.gov
-	}
+	igGov := igateTxSink(igCfg.GateIsToRf, a.gov)
 
 	txCh := a.resolveTxChannel(ctx, igCfg.TxChannel)
 
@@ -2818,10 +2828,7 @@ func (a *App) reloadIgate(ctx context.Context) {
 		})
 	}
 
-	var gov txgovernor.TxSink
-	if len(rules) > 0 {
-		gov = a.gov
-	}
+	gov := igateTxSink(igCfg.GateIsToRf, a.gov)
 
 	composed, err := buildIgateFilter(ctx, a.store)
 	if err != nil {
