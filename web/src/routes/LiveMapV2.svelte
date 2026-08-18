@@ -2361,11 +2361,16 @@
   :global(.stn-popup) { font-family: var(--font-mono); }
   :global(.stn-hdr) { display: flex; align-items: center; gap: 8px; }
   :global(.stn-call) { color: #d4a040; font-size: 13px; font-weight: 700; }
-  :global(.stn-sub) { color: var(--color-text-dim); font-size: 11px; margin-top: 2px; }
+  /* Brighter than the app-wide --color-text-dim: on the map's dark overlay
+     surface that gray reads as too low-contrast for this metadata to be
+     legible at a glance, so these track the popup's own foreground color
+     (--map-overlay-fg) dimmed with opacity instead -- stays readable in
+     every theme, not just the dark ones. */
+  :global(.stn-sub) { color: var(--map-overlay-fg); opacity: 0.75; font-size: 11px; margin-top: 2px; }
   /* Device identification line (vendor/model/class inferred from TOCALL),
      e.g. "Device: Yaesu: FT5D (ht)". Sits with the other sub-header
      metadata, same weight as .stn-sub. */
-  :global(.stn-device) { color: var(--color-text-dim); font-size: 11px; margin-top: 2px; }
+  :global(.stn-device) { color: var(--map-overlay-fg); opacity: 0.75; font-size: 11px; margin-top: 2px; }
   /* Object/item "from CALLSIGN" line: the originating station beneath the
      object name. Sits directly under the title so source reads first,
      distinct from the relay path (.stn-via / .stn-path) shown lower down. */
@@ -2399,7 +2404,7 @@
     margin-top: 2px;
     cursor: help;
   }
-  :global(.stn-path) { color: var(--color-text-dim); font-size: 11px; }
+  :global(.stn-path) { color: var(--map-overlay-fg); opacity: 0.75; font-size: 11px; }
   :global(.stn-path .path-link) { color: #6eb5ff; text-decoration: none; cursor: pointer; }
   :global(.stn-path .path-link:hover) { text-decoration: underline; }
   :global(.stn-comment) { color: var(--color-text-dim); font-style: italic; font-size: 12px; }

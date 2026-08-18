@@ -131,17 +131,26 @@ func ExtractEntry(decoded *aprs.DecodedAPRSPacket, source, dir string, ch uint32
 }
 
 // deviceFor resolves APRS device identification for a station packet,
-// preferring the AX.25 destination (TOCALL) lookup and falling back to
-// the Mic-E manufacturer byte when the tocall pattern is unrecognized.
-// Mirrors webapi.enrichPacket's packet-log device resolution, but keyed
-// off the already-unwrapped (third-party-resolved) packet so a gated
-// station's own device shows, not the gating IGate's.
+// preferring the AX.25 destination (TOCALL) lookup, then the Mic-E
+// vendor-specific suffix code (aprs.LookupMicEDevice -- the 2-char code
+// modern Yaesu/Anytone/etc. radios append to the status text, e.g. "_4"
+// for an FTM-500D) when the tocall pattern is unrecognized, and finally
+// the generic single-byte Mic-E manufacturer family (e.g. "Yaesu/Other")
+// when even that doesn't match. Mirrors webapi.enrichPacket's packet-log
+// device resolution, but keyed off the already-unwrapped
+// (third-party-resolved) packet so a gated station's own device shows,
+// not the gating IGate's.
 func deviceFor(pkt *aprs.DecodedAPRSPacket) *aprs.DeviceInfo {
 	if dev := aprs.LookupTocall(pkt.Dest); dev != nil {
 		return dev
 	}
-	if pkt.MicE != nil && pkt.MicE.Manufacturer != "" {
-		return &aprs.DeviceInfo{Model: pkt.MicE.Manufacturer}
+	if pkt.MicE != nil {
+		if dev := aprs.LookupMicEDevice(pkt.MicE.Status); dev != nil {
+			return dev
+		}
+		if pkt.MicE.Manufacturer != "" {
+			return &aprs.DeviceInfo{Model: pkt.MicE.Manufacturer}
+		}
 	}
 	return nil
 }

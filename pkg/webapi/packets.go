@@ -152,12 +152,18 @@ func enrichPacket(dto *packetDTO, havePos bool, myLat, myLon float64) {
 		return
 	}
 
-	// Device identification from tocall
+	// Device identification: tocall first, then the Mic-E vendor-specific
+	// suffix code (e.g. "_4" -> Yaesu FTM-500D), then the generic Mic-E
+	// manufacturer family already decoded (e.g. "Yaesu/Other") as a last
+	// resort. Mirrors stationcache.deviceFor's resolution order.
 	if dev := aprs.LookupTocall(d.Dest); dev != nil {
 		dto.Device = dev
-	} else if d.MicE != nil && d.MicE.Manufacturer != "" {
-		// Fall back to mic-e manufacturer string already decoded
-		dto.Device = &aprs.DeviceInfo{Model: d.MicE.Manufacturer}
+	} else if d.MicE != nil {
+		if dev := aprs.LookupMicEDevice(d.MicE.Status); dev != nil {
+			dto.Device = dev
+		} else if d.MicE.Manufacturer != "" {
+			dto.Device = &aprs.DeviceInfo{Model: d.MicE.Manufacturer}
+		}
 	}
 
 	// Status/message text -- checked ahead of the positionless early
