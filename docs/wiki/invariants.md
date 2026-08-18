@@ -172,12 +172,42 @@ Source:
 [`../../pkg/app/config.go`](../../pkg/app/config.go),
 [`../../graywolf-modem/build.rs`](../../graywolf-modem/build.rs).
 
-### 15. Default IS->RF policy is deny
+### 15. IS->RF gating is a two-tier AND; default policy is deny
 
-*Why:* The IS->RF rule engine evaluates rules in priority order and drops anything no rule matches, preventing accidental flooding of RF with arbitrary internet traffic.
+IS->RF transmission requires **both** tiers to allow a packet:
 
-Source: [`../../pkg/igate/filters/filters.go`](../../pkg/igate/filters/filters.go)
-(package comment).
+- **Tier 1 — hardcoded** (`Igate.shouldForwardISToRF`, `pkg/igate/igate.go`):
+  directed messages only forward to an addressee heard **directly** on RF
+  within `heardDirectTTL` (30 min, `pkg/igate/heard.go`); non-message
+  traffic only forwards if sourced from one of the operator's own SSIDs
+  (`sourceIsOwnSSID`). Not operator-configurable.
+- **Tier 2 — the rule engine** (`filters.Engine.Allow`): priority-ordered,
+  first-match-wins, **default deny**. Rule types: `callsign`, `prefix`,
+  `message_dest`, `object`.
+
+A bare `*` pattern is a flooding footgun for source-side rules
+(`callsign`/`prefix`) and a silent no-op elsewhere, so it is rejected —
+**except for `message_dest`, where a bare `*` means "any addressee" and is
+allowed**: tier 1's heard-direct check already bounds directed-message
+delivery to stations physically heard on RF, so it cannot flood. This is
+the one-rule way to get the textbook iGate "deliver to whoever we heard"
+behavior (graywolf #496). The bare-`*` allowance is enforced in the engine
+(`matches`), the DTO validator (`validateIGateRfFilterPattern`), and the
+Svelte client mirror (`validatePattern`) — keep all three in sync.
+
+The master IS->RF on/off switch is `IGateConfig.GateIsToRf`: when false the
+TX governor is never wired into the iGate, so no packet reaches RF
+regardless of the rule table (`buildIgateInstance` / `reloadIgate` in
+`pkg/app/wiring.go`). It is surfaced as the "Enable IS→RF gating" toggle on
+the iGate page's gating tab.
+
+*Why:* preventing accidental flooding of RF with arbitrary internet traffic
+while still allowing standard iGate message forwarding to be enabled in one
+step.
+
+Source: [`../../pkg/igate/filters/filters.go`](../../pkg/igate/filters/filters.go),
+[`../../pkg/igate/igate.go`](../../pkg/igate/igate.go) (`shouldForwardISToRF`),
+[`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (governor wiring).
 
 ### 16. TX path is single-source-of-truth via `txgovernor`
 

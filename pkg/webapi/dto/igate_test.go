@@ -125,7 +125,8 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 	const (
 		errMissingType  = "type is required"
 		errMissingPat   = "pattern is required"
-		errBareWildcard = "pattern must not be empty or a bare wildcard"
+		errEmptyPat     = "pattern must not be empty"
+		errBareStarType = "a bare `*` wildcard is only supported for message_dest"
 		errWildcardType = "`*` wildcard is only supported for message_dest and object types"
 		errTrailingOnly = "`*` is only supported as a trailing wildcard"
 	)
@@ -165,6 +166,16 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "NW5W-*"},
 		},
 		{
+			// A bare `*` ("any addressee") is allowed only for
+			// message_dest: tier-1's heard-direct check bounds delivery.
+			name: "accept_message_dest_bare_star",
+			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "*"},
+		},
+		{
+			name: "accept_message_dest_padded_bare_star",
+			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "  *  "},
+		},
+		{
 			name: "accept_object_exact",
 			req:  IGateRfFilterRequest{Type: "object", Pattern: "WX-001"},
 		},
@@ -177,21 +188,28 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "  NW5W-*  "},
 		},
 
-		// --- bare-wildcard / empty-after-trim (flooding guard) -----------
+		// --- empty-after-trim (flooding guard) ---------------------------
 		{
 			name:    "reject_whitespace_only_pattern",
 			req:     IGateRfFilterRequest{Type: "message_dest", Pattern: "   "},
-			wantErr: errBareWildcard,
+			wantErr: errEmptyPat,
 		},
+
+		// --- bare `*` on non-message_dest types (flooding guard) ---------
 		{
-			name:    "reject_bare_star",
-			req:     IGateRfFilterRequest{Type: "message_dest", Pattern: "*"},
-			wantErr: errBareWildcard,
-		},
-		{
-			name:    "reject_padded_bare_star",
+			name:    "reject_object_bare_star",
 			req:     IGateRfFilterRequest{Type: "object", Pattern: " * "},
-			wantErr: errBareWildcard,
+			wantErr: errBareStarType,
+		},
+		{
+			name:    "reject_callsign_bare_star",
+			req:     IGateRfFilterRequest{Type: "callsign", Pattern: "*"},
+			wantErr: errBareStarType,
+		},
+		{
+			name:    "reject_prefix_bare_star",
+			req:     IGateRfFilterRequest{Type: "prefix", Pattern: "*"},
+			wantErr: errBareStarType,
 		},
 
 		// --- wildcard in wrong type --------------------------------------

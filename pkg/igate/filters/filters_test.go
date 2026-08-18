@@ -195,15 +195,13 @@ func TestObjectWildcardSemantics(t *testing.T) {
 	}
 }
 
-func TestMessageDestEmptyAndLoneStarGuard(t *testing.T) {
+func TestMessageDestEmptyGuard(t *testing.T) {
 	cases := []struct {
 		name    string
 		pattern string
 	}{
 		{"empty pattern", ""},
 		{"whitespace-only pattern", " "},
-		{"lone-star pattern", "*"},
-		{"whitespace + star trims to lone-star", " *"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,6 +215,23 @@ func TestMessageDestEmptyAndLoneStarGuard(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A bare `*` message_dest rule means "any addressee". Unlike the empty /
+// whitespace guards above it MUST match every message packet — it's the
+// one-rule expression of the textbook iGate "deliver to whoever we heard"
+// behavior, safe because tier-1's heard-direct check bounds delivery.
+func TestMessageDestBareStarMatchesAny(t *testing.T) {
+	for _, pattern := range []string{"*", " * "} {
+		e := New([]Rule{
+			{ID: 1, Priority: 10, Type: TypeMessageDest, Pattern: pattern, Action: Allow},
+		})
+		for _, addr := range []string{"BLN1", "NW5W-7", "ANYTHING"} {
+			if !e.Allow(msgPkt(addr)) {
+				t.Fatalf("bare-star pattern %q must match addressee %q", pattern, addr)
+			}
+		}
 	}
 }
 
