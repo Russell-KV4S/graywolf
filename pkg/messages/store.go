@@ -240,10 +240,26 @@ func (s *Store) GetConversationPrefs(ctx context.Context, kind, key string) (*co
 // cursor points at the last row in the page and can be fed back into a
 // subsequent List call to page forward deterministically.
 //
-// Ordering: (UpdatedAt ASC, ID ASC). UpdatedAt is populated by GORM on
-// every Create/Save and also advances when the row is touched by ack
-// correlation or retry bookkeeping, so a polling client seeing an
+// Ordering: (whole-second UpdatedAt ASC, ID ASC). UpdatedAt is populated
+// by GORM on every Create/Save and also advances when the row is touched
+// by ack correlation or retry bookkeeping, so a polling client seeing an
 // updated row after the initial sync will find it past its cursor.
+//
+// The ORDER BY key MUST match the cursor predicate below exactly, or
+// keyset pagination silently strands rows. The cursor stores UpdatedAt at
+// whole-second resolution (strftime('%s', ...)), so the ORDER BY must
+// truncate to the same resolution — otherwise a row that sorts after the
+// cursor tip at sub-second precision but carries a lower id (e.g. an older
+// message whose updated_at was just bumped by an ack into the same second
+// as a newer, higher-id insert) falls on the wrong side of the id
+// tiebreak and is never returned again. On a busy two-way thread that
+// collision is common, and the effect is messages that stop appearing in
+// the chat window (GH #521). Comparing the raw text column at full
+// precision is not an option: GORM stores time as trailing-zero-trimmed
+// RFC3339Nano, whose lexicographic order does not match chronological
+// order (".9Z" sorts after ".90000001Z"). Second resolution keeps the
+// keyset key unique (id breaks ties) and monotonic, which is what
+// forward pagination requires.
 func (s *Store) List(ctx context.Context, f Filter) ([]configstore.Message, string, error) {
 	limit := f.Limit
 	if limit <= 0 {
@@ -286,7 +302,10 @@ func (s *Store) List(ctx context.Context, f Filter) ([]configstore.Message, stri
 			c.UpdatedAtNanos, c.UpdatedAtNanos, c.ID,
 		)
 	}
-	q = q.Order("updated_at ASC").Order("id ASC").Limit(limit)
+	// Truncate to whole seconds so this matches the cursor predicate's
+	// strftime('%s', ...) resolution exactly (see the doc comment).
+	q = q.Order("CAST(strftime('%s', updated_at) AS INTEGER) ASC").
+		Order("id ASC").Limit(limit)
 
 	var out []configstore.Message
 	if err := q.Find(&out).Error; err != nil {
