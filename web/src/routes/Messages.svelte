@@ -33,6 +33,7 @@
   import { refreshNow } from '../lib/messagesTransport.js';
   import { toasts } from '../lib/stores.js';
   import { api } from '../lib/api.js';
+  import { sendableBeacons } from '../lib/messagesBeacon.js';
 
   // ---------- query param parsing ----------
   let qs = $state('');
@@ -103,6 +104,72 @@
       ? 'APRS-IS is off. ANSRVR replies and messages from internet-only peers will not arrive.'
       : 'APRS-IS not connected. ANSRVR replies and messages from internet-only peers will not arrive until the session reconnects.',
   );
+
+  // ---------- send-beacon control ----------
+  // APRSOTA operators have to beacon their position while working a summit or
+  // hosting a session, and shouldn't have to leave the inbox to do it. This
+  // reuses the existing per-beacon send path (POST /beacons/{id}/send) — the
+  // backend transmits with whatever position source (live GPS or fixed
+  // coords) the chosen beacon is configured with, so there is no position
+  // logic to duplicate here. `sendableBeacons` (lib/messagesBeacon.js) decides
+  // which configured beacons are offered.
+  let beaconOptions = $state([]); // [{ id, label }]
+  let beaconMenuOpen = $state(false);
+  let sendingBeacon = $state(false);
+
+  async function loadBeaconOptions() {
+    try {
+      const [rows, st] = await Promise.all([
+        api.get('/beacons'),
+        api.get('/station/config'),
+      ]);
+      beaconOptions = sendableBeacons(rows || [], (st && st.callsign) || '');
+    } catch {
+      beaconOptions = [];
+    }
+  }
+  onMount(loadBeaconOptions);
+
+  async function sendBeacon(id) {
+    beaconMenuOpen = false;
+    if (sendingBeacon) return;
+    const opt = beaconOptions.find((b) => b.id === id);
+    sendingBeacon = true;
+    try {
+      await api.post(`/beacons/${id}/send`, {});
+      toasts.success(`Beacon sent: ${opt?.label || id}`);
+    } catch (err) {
+      toasts.error(err?.message || 'Beacon send failed');
+    } finally {
+      sendingBeacon = false;
+    }
+  }
+
+  // One beacon → fire it straight away; several → open a picker; none →
+  // point the operator at the Beacons page instead of a dead click.
+  function onSendBeaconClick() {
+    if (beaconOptions.length === 0) {
+      toasts.error('No beacons configured. Add one on the Beacons page first.');
+      return;
+    }
+    if (beaconOptions.length === 1) {
+      sendBeacon(beaconOptions[0].id);
+      return;
+    }
+    beaconMenuOpen = !beaconMenuOpen;
+  }
+
+  // Close the picker on any click outside the control. Capture phase so this
+  // runs before the toggle button's own handler, which would otherwise
+  // reopen a menu this had just closed.
+  $effect(() => {
+    if (!beaconMenuOpen) return;
+    const onDocClick = (e) => {
+      if (!e.target?.closest?.('.beacon-control')) beaconMenuOpen = false;
+    };
+    window.addEventListener('click', onDocClick, true);
+    return () => window.removeEventListener('click', onDocClick, true);
+  });
 
   // ---------- responsive breakpoint ----------
   let isMobile = $state(false);
@@ -423,6 +490,35 @@
   {#if showList}
     <div class="pane list-pane">
       <div class="route-toolbar">
+        <div class="beacon-control">
+          <button
+            type="button"
+            class="route-toolbar-item beacon-send"
+            onclick={onSendBeaconClick}
+            disabled={sendingBeacon}
+            data-testid="send-beacon"
+            aria-haspopup={beaconOptions.length > 1 ? 'menu' : undefined}
+            aria-expanded={beaconOptions.length > 1 ? beaconMenuOpen : undefined}
+            aria-label="Send Beacon"
+            title="Send an APRS position beacon now"
+          >
+            {sendingBeacon ? 'Sending…' : 'Send Beacon'}
+          </button>
+          {#if beaconMenuOpen && beaconOptions.length > 1}
+            <div class="beacon-menu" role="menu" data-testid="send-beacon-menu">
+              {#each beaconOptions as opt (opt.id)}
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="beacon-menu-item"
+                  onclick={() => sendBeacon(opt.id)}
+                >
+                  {opt.label}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
         <button
           type="button"
           class="route-toolbar-item"
@@ -507,6 +603,50 @@
     background: var(--color-surface-raised);
     color: var(--color-primary);
     border-color: var(--color-border);
+  }
+  .route-toolbar-item:disabled {
+    cursor: default;
+    opacity: 0.6;
+  }
+  /* Send Beacon is the primary action here, so give it a standing accent
+     rather than the muted resting state the other toolbar items use. */
+  .beacon-send {
+    color: var(--color-primary);
+    border-color: var(--color-border);
+  }
+  .beacon-control {
+    position: relative;
+    display: inline-flex;
+  }
+  .beacon-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 20;
+    min-width: 160px;
+    display: flex;
+    flex-direction: column;
+    padding: 4px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+  }
+  .beacon-menu-item {
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius);
+    color: var(--color-text);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    padding: 6px 10px;
+    white-space: nowrap;
+  }
+  .beacon-menu-item:hover {
+    background: var(--color-surface-raised);
+    color: var(--color-primary);
   }
   .messages-shell {
     display: grid;
