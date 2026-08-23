@@ -646,6 +646,39 @@ func TestRouterReplyAckCorrelationDMClosesAsAcked(t *testing.T) {
 	}, "DM reply-ack flip")
 }
 
+func TestRouterReplyAckCorrelationTrailingCRClosesAsAcked(t *testing.T) {
+	// Regression for GH #507: a radio that appends a trailing CR puts it
+	// at the tail of the info field, i.e. inside the reply-ack piggyback
+	// id ("yo{12}100\r"). The parsed ReplyAck must be trimmed to "100" so
+	// correlateReplyAck flips the outbound.
+	r, store, _, _, _, _, cleanup := buildRouter(t, "N0CALL", nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	out := &configstore.Message{
+		Direction:  "out",
+		OurCall:    "N0CALL",
+		FromCall:   "N0CALL",
+		ToCall:     "W1ABC",
+		Text:       "hi",
+		MsgID:      "100",
+		ThreadKind: ThreadKindDM,
+	}
+	if err := store.Insert(ctx, out); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	pkt := makeReplyAckPacket(t, "W1ABC", "N0CALL", "yo", "12", "100\r")
+	if pkt.Message.ReplyAck != "100" {
+		t.Fatalf("expected trimmed reply-ack %q, got %q", "100", pkt.Message.ReplyAck)
+	}
+	_ = r.SendPacket(ctx, pkt)
+	waitFor(t, time.Second, func() bool {
+		got, _ := store.GetByID(ctx, out.ID)
+		return got != nil && got.AckState == AckStateAcked
+	}, "DM reply-ack flip with trailing CR")
+}
+
 func TestRouterReplyAckTacticalSetsReceivedByCallOnly(t *testing.T) {
 	r, store, _, _, _, _, cleanup := buildRouter(t, "N0CALL", []string{"NET"})
 	defer cleanup()

@@ -69,7 +69,11 @@ func parseMessage(pkt *DecodedAPRSPacket, info []byte) error {
 	// Some radios (e.g. Kenwood TH-D75A) append a trailing CR/whitespace
 	// to the info field, contaminating the extracted msgid (e.g. "018\r").
 	// Trim it so correlation against stored outbound IDs still matches.
+	// The reply-ack trailer's piggybacked ack id (the "YY" in "text{XX}YY")
+	// sits at the very end of the field, so the CR lands there instead —
+	// trim it too or correlateReplyAck misses the same way.
 	msg.MessageID = strings.TrimRight(msg.MessageID, " \r\n\t")
+	msg.ReplyAck = strings.TrimRight(msg.ReplyAck, " \r\n\t")
 	msg.Text = rest
 	if strings.HasPrefix(addressee, "BLN") {
 		msg.IsBulletin = true
