@@ -559,6 +559,40 @@ func TestRouterDMAckCorrelationFlipsOutbound(t *testing.T) {
 	}
 }
 
+func TestRouterDMAckCorrelationTrailingCRFlipsOutbound(t *testing.T) {
+	// Regression for GH #507: a Kenwood TH-D75A appends a trailing CR to
+	// its ack info field (":N0CALL:ack042\r"). The parsed msgid must be
+	// trimmed so it correlates against the stored outbound "042".
+	r, store, _, _, _, _, cleanup := buildRouter(t, "N0CALL", nil)
+	defer cleanup()
+
+	ctx := context.Background()
+	out := &configstore.Message{
+		Direction:  "out",
+		OurCall:    "N0CALL",
+		FromCall:   "N0CALL",
+		ToCall:     "W1ABC",
+		Text:       "ping",
+		MsgID:      "042",
+		ThreadKind: ThreadKindDM,
+		Source:     "rf",
+	}
+	if err := store.Insert(ctx, out); err != nil {
+		t.Fatalf("Insert out: %v", err)
+	}
+
+	pkt := makeAckRejPacket(t, "W1ABC", "N0CALL", "ack", "042\r")
+	if pkt.Message.MessageID != "042" {
+		t.Fatalf("expected trimmed msgid %q, got %q", "042", pkt.Message.MessageID)
+	}
+	_ = r.SendPacket(ctx, pkt)
+
+	waitFor(t, time.Second, func() bool {
+		got, _ := store.GetByID(ctx, out.ID)
+		return got != nil && got.AckState == AckStateAcked
+	}, "ack state flip with trailing CR")
+}
+
 func TestRouterDMRejCorrelationFlipsOutbound(t *testing.T) {
 	r, store, _, _, _, _, cleanup := buildRouter(t, "N0CALL", nil)
 	defer cleanup()

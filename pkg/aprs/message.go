@@ -66,6 +66,10 @@ func parseMessage(pkt *DecodedAPRSPacket, info []byte) error {
 		msg.MessageID = rest[3:]
 		rest = ""
 	}
+	// Some radios (e.g. Kenwood TH-D75A) append a trailing CR/whitespace
+	// to the info field, contaminating the extracted msgid (e.g. "018\r").
+	// Trim it so correlation against stored outbound IDs still matches.
+	msg.MessageID = strings.TrimRight(msg.MessageID, " \r\n\t")
 	msg.Text = rest
 	if strings.HasPrefix(addressee, "BLN") {
 		msg.IsBulletin = true
