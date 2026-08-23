@@ -416,6 +416,25 @@ func TestRouterDMBareBaseCallAddressClaimed(t *testing.T) {
 	}, "auto-ACK submitted for bare base-call address")
 }
 
+func TestRouterDMDashZeroSSIDOfOurBareCallClaimed(t *testing.T) {
+	// We run as bare K0TFU. A radio that always appends "-0" replies to
+	// K0TFU-0; per AX.25 that is the same station, so the reply must be
+	// filed and auto-ACKed so it lands in the DM thread (graywolf#500).
+	r, store, sink, _, _, _, cleanup := buildRouter(t, "K0TFU", nil)
+	defer cleanup()
+
+	pkt := makeMessagePacket(t, "W1ABC", "K0TFU-0", "reply from a -0 radio", "001", aprs.DirectionRF)
+	_ = r.SendPacket(context.Background(), pkt)
+
+	waitFor(t, time.Second, func() bool {
+		ms, _, _ := store.List(context.Background(), Filter{})
+		return len(ms) == 1
+	}, "row persisted for -0 SSID of our bare call")
+	waitFor(t, time.Second, func() bool {
+		return len(sink.list()) >= 1
+	}, "auto-ACK submitted for -0 SSID of our bare call")
+}
+
 func TestMatchAddresseeSSIDAware(t *testing.T) {
 	tac := NewTacticalSet()
 	tac.Store(map[string]struct{}{"NET": {}})
@@ -436,6 +455,12 @@ func TestMatchAddresseeSSIDAware(t *testing.T) {
 		{"different base", "K0TFU-1", "W1ABC", false, false},
 		{"tactical alias", "K0TFU-1", "NET", true, true},
 		{"empty addressee", "K0TFU-1", "", false, false},
+		// AX.25 SSID 0 is canonically the bare call, so <base>-0 and bare
+		// <base> address the same station (graywolf#500).
+		{"dash-zero addressee for bare our call", "K0TFU", "K0TFU-0", true, false},
+		{"bare addressee for dash-zero our call", "K0TFU-0", "K0TFU", true, false},
+		{"dash-zero both sides", "K0TFU-0", "K0TFU-0", true, false},
+		{"dash-zero addressee for ssid our call", "K0TFU-1", "K0TFU-0", true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -443,6 +468,35 @@ func TestMatchAddresseeSSIDAware(t *testing.T) {
 			if got.IsForUs != tc.wantForUs || got.IsTactical != tc.wantTac {
 				t.Fatalf("MatchAddressee(%q,%q) = %+v, want ForUs=%v Tactical=%v",
 					tc.ourCall, tc.addressee, got, tc.wantForUs, tc.wantTac)
+			}
+		})
+	}
+}
+
+func TestCallAddressedToUsDashZeroSSID(t *testing.T) {
+	// Per AX.25, SSID 0 is the same station as the bare call, so a "-0"
+	// SSID collapses to the bare call on either side. Every other SSID
+	// identifies a distinct peer and must stay distinct (graywolf#500).
+	cases := []struct {
+		name      string
+		addressee string
+		ourCall   string
+		want      bool
+	}{
+		{"dash-zero addressee, bare our call", "CALL-0", "CALL", true},
+		{"bare addressee, dash-zero our call", "CALL", "CALL-0", true},
+		{"dash-zero both sides", "CALL-0", "CALL-0", true},
+		{"dash-zero addressee, ssid our call", "CALL-0", "CALL-7", true},
+		{"distinct non-zero ssids do not match", "CALL-7", "CALL-1", false},
+		{"same non-zero ssid matches", "CALL-7", "CALL-7", true},
+		{"different base does not match", "CALL-0", "OTHER", false},
+		{"case insensitive dash-zero", "call-0", "CALL", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := callAddressedToUs(tc.addressee, tc.ourCall); got != tc.want {
+				t.Fatalf("callAddressedToUs(%q, %q) = %v, want %v",
+					tc.addressee, tc.ourCall, got, tc.want)
 			}
 		})
 	}

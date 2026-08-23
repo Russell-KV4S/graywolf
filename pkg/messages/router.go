@@ -352,10 +352,12 @@ func (r *Router) classify(ctx context.Context, pkt *aprs.DecodedAPRSPacket) {
 	// Step 2 — self-filter. Full-call match (SSID-aware) or LocalTxRing
 	// hit. Base-call match is intentionally NOT used: two stations under
 	// the same base callsign with different SSIDs are distinct peers and
-	// must be able to message each other (e.g. NW5W-5 ↔ NW5W-13). The
-	// LocalTxRing already covers the precise (source, msgid) loopback
-	// case if a same-base packet is genuinely our own echo.
-	if ourCallFull != "" && source == ourCallFull {
+	// must be able to message each other (e.g. NW5W-5 ↔ NW5W-13). A
+	// trailing "-0" is canonicalized first so a radio that echoes our own
+	// traffic as <base>-0 is still recognized as us (canonicalCall keeps
+	// non-zero SSIDs distinct). The LocalTxRing already covers the precise
+	// (source, msgid) loopback case if a same-base packet is our own echo.
+	if ourCallFull != "" && canonicalCall(source) == canonicalCall(ourCallFull) {
 		r.mClassified.WithLabelValues("self_filter").Inc()
 		return
 	}
@@ -654,6 +656,19 @@ func baseCall(s string) string {
 	return s
 }
 
+// canonicalCall collapses the AX.25 SSID 0 to the bare call. Per AX.25,
+// SSID 0 is canonically the station with no SSID, so <base>-0 is the same
+// station as bare <base> (some radios, e.g. the BTech DA-7X2, always emit
+// the "-0" form). Every other SSID identifies a distinct peer and is left
+// intact, so this does not weaken same-base different-SSID separation
+// (K0TFU-1 vs K0TFU-7 stay distinct). Input should already be trimmed.
+func canonicalCall(s string) string {
+	if i := strings.IndexByte(s, '-'); i >= 0 && s[i+1:] == "0" {
+		return s[:i]
+	}
+	return s
+}
+
 // joinPath renders pkt.Path (already a []string in TNC-2 form) into a
 // comma-separated display string.
 func joinPath(p []string) string {
@@ -820,9 +835,9 @@ type AddresseeMatch struct {
 // MatchAddressee reports whether addressee is one we should handle.
 // ourCall is the primary station callsign (with or without SSID). The
 // match against ourCall is SSID-aware (see callAddressedToUs): an exact
-// full-call match, or a bare base-call address with no SSID. A distinct
-// SSID of our base call is a separate peer and does not match. tactical
-// may be nil.
+// full-call match, or a bare base-call address with no SSID; a trailing
+// "-0" SSID is treated as the bare call. A distinct, non-zero SSID of our
+// base call is a separate peer and does not match. tactical may be nil.
 func MatchAddressee(ourCall, addressee string, tactical *TacticalSet) AddresseeMatch {
 	addr := strings.ToUpper(strings.TrimSpace(addressee))
 	if addr == "" {
@@ -840,14 +855,16 @@ func MatchAddressee(ourCall, addressee string, tactical *TacticalSet) AddresseeM
 // callAddressedToUs reports whether a directed-message addressee targets
 // our station, SSID-aware. It matches when the addressee is an exact
 // full-call match of our call, or a bare base-call address (no SSID)
-// whose base equals our base call. A different SSID of our base call
+// whose base equals our base call. A trailing "-0" SSID is canonically
+// the bare call (see canonicalCall), so <base>-0 and bare <base> match
+// each other and our station. A different, non-zero SSID of our base call
 // (e.g. our K0TFU-1 vs addressee K0TFU-7) is a distinct peer and does
 // NOT match — this mirrors the router self-filter's full-call logic so
 // addressee matching and self-filtering treat SSIDs consistently. Both
 // arguments may carry or omit an SSID and need not be pre-normalized.
 func callAddressedToUs(addressee, ourCall string) bool {
-	addr := strings.ToUpper(strings.TrimSpace(addressee))
-	our := strings.ToUpper(strings.TrimSpace(ourCall))
+	addr := canonicalCall(strings.ToUpper(strings.TrimSpace(addressee)))
+	our := canonicalCall(strings.ToUpper(strings.TrimSpace(ourCall)))
 	if addr == "" || our == "" {
 		return false
 	}
