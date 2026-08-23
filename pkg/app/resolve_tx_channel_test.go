@@ -156,7 +156,6 @@ func TestResolveTxChannel(t *testing.T) {
 func TestResolveTxChannelKissTnc(t *testing.T) {
 	ctx := context.Background()
 
-	// mkChannel creates a channel; modem=true binds an audio input device.
 	newStore := func(t *testing.T) *configstore.Store {
 		t.Helper()
 		s, err := configstore.OpenMemory()
@@ -166,6 +165,7 @@ func TestResolveTxChannelKissTnc(t *testing.T) {
 		t.Cleanup(func() { _ = s.Close() })
 		return s
 	}
+	// mkChannel creates a channel; modem=true binds an audio input device.
 	mkChannel := func(t *testing.T, s *configstore.Store, name string, modem bool) uint32 {
 		t.Helper()
 		ch := &configstore.Channel{
@@ -247,6 +247,24 @@ func TestResolveTxChannelKissTnc(t *testing.T) {
 		a, _ := newApp(s)
 		if got := a.resolveTxChannel(ctx, 0); got != kissCh {
 			t.Fatalf("got channel %d, want kiss channel %d", got, kissCh)
+		}
+	})
+
+	t.Run("no modem configured to unbacked falls back to kiss and warns", func(t *testing.T) {
+		s := newStore(t)
+		// A channel with no modem and no governor backend (dead), plus a
+		// separate KISS-TNC egress channel. Configuring the dead channel
+		// must fall back to the KISS channel and log the override.
+		deadCh := mkChannel(t, s, "dead", false)
+		kissCh := mkChannel(t, s, "kiss", false)
+		mkKissTnc(t, s, "vara", kissCh, true)
+
+		a, buf := newApp(s)
+		if got := a.resolveTxChannel(ctx, deadCh); got != kissCh {
+			t.Fatalf("got channel %d, want kiss channel %d", got, kissCh)
+		}
+		if !strings.Contains(buf.String(), "no tx backend") {
+			t.Fatalf("expected override warn, got: %s", buf.String())
 		}
 	})
 
