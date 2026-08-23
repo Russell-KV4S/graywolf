@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-
-	"github.com/chrissnell/graywolf/pkg/configstore"
 )
 
 // TestListCursorHighVolumeNoSkips drives a busy two-way thread through the
@@ -87,7 +85,6 @@ func TestListCursorHighVolumeNoSkips(t *testing.T) {
 		t.Fatalf("polling client delivered %d/%d messages; %d stranded (e.g. %v)",
 			len(seen), total, len(missing), firstN(missing, 10))
 	}
-	_ = configstore.Message{}
 }
 
 func firstN(ids []uint64, n int) []uint64 {
