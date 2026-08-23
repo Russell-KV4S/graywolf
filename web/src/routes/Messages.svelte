@@ -114,18 +114,28 @@
   // logic to duplicate here. `sendableBeacons` (lib/messagesBeacon.js) decides
   // which configured beacons are offered.
   let beaconOptions = $state([]); // [{ id, label }]
+  let beaconsLoadFailed = $state(false);
   let beaconMenuOpen = $state(false);
   let sendingBeacon = $state(false);
 
   async function loadBeaconOptions() {
+    // The station callsign only labels a beacon that carries no per-row
+    // callsign, so it is best-effort: a station-config hiccup must not decide
+    // whether the control works. Load it separately from the beacon list.
+    let stationCallsign = '';
     try {
-      const [rows, st] = await Promise.all([
-        api.get('/beacons'),
-        api.get('/station/config'),
-      ]);
-      beaconOptions = sendableBeacons(rows || [], (st && st.callsign) || '');
+      const st = await api.get('/station/config');
+      stationCallsign = (st && st.callsign) || '';
+    } catch {
+      // Leave blank; beaconLabel falls back to the (unset) sentinel.
+    }
+    try {
+      const rows = await api.get('/beacons');
+      beaconOptions = sendableBeacons(rows || [], stationCallsign);
+      beaconsLoadFailed = false;
     } catch {
       beaconOptions = [];
+      beaconsLoadFailed = true;
     }
   }
   onMount(loadBeaconOptions);
@@ -149,7 +159,13 @@
   // point the operator at the Beacons page instead of a dead click.
   function onSendBeaconClick() {
     if (beaconOptions.length === 0) {
-      toasts.error('No beacons configured. Add one on the Beacons page first.');
+      if (beaconsLoadFailed) {
+        // Retry once so a transient failure doesn't strand the control.
+        loadBeaconOptions();
+        toasts.error('Could not load beacons. Check your connection and try again.');
+      } else {
+        toasts.error('No beacons configured. Add one on the Beacons page first.');
+      }
       return;
     }
     if (beaconOptions.length === 1) {
@@ -159,16 +175,23 @@
     beaconMenuOpen = !beaconMenuOpen;
   }
 
-  // Close the picker on any click outside the control. Capture phase so this
-  // runs before the toggle button's own handler, which would otherwise
-  // reopen a menu this had just closed.
+  // Dismiss the picker on an outside click or Escape. The click listener is
+  // registered only while the menu is open, so the opening click (already
+  // propagated by the time this effect runs) can't self-close it.
   $effect(() => {
     if (!beaconMenuOpen) return;
     const onDocClick = (e) => {
       if (!e.target?.closest?.('.beacon-control')) beaconMenuOpen = false;
     };
-    window.addEventListener('click', onDocClick, true);
-    return () => window.removeEventListener('click', onDocClick, true);
+    const onKey = (e) => {
+      if (e.key === 'Escape') beaconMenuOpen = false;
+    };
+    window.addEventListener('click', onDocClick);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', onDocClick);
+      window.removeEventListener('keydown', onKey);
+    };
   });
 
   // ---------- responsive breakpoint ----------
