@@ -1207,6 +1207,20 @@ definitions:
       space_freq:
         type: integer
     type: object
+  dto.CheckDeviceRequest:
+    properties:
+      device_path:
+        type: string
+    type: object
+  dto.CheckDeviceResponse:
+    properties:
+      char_device:
+        type: boolean
+      exists:
+        type: boolean
+      message:
+        type: string
+    type: object
   dto.ConversationPrefsRequest:
     properties:
       send_path:
@@ -7415,6 +7429,34 @@ paths:
       security:
         - CookieAuth: []
       summary: Get PTT capabilities
+      tags:
+        - ptt
+  /ptt/check-device:
+    post:
+      consumes:
+        - application/json
+      operationId: checkPttDevice
+      parameters:
+        - description: Device path to inspect
+          in: body
+          name: body
+          required: true
+          schema:
+            $ref: '#/definitions/dto.CheckDeviceRequest'
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.CheckDeviceResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      security:
+        - CookieAuth: []
+      summary: Check a PTT device path
       tags:
         - ptt
   /ptt/gpio-chips/{chip}/lines:

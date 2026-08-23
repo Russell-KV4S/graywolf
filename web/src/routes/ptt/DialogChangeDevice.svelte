@@ -5,6 +5,7 @@
   import FormField from '../../components/FormField.svelte';
   import DevicePicker from './DevicePicker.svelte';
   import { api } from '../../lib/api.js';
+  import { resolveDevice } from './devicePayload.js';
 
   let {
     open = $bindable(),
@@ -14,6 +15,7 @@
     initialGpioLine,     // for gpio method
     initialGpioPin,      // for cm108 method
     initialInvert,       // any keying method
+    allowManualEntry = true, // desktop: let the operator type a udev path (GH #511)
     onSave,              // (payload) => void; payload: { device, gpio_line?, gpio_pin?, invert }
     onBack,
     onCancel,
@@ -29,32 +31,87 @@
   let gpioPinSel = $state('3');
   let invert = $state(false);
 
+  // Manual free-form device path (GH #511): udev-renamed devices such as
+  // /dev/aioc-aprs-ptt never appear in enumeration, so the operator needs
+  // to type the path directly instead of only picking a detected card.
+  let manualMode = $state(false);
+  let manualPath = $state('');
+  let probe = $state(null);      // { exists, char_device, message } | null
+  let probing = $state(false);
+  // Set while the open effect seeds state, so refresh()'s mode-detection
+  // only runs on open — a manual Refresh click must not yank the operator
+  // out of the mode they chose.
+  let initializing = false;
+
   let wireMethod = $derived(method?.wire?.method);
   let isGpio = $derived(wireMethod === 'gpio');
   let isCm108 = $derived(wireMethod === 'cm108');
+
+  // The path in effect regardless of mode — drives GPIO line loading,
+  // the save payload, and the save-enable check.
+  let effectivePath = $derived(manualMode ? manualPath.trim() : selectedPath);
 
   let wasOpen = false;
   $effect(() => {
     if (open && !wasOpen) {
       selectedPath = initialDevicePath || null;
+      manualPath = initialDevicePath || '';
+      manualMode = false;
+      probe = null;
       gpioLineSel = String(initialGpioLine ?? 0);
       gpioPinSel = String(initialGpioPin ?? 3);
       invert = !!initialInvert;
       wasOpen = true;
+      initializing = true;
       void refresh();
     } else if (!open) {
       wasOpen = false;
     }
   });
 
-  // Whenever the selected gpio chip path changes, refresh its line list.
+  // Whenever the effective gpio chip path changes, refresh its line list.
   $effect(() => {
-    if (isGpio && selectedPath) {
-      void loadGpioLines(selectedPath);
+    if (isGpio && effectivePath) {
+      void loadGpioLines(effectivePath);
     } else {
       gpioLines = [];
     }
   });
+
+  // Non-blocking advisory for a manually-entered path. Debounced so we
+  // don't probe on every keystroke. Never gates Save — a not-yet-present
+  // udev name is expressly allowed.
+  $effect(() => {
+    if (!manualMode) { probe = null; return; }
+    const p = manualPath.trim();
+    if (!p) { probe = null; probing = false; return; }
+    probing = true;
+    const handle = setTimeout(() => { void checkDevice(p); }, 400);
+    return () => clearTimeout(handle);
+  });
+
+  async function checkDevice(path) {
+    try {
+      const res = await api.post('/ptt/check-device', { device_path: path });
+      // Ignore a stale result if the operator kept typing.
+      if (manualMode && manualPath.trim() === path) probe = res || null;
+    } catch {
+      if (manualMode && manualPath.trim() === path) probe = null;
+    } finally {
+      if (manualMode && manualPath.trim() === path) probing = false;
+    }
+  }
+
+  function enterManualMode() {
+    manualMode = true;
+    // Seed from any list selection so switching modes doesn't lose work.
+    if (!manualPath && selectedPath) manualPath = selectedPath;
+  }
+
+  function leaveManualMode() {
+    manualMode = false;
+    probe = null;
+  }
 
   async function loadGpioLines(chipPath) {
     loadingGpioLines = true;
@@ -79,19 +136,30 @@
       error = e?.message || 'Failed to list devices';
     } finally {
       loading = false;
+      // On open only: if we're editing a path that enumeration doesn't
+      // know about (a previously-saved manual/udev path), start in manual
+      // mode so the operator sees and can edit their path rather than an
+      // empty picker.
+      if (initializing) {
+        if (allowManualEntry && initialDevicePath &&
+            !devices.some(d => d.path === initialDevicePath)) {
+          manualMode = true;
+        }
+        initializing = false;
+      }
     }
   }
 
   function buildPayload() {
     return {
-      device: devices.find(d => d.path === selectedPath) || null,
+      device: resolveDevice(devices, effectivePath, wireMethod),
       gpio_line: isGpio ? Number(gpioLineSel) : undefined,
       gpio_pin: isCm108 ? Number(gpioPinSel) : undefined,
       invert,
     };
   }
 
-  let canSave = $derived(!!selectedPath);
+  let canSave = $derived(!!effectivePath);
 
   const cm108Pins = [
     { value: '1', label: 'GPIO 1 (pin 11)' },
@@ -110,15 +178,43 @@
     <div class="state">Loading devices…</div>
   {:else if error}
     <div class="state error">{error}</div>
+  {:else if manualMode}
+    <FormField label="Device Path" id="dlg-manual-path"
+      hint="Full path to the PTT device, e.g. /dev/aioc-aprs-ptt. A stable udev name is allowed even if the device isn't plugged in yet.">
+      <Input id="dlg-manual-path" bind:value={manualPath}
+        placeholder="/dev/aioc-aprs-ptt" spellcheck={false} autocomplete="off" />
+    </FormField>
+    {#if manualPath.trim()}
+      <p class="probe"
+        class:ok={!probing && probe && probe.exists && probe.char_device}
+        class:bad={!probing && probe && probe.exists && !probe.char_device}
+        class:warn={!probing && probe && !probe.exists}>
+        {#if probing}
+          Checking path…
+        {:else if probe && probe.exists && probe.char_device}
+          Device present.
+        {:else if probe && probe.exists}
+          Path exists but is not a character device — double-check it points at the PTT device.
+        {:else if probe}
+          Not present yet. That's fine for a udev-named device — Graywolf will use it once it appears.
+        {/if}
+      </p>
+    {/if}
+    {#if allowManualEntry}
+      <button type="button" class="mode-toggle" onclick={leaveManualMode}>‹ Choose from detected devices</button>
+    {/if}
   {:else}
     <DevicePicker
       {devices}
       {selectedPath}
       onSelect={(d) => { selectedPath = d.path || null; }}
     />
+    {#if allowManualEntry}
+      <button type="button" class="mode-toggle" onclick={enterManualMode}>Enter a path manually…</button>
+    {/if}
   {/if}
 
-  {#if isGpio && selectedPath}
+  {#if isGpio && effectivePath}
     {#if loadingGpioLines}
       <FormField label="GPIO Line" id="dlg-gpio-line" hint="Loading lines…">
         <Select id="dlg-gpio-line" disabled value="__loading__"
@@ -167,4 +263,23 @@
   .state { padding: 16px; text-align: center; color: var(--text-secondary, #555); }
   .state.error { color: #b91c1c; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .mode-toggle {
+    margin-top: 8px;
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--accent, #3b82f6);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .mode-toggle:hover { text-decoration: underline; }
+  .probe {
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary, #555);
+  }
+  .probe.ok { color: var(--success, #3fb950); }
+  .probe.bad { color: #b91c1c; }
+  .probe.warn { color: #b45309; }
 </style>

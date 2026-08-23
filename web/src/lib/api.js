@@ -231,6 +231,10 @@ function getMockData(method, path, body) {
   if (path === '/ptt' && method === 'GET') return delay(mockPtt);
   if (path === '/ptt' && method === 'POST') return delay({ id: 2, ...body });
   if (path === '/ptt/available') return delay(mockPttAvailable);
+  if (path === '/ptt/check-device' && method === 'POST') {
+    const known = mockPttAvailable.some(d => d.path === body?.device_path);
+    return delay({ exists: known, char_device: known, message: known ? 'present' : 'not present yet' });
+  }
   if (path.match(/^\/ptt\/\d+$/) && method === 'PUT') return delay(body);
   if (path.match(/^\/ptt\/\d+$/) && method === 'DELETE') return delay(null);
 

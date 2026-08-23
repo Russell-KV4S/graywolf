@@ -108,6 +108,28 @@
       expected.
     </p>
 
+    <h2>Entering a device path manually</h2>
+
+    <p>
+      In the <strong>Change Device</strong> dialog, choose
+      <strong>Enter a path manually</strong> to type a device path instead
+      of picking a detected card. This is the reliable way to pin PTT to a
+      stable <code>udev</code> name &mdash; e.g.
+      <code>/dev/aioc-aprs-ptt</code> created by a rule like
+      <code>SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", SYMLINK+="aioc-aprs-ptt"</code>
+      &mdash; so re-plugging the adapter (which can renumber
+      <code>/dev/hidraw*</code> or <code>/dev/ttyACM*</code>) never breaks
+      keying.
+    </p>
+
+    <p>
+      graywolf checks whether the path is present as you type and shows a
+      hint, but it never blocks you from saving: a <code>udev</code> symlink
+      is allowed to be absent when you save and appear later on plug-in.
+      Whatever path you enter is used verbatim by the modem, exactly as if
+      it had been detected.
+    </p>
+
     <h2>PTT Methods</h2>
 
     <div class="box">

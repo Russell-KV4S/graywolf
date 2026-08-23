@@ -1546,6 +1546,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ptt/check-device": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check a PTT device path */
+        post: operations["checkPttDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/ptt/gpio-chips/{chip}/lines": {
         parameters: {
             query?: never;
@@ -2623,6 +2640,14 @@ export interface components {
             profile?: string;
             ptt?: components["schemas"]["dto.ChannelPtt"];
             space_freq?: number;
+        };
+        "dto.CheckDeviceRequest": {
+            device_path?: string;
+        };
+        "dto.CheckDeviceResponse": {
+            char_device?: boolean;
+            exists?: boolean;
+            message?: string;
         };
         "dto.ConversationPrefsRequest": {
             /**
@@ -9717,6 +9742,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["webapi.pttCapabilities"];
+                };
+            };
+        };
+    };
+    checkPttDevice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Device path to inspect */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["dto.CheckDeviceRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.CheckDeviceResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
                 };
             };
         };
