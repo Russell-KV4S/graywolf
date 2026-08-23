@@ -114,8 +114,8 @@ fn read_wav(path: &str) -> io::Result<(Vec<i16>, u32, u32)> {
             if bps == 16 {
                 let mut buf = vec![0u8; size as usize];
                 r.read_exact(&mut buf)?;
-                for c in buf.chunks_exact(2) {
-                    data.push(i16::from_le_bytes([c[0], c[1]]));
+                for c in buf.as_chunks::<2>().0 {
+                    data.push(i16::from_le_bytes(*c));
                 }
             } else {
                 return Err(io::Error::new(
