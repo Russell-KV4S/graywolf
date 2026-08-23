@@ -110,6 +110,24 @@ func PttsFromModels(ms []configstore.PttConfig) []PttResponse {
 	return out
 }
 
+// CheckDeviceRequest is the body accepted by POST /api/ptt/check-device.
+// The handler inspects the given path (without opening it) so the UI can
+// warn about a mistyped manual PTT device path without hard-blocking a
+// not-yet-present udev name.
+type CheckDeviceRequest struct {
+	DevicePath string `json:"device_path"`
+}
+
+// CheckDeviceResponse reports what the probe found. Exists and CharDevice
+// drive an advisory only — the save path never depends on this result, so
+// an operator can still commit a path that is absent at config time (the
+// whole point of a stable udev name).
+type CheckDeviceResponse struct {
+	Exists     bool   `json:"exists"`
+	CharDevice bool   `json:"char_device"`
+	Message    string `json:"message"`
+}
+
 // TestRigctldRequest is the body accepted by POST /api/ptt/test-rigctld.
 // The handler opens a short-lived TCP connection to the given rigctld
 // endpoint and sends a non-disruptive `t` (get_ptt) probe.

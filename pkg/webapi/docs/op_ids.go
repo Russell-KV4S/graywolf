@@ -274,6 +274,7 @@ const (
 	OpListPttDevices     = "listPttDevices"
 	OpGetPttCapabilities = "getPttCapabilities"
 	OpTestRigctld        = "testRigctld"
+	OpCheckPttDevice     = "checkPttDevice"
 	OpListGpioLines      = "listGpioLines"
 	OpGetPttConfig       = "getPttConfig"
 	OpUpdatePttConfig    = "updatePttConfig"

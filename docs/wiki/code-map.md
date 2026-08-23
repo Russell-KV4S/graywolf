@@ -133,11 +133,14 @@ The split is enforced by [invariant 9](invariants.md).
 | Method radio-card list | `web/src/routes/ptt/MethodPicker.svelte` |
 | Device list (Recommended / Other split + permission CTA) | `web/src/routes/ptt/DevicePicker.svelte` |
 | Dialog A — method picker + rigctld host:port + Test Connection | `web/src/routes/ptt/DialogChangeMethod.svelte` |
-| Dialog B — device picker + GPIO line / CM108 pin / invert | `web/src/routes/ptt/DialogChangeDevice.svelte` |
+| Dialog B — device picker + GPIO line / CM108 pin / invert + **manual path entry** | `web/src/routes/ptt/DialogChangeDevice.svelte` |
+| Manual-path payload resolver (enumerated row vs. synthesised udev path) | `web/src/routes/ptt/devicePayload.js` (`resolveDevice`) |
 | Method options per platform | `web/src/routes/ptt/devices/methodOptions.{android,desktop}.js` |
 | Device-source adapters per platform | `web/src/routes/ptt/devices/{android,desktop}DeviceSource.js` |
 | Channel-selector auto-hide + Add visibility rule | `web/src/routes/ptt/channelSelector.js` |
 | Android USB enumeration into `[]AvailableDevice` shape | `pkg/pttdevice/android.go` |
+
+**Manual device path (GH #511).** Desktop operators can type a free-form device path (e.g. a udev-renamed `/dev/aioc-aprs-ptt`) instead of only picking an enumerated card — `DialogChangeDevice.svelte` has an "Enter a path manually" mode gated by the `allowManualEntry` prop (`!isAndroid`, set in `Ptt.svelte`). The store/DTO/Rust already accept any non-empty path, so no schema change was needed. Non-blocking validation: the dialog probes the typed path via `POST /api/ptt/check-device` (`pttdevice.Probe`, `probe.go`) which **stats** the path only — it never opens the device (opening a serial tty can key the radio / block on DCD). The result is advisory: a not-yet-present udev name still saves.
 
 ## Channel TX gating
 

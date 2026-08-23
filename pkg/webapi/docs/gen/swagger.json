@@ -6608,6 +6608,51 @@
                 }
             }
         },
+        "/ptt/check-device": {
+            "post": {
+                "security": [
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "ptt"
+                ],
+                "summary": "Check a PTT device path",
+                "operationId": "checkPttDevice",
+                "parameters": [
+                    {
+                        "description": "Device path to inspect",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/dto.CheckDeviceRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/dto.CheckDeviceResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webtypes.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/ptt/gpio-chips/{chip}/lines": {
             "get": {
                 "security": [
@@ -9732,6 +9777,28 @@
                 },
                 "space_freq": {
                     "type": "integer"
+                }
+            }
+        },
+        "dto.CheckDeviceRequest": {
+            "type": "object",
+            "properties": {
+                "device_path": {
+                    "type": "string"
+                }
+            }
+        },
+        "dto.CheckDeviceResponse": {
+            "type": "object",
+            "properties": {
+                "char_device": {
+                    "type": "boolean"
+                },
+                "exists": {
+                    "type": "boolean"
+                },
+                "message": {
+                    "type": "string"
                 }
             }
         },
