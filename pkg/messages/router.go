@@ -857,7 +857,9 @@ func MatchAddressee(ourCall, addressee string, tactical *TacticalSet) AddresseeM
 // full-call match of our call, or a bare base-call address (no SSID)
 // whose base equals our base call. A trailing "-0" SSID is canonically
 // the bare call (see canonicalCall), so <base>-0 and bare <base> match
-// each other and our station. A different, non-zero SSID of our base call
+// each other and our station; a <base>-0 addressee therefore also inherits
+// the generic bare-call semantics below (any station on that base answers
+// it). A different, non-zero SSID of our base call
 // (e.g. our K0TFU-1 vs addressee K0TFU-7) is a distinct peer and does
 // NOT match — this mirrors the router self-filter's full-call logic so
 // addressee matching and self-filtering treat SSIDs consistently. Both
