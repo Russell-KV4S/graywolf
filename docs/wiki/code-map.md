@@ -186,6 +186,18 @@ in the new-message dialog. Zero = the configured default `tx_channel`.
 | REST | `webapi/messages.go` — `sendMessage` copies `dto.SendMessageRequest.Channel` (`*uint32`, already in the DTO) into `svcReq.Channel`, and rejects a packet-mode override with 400 (same `ModeForChannel` guard as `putMessagesConfig`; a missing row reads as APRS, matching the fail-open TX-gating convention, so existence is not hard-validated). |
 | UI | `web/src/components/messages/ComposeNewModal.svelte` — `<details class="advanced">` with a channel `Select` (non-packet channels + "Default" sentinel, same filter as `MessagesSettings.svelte`); threaded through `Messages.svelte` `handleNewSend`/`optimisticSend` → `sendMessage({channel})`. The override resets on the modal's open→true transition (NOT in `close()`), because `ComposeBar` calls `onSend`/`close` once per part of a multi-part message — resetting on close would zero the channel after part 1. |
 
+## Send Beacon from Messages (GH #522)
+
+Lets an APRSOTA operator fire a position beacon without leaving the inbox
+(they must beacon while working a summit / hosting a session). Pure UI reuse
+— no new backend path.
+
+| Concern | Where |
+|---|---|
+| Trigger | `web/src/routes/Messages.svelte` — "Send Beacon" button in the list-pane `.route-toolbar` (beside "Manage OTP Secrets"). `onSendBeaconClick`: 0 offered beacons → toast pointing at the Beacons page; 1 → send it; >1 → open a picker menu. `onMount` loads `GET /beacons` + `GET /station/config`. |
+| Send | Reuses `POST /beacons/{id}/send` (same call as `Beacons.svelte` `handleSendNow`). The endpoint carries no body, so position source (live GPS vs fixed coords) is whatever the chosen beacon is configured with — nothing to duplicate. `toasts.success`/`toasts.error` feedback. |
+| Which beacons | `web/src/lib/messagesBeacon.js` — `sendableBeacons(rows, stationCallsign)` keeps only enabled beacons (disabled = parked, scheduler never sends), labels each via `beaconLabel`. Tested in `messagesBeacon.test.js`. |
+
 ## Message call-sign blocklist (issue #465)
 
 Mutes inbound messages from specific senders (e.g. a station that
