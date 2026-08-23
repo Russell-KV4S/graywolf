@@ -224,6 +224,15 @@ Source: [`../../pkg/webapi/dto/kiss.go`](../../pkg/webapi/dto/kiss.go),
 [`../../pkg/configstore/store.go`](../../pkg/configstore/store.go) (`normalizeKissInterface`),
 [`../../pkg/configstore/migrate.go`](../../pkg/configstore/migrate.go) (`migrateKissTcpClientTxDefault`).
 
+### 16c. `resolveTxChannel` honors KISS-TNC channels, not just modem channels
+
+`App.resolveTxChannel` (`pkg/app/wiring.go`) picks the default TX egress channel for messages / iGate traffic. A channel is a valid egress target if it has **either** a modem input device (`Channel.InputDeviceID != nil`) **or** a KISS-TNC governor backend -- an enabled `Mode=tnc` interface with `AllowTxFromGovernor=true` and `Channel != 0`. The KISS-TNC set is computed by `kissTxChannelSet`, mirroring `buildTxBackendSnapshot`'s eligibility as a pure config projection (it does **not** require the interface's queue to be live, matching how the modem side ignores bridge-subprocess health). A configured channel that maps to either backend is returned as-is; otherwise the resolver falls back to the lowest modem channel, then to the lowest KISS-TNC channel, then to the lowest channel ID overall.
+
+*Why:* A KISS-TNC channel legitimately has no `InputDeviceID`. The earlier modem-only resolver skipped it and silently overrode the operator's KISS channel to the first modem channel whenever both were configured, so messages routed to KISS were logged but egressed on the internal APRS modem (graywolf#503). Any change to what counts as a governor egress target must update `buildTxBackendSnapshot` and `kissTxChannelSet` together, or resolution and dispatch drift apart.
+
+Source: [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`resolveTxChannel`, `kissTxChannelSet`, `buildTxBackendSnapshot`),
+[`../../pkg/app/resolve_tx_channel_test.go`](../../pkg/app/resolve_tx_channel_test.go).
+
 ### 17. RX fanout carries provenance via `ingress.Source` (in-process)
 
 *Why:* Lets KISS broadcast suppress its own loopback without leaking a transport detail into the proto -- the provenance tag is in-process only, never on the wire.
