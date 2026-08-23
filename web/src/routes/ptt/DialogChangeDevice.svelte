@@ -58,6 +58,7 @@
       manualPath = initialDevicePath || '';
       manualMode = false;
       probe = null;
+      probing = false;
       gpioLineSel = String(initialGpioLine ?? 0);
       gpioPinSel = String(initialGpioPin ?? 3);
       invert = !!initialInvert;
@@ -70,12 +71,15 @@
   });
 
   // Whenever the effective gpio chip path changes, refresh its line list.
+  // In manual mode the path changes per keystroke, so debounce there (and
+  // loadGpioLines is stale-guarded) to avoid a burst of requests and
+  // out-of-order results. A discrete list selection loads immediately.
   $effect(() => {
-    if (isGpio && effectivePath) {
-      void loadGpioLines(effectivePath);
-    } else {
-      gpioLines = [];
-    }
+    if (!(isGpio && effectivePath)) { gpioLines = []; return; }
+    const path = effectivePath;
+    if (!manualMode) { void loadGpioLines(path); return; }
+    const handle = setTimeout(() => { void loadGpioLines(path); }, 400);
+    return () => clearTimeout(handle);
   });
 
   // Non-blocking advisory for a manually-entered path. Debounced so we
@@ -111,17 +115,20 @@
   function leaveManualMode() {
     manualMode = false;
     probe = null;
+    probing = false;
   }
 
+  let gpioLoadSeq = 0;
   async function loadGpioLines(chipPath) {
+    const seq = ++gpioLoadSeq;
     loadingGpioLines = true;
     try {
       const result = await api.get('/ptt/gpio-chips/' + encodeURIComponent(chipPath) + '/lines');
-      gpioLines = Array.isArray(result) ? result : [];
+      if (seq === gpioLoadSeq) gpioLines = Array.isArray(result) ? result : [];
     } catch {
-      gpioLines = [];
+      if (seq === gpioLoadSeq) gpioLines = [];
     } finally {
-      loadingGpioLines = false;
+      if (seq === gpioLoadSeq) loadingGpioLines = false;
     }
   }
 
@@ -184,7 +191,7 @@
       <Input id="dlg-manual-path" bind:value={manualPath}
         placeholder="/dev/aioc-aprs-ptt" spellcheck={false} autocomplete="off" />
     </FormField>
-    {#if manualPath.trim()}
+    {#if manualPath.trim() && (probing || probe)}
       <p class="probe"
         class:ok={!probing && probe && probe.exists && probe.char_device}
         class:bad={!probing && probe && probe.exists && !probe.char_device}
@@ -195,7 +202,7 @@
           Device present.
         {:else if probe && probe.exists}
           Path exists but is not a character device — double-check it points at the PTT device.
-        {:else if probe}
+        {:else}
           Not present yet. That's fine for a udev-named device — Graywolf will use it once it appears.
         {/if}
       </p>
