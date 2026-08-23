@@ -11,6 +11,7 @@
   // don't have a clean place for until Chonky 0.2.2 adds LogColumn.priority.
   // Revisit when 0.2.2 ships.
 
+  import { tick } from 'svelte';
   import { LogViewer } from '@chrissnell/chonky-ui';
   import { formatDistance } from '../lib/settings/units.js';
   import {
@@ -47,10 +48,46 @@
     // in its footer that opens the deep packet inspector (hex/ASCII dump +
     // error detection). Off by default so the Dashboard stays uncluttered.
     inspectable = false,
+    // Reverse the display so the most recent packet sits at the top (GH #519).
+    // Packets arrive oldest-first from the API; we reverse the already-projected
+    // list here rather than re-fetching, so toggling is instant on large logs.
+    newestFirst = false,
   } = $props();
 
   // Project raw packets into LogEntry shape (adds .level for direction color).
-  const entries = $derived(packets.map(packetToEntry));
+  // When newest-first, reverse the freshly-mapped array (safe to mutate in
+  // place — `map` just produced it) so the newest packet renders at the top.
+  const entries = $derived.by(() => {
+    const mapped = packets.map(packetToEntry);
+    return newestFirst ? mapped.reverse() : mapped;
+  });
+
+  // Chonky's auto-scroll follows the bottom of the list. That's only the "new"
+  // edge in oldest-first order; when the operator flips to newest-first the new
+  // packets arrive at the top, so pinning to the bottom would drag them away
+  // from what they want to see. Suppress it in that mode.
+  const effectiveAutoscroll = $derived(autoscroll && !newestFirst);
+
+  // Chonky's LogViewer is strictly bottom-anchored: its jump-to-bottom button,
+  // unread badge, and scroll position all assume the newest entry lives at the
+  // bottom. In newest-first mode the newest entry is at the top instead, so we
+  // wrap the viewer to (a) tag it with a class the styles below use to hide the
+  // now-misleading jump-to-bottom control and disable browser scroll anchoring
+  // (so freshly-prepended packets stay visible when parked at the top), and
+  // (b) snap the scroll to the top when the operator first flips the toggle on,
+  // bringing the newest packet into view rather than leaving them on the oldest.
+  let viewerWrap = $state();
+  let wasNewestFirst = newestFirst;
+  $effect(() => {
+    const nf = newestFirst;
+    if (nf && !wasNewestFirst) {
+      tick().then(() => {
+        const body = viewerWrap?.querySelector('.log-body');
+        if (body) body.scrollTop = 0;
+      });
+    }
+    wasNewestFirst = nf;
+  });
 
   // Deep packet inspector state (only used when `inspectable`).
   let inspectOpen = $state(false);
@@ -188,17 +225,22 @@
   </div>
 {/snippet}
 
-<LogViewer
-  entries={entries}
-  {columns}
-  {live}
-  {autoscroll}
-  {toolbarToggles}
-  {showHeader}
-  {height}
-  {mobileBreakpoint}
-  footer={rawPacketFooter}
-/>
+<!-- display:contents so the wrapper is purely a DOM handle for the newest-first
+     scroll/anchor tweaks and adds no layout of its own. -->
+<div bind:this={viewerWrap} style="display: contents;">
+  <LogViewer
+    entries={entries}
+    {columns}
+    {live}
+    autoscroll={effectiveAutoscroll}
+    {toolbarToggles}
+    {showHeader}
+    {height}
+    {mobileBreakpoint}
+    footer={rawPacketFooter}
+    class={newestFirst ? 'pkt-order-newest' : undefined}
+  />
+</div>
 
 {#if inspectable}
   <PacketInspector bind:open={inspectOpen} packet={inspectPacket} />
@@ -450,4 +492,12 @@
   :global(.log-viewer .log-card.log-ok)   { border-left: 3px solid var(--color-success); padding-left: calc(0.5rem - 3px); }
   :global(.log-viewer .log-card.log-warn) { border-left: 3px solid var(--color-warning); padding-left: calc(0.5rem - 3px); }
   :global(.log-viewer .log-card.log-dim)  { border-left: 3px solid var(--color-text-dim); padding-left: calc(0.5rem - 3px); }
+
+  /* Newest-first order (GH #519). Chonky's LogViewer is bottom-anchored, so in
+     this mode its jump-to-bottom control and unread badge would point the
+     operator at the OLDEST packets — hide them. Disabling scroll anchoring
+     keeps a freshly-prepended packet in view when the operator is parked at the
+     top, rather than the browser holding the prior content in place. */
+  :global(.log-viewer.pkt-order-newest .log-jump-bottom) { display: none; }
+  :global(.log-viewer.pkt-order-newest .log-body) { overflow-anchor: none; }
 </style>
