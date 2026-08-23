@@ -1710,3 +1710,38 @@ Source: [`../../pkg/app/rxfanout.go`](../../pkg/app/rxfanout.go)
 (`setMod128`, `Mod128`),
 [`../../pkg/ax25conn/manager_test.go`](../../pkg/ax25conn/manager_test.go)
 (`TestManager_DispatchRawMod128Delivers`).
+
+### 63. `messages.Store.List` keyset order MUST match the cursor predicate's whole-second resolution
+
+The chat UI pages through messages with a forward cursor
+(`web/src/lib/messagesTransport.js` `fetchDelta`), so `(*Store).List`
+does keyset pagination on `(updated_at, id)`. The cursor stores
+`updated_at` at **whole-second** resolution (`strftime('%s', ...)`), so
+the `ORDER BY` MUST truncate to the same resolution --
+`CAST(strftime('%s', updated_at) AS INTEGER) ASC, id ASC`. Do NOT
+"optimize" it back to `ORDER BY updated_at ASC` (full precision): that
+mismatch makes the sort key finer than the cursor and silently strands
+rows. Concretely, when an older/lower-id row's `updated_at` is bumped
+into the same second as a newer, higher-id insert (routine ack
+correlation / retry bookkeeping on a busy two-way thread), the older row
+sorts after the cursor tip yet loses the `id` tiebreak and is never
+returned again -- messages stop appearing in the chat window under
+sustained volume (graywolf #521).
+
+Full-precision text comparison is not an escape hatch: glebarez stores
+time as trailing-zero-trimmed RFC3339Nano, whose lexicographic order is
+not chronological (`".9Z"` sorts after `".90000001Z"`), and SQLite cannot
+recover sub-second precision from the text via `strftime`/`julianday`
+without loss. Whole-second resolution keeps the keyset key unique (id
+breaks ties) and monotonic, which is all forward pagination needs.
+
+*Why:* keyset pagination is correct only when the `ORDER BY` expression
+is identical to the cursor predicate; any resolution gap between them
+drops rows.
+
+Source: [`../../pkg/messages/store.go`](../../pkg/messages/store.go)
+(`(*Store).List`, `encodeCursor`),
+[`../../pkg/messages/store_pagination_test.go`](../../pkg/messages/store_pagination_test.go)
+(`TestListCursorHighVolumeNoSkips`),
+[`../../web/src/lib/messagesTransport.js`](../../web/src/lib/messagesTransport.js)
+(`fetchDelta`).
