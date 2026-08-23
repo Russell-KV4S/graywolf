@@ -47,10 +47,25 @@
     // in its footer that opens the deep packet inspector (hex/ASCII dump +
     // error detection). Off by default so the Dashboard stays uncluttered.
     inspectable = false,
+    // Reverse the display so the most recent packet sits at the top (GH #519).
+    // Packets arrive oldest-first from the API; we reverse the already-projected
+    // list here rather than re-fetching, so toggling is instant on large logs.
+    newestFirst = false,
   } = $props();
 
   // Project raw packets into LogEntry shape (adds .level for direction color).
-  const entries = $derived(packets.map(packetToEntry));
+  // When newest-first, reverse the freshly-mapped array (safe to mutate in
+  // place — `map` just produced it) so the newest packet renders at the top.
+  const entries = $derived.by(() => {
+    const mapped = packets.map(packetToEntry);
+    return newestFirst ? mapped.reverse() : mapped;
+  });
+
+  // Chonky's auto-scroll follows the bottom of the list. That's only the "new"
+  // edge in oldest-first order; when the operator flips to newest-first the new
+  // packets arrive at the top, so pinning to the bottom would drag them away
+  // from what they want to see. Suppress it in that mode.
+  const effectiveAutoscroll = $derived(autoscroll && !newestFirst);
 
   // Deep packet inspector state (only used when `inspectable`).
   let inspectOpen = $state(false);
@@ -192,7 +207,7 @@
   entries={entries}
   {columns}
   {live}
-  {autoscroll}
+  autoscroll={effectiveAutoscroll}
   {toolbarToggles}
   {showHeader}
   {height}
