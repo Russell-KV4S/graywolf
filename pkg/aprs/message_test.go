@@ -33,6 +33,21 @@ func TestParseMessageAck(t *testing.T) {
 	}
 }
 
+func TestParseMessageAckTrailingCR(t *testing.T) {
+	// Kenwood TH-D75A appends a trailing CR to its ack info field.
+	info := []byte(":D3DKY   :ack018\r")
+	pkt, err := ParseInfo(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pkt.Message.IsAck {
+		t.Fatalf("expected ack, got %+v", pkt.Message)
+	}
+	if pkt.Message.MessageID != "018" {
+		t.Errorf("id %q, want %q", pkt.Message.MessageID, "018")
+	}
+}
+
 func TestParseBulletin(t *testing.T) {
 	info := []byte(":BLN1     :Net tonight at 2000z")
 	pkt, err := ParseInfo(info)

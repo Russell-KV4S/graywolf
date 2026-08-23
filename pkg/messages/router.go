@@ -807,6 +807,11 @@ func unwrapThirdParty(pkt *aprs.DecodedAPRSPacket) (string, *aprs.Message) {
 		out.MessageID = out.Text[3:]
 		out.Text = ""
 	}
+	// Mirror parseMessage: strip any trailing CR/whitespace a radio
+	// appended to the info field so the msgid (and reply-ack piggyback id,
+	// which trails the field) correlate cleanly.
+	out.MessageID = strings.TrimRight(out.MessageID, " \r\n\t")
+	out.ReplyAck = strings.TrimRight(out.ReplyAck, " \r\n\t")
 	return innerSrc, out
 }
 
