@@ -7,6 +7,43 @@
 # route the body references via [text](link) markdown; renderer only
 # accepts internal #/... routes.
 
+- version: "0.14.13"
+  date: "2026-08-24"
+  style: info
+  schema_version: 1
+  link: "#/channels"
+  title: "Channel on/off switch, Send Beacon from Messages, and igate/message fixes"
+  body: |
+    You can turn individual channels on and off now. A switch on the
+    Channels page disables a channel without deleting its configuration,
+    so you can park a radio or a KISS TNC and bring it back later without
+    setting it up again.
+
+    The Messages view has a Send Beacon button. You can send your position
+    beacon right from where you read and write messages instead of
+    switching pages.
+
+    Packet log views can sort newest-first. A toggle flips the order so
+    the latest packets stay at the top.
+
+    You can type a PTT device path by hand. If your PTT device does not
+    show up in the picker, enter its path directly instead of being stuck.
+
+    The map draws a station's beacon trail when you hover over it and
+    there is no signal path to show, so you still get a sense of where it
+    has been.
+
+    iGating from the internet out to RF is more precise. You can filter
+    which packet types get gated, and you can now gate messages to any
+    station you have heard directly on RF, not just ones in a fixed list.
+
+    Fixes: messages to and from Kenwood TH-D75 radios no longer break on a
+    stray carriage return in the message ID, so acks match up correctly; a
+    station running SSID -0 is treated the same as its bare call sign when
+    routing direct messages; outbound traffic no longer gets forced onto
+    the modem channel when it should go out a KISS TNC; and busy message
+    threads no longer strand older messages when you page through them.
+
 - version: "0.14.12"
   date: "2026-07-23"
   style: info
