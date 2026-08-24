@@ -209,6 +209,15 @@ type migration struct {
 //	    singleton iff an enabled RF filter exists, so operators who had
 //	    IS->RF active keep it on upgrade instead of silently losing it.
 //	    Post-AutoMigrate; no-op on fresh DBs (issue #496).
+//	29 — channels_enabled: add the channels.enabled column (default 1)
+//	    so a channel can be disabled without deleting it. Backfills
+//	    enabled=1 on every existing row so upgrades keep all channels
+//	    running. SQLite's ALTER TABLE ADD COLUMN with a constant DEFAULT 1
+//	    already returns 1 for pre-existing rows; the explicit UPDATE is
+//	    belt-and-suspenders so every row carries a written value regardless
+//	    of how the column was created. Post-AutoMigrate; the ALTER is
+//	    skipped when AutoMigrate already added the column (columnExists
+//	    guard). See graywolf#517.
 var schemaMigrations = []migration{
 	{version: 1, name: "beacon_compress_default", phase: postAutoMigrate, run: migrateBeaconCompressDefault},
 	{version: 2, name: "channel_device_fields", phase: preAutoMigrate, run: migrateChannelDeviceFields},
@@ -238,6 +247,7 @@ var schemaMigrations = []migration{
 	{version: 26, name: "kiss_allow_connected_mode", phase: postAutoMigrate, run: migrateKissAllowConnectedMode},
 	{version: 27, name: "igate_is_tx_via", phase: postAutoMigrate, run: migrateIGateIsTxVia},
 	{version: 28, name: "igate_gate_is_to_rf_backfill", phase: postAutoMigrate, run: migrateIGateGateIsToRfBackfill},
+	{version: 29, name: "channels_enabled", phase: postAutoMigrate, run: migrateChannelsEnabled},
 }
 
 // runMigrations applies every pending migration in the given phase,

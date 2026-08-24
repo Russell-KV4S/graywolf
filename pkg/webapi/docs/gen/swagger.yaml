@@ -1087,6 +1087,11 @@ definitions:
       tx:
         $ref: '#/definitions/dto.TxCapability'
     type: object
+  dto.ChannelEnabledRequest:
+    properties:
+      enabled:
+        type: boolean
+    type: object
   dto.ChannelKissTncEntry:
     properties:
       allow_tx_from_governor:
@@ -1133,6 +1138,16 @@ definitions:
         type: integer
       decoder_offset:
         type: integer
+      enabled:
+        description: |-
+          Enabled gates whether graywolf brings the channel up. A pointer so
+          an omitted field means "leave at the default" (true) rather than
+          "disable": older clients and partial callers that never send the
+          key keep their channels running. ToModel substitutes true when nil.
+          A channel PUT is a full-resource replace, so an editor that echoes
+          the row's current enabled value preserves a disabled state across
+          unrelated field edits.
+        type: boolean
       fix_bits:
         type: string
       fx25_encode:
@@ -1172,6 +1187,16 @@ definitions:
         type: integer
       decoder_offset:
         type: integer
+      enabled:
+        description: |-
+          Enabled gates whether graywolf brings the channel up. A pointer so
+          an omitted field means "leave at the default" (true) rather than
+          "disable": older clients and partial callers that never send the
+          key keep their channels running. ToModel substitutes true when nil.
+          A channel PUT is a full-resource replace, so an editor that echoes
+          the row's current enabled value preserves a disabled state across
+          unrelated field edits.
+        type: boolean
       fix_bits:
         type: string
       fx25_encode:
@@ -4655,6 +4680,47 @@ paths:
       security:
         - CookieAuth: []
       summary: Update channel
+      tags:
+        - channels
+  /channels/{id}/enabled:
+    put:
+      consumes:
+        - application/json
+      operationId: setChannelEnabled
+      parameters:
+        - description: Channel id
+          in: path
+          name: id
+          required: true
+          type: integer
+        - description: Enabled flag
+          in: body
+          name: body
+          required: true
+          schema:
+            $ref: '#/definitions/dto.ChannelEnabledRequest'
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.ChannelResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      security:
+        - CookieAuth: []
+      summary: Enable or disable a channel
       tags:
         - channels
   /channels/{id}/ptt:

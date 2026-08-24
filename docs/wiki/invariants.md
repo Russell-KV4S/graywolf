@@ -241,6 +241,25 @@ Source: [`../../pkg/webapi/dto/kiss.go`](../../pkg/webapi/dto/kiss.go),
 Source: [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`resolveTxChannel`, `kissTxChannelSet`, `buildTxBackendSnapshot`),
 [`../../pkg/app/resolve_tx_channel_test.go`](../../pkg/app/resolve_tx_channel_test.go).
 
+### 16d. A disabled channel (`Channel.Enabled == false`) is inert across every backend
+
+`Channel.Enabled` (default true; column added by migration 29) is the single authoritative gate for whether graywolf brings a channel up. A disabled channel must be excluded at **every** place that enumerates channels for a backend, so it opens no device and moves no traffic:
+
+- **Modem:** `pushConfiguration` (`pkg/modembridge/session.go`) filters disabled channels before emitting `ConfigureAudio` / `ConfigureChannel` / `ConfigurePtt`, so the Rust modem never opens the audio device or decodes the channel -- same treatment as the `InputDeviceID == nil` KISS-only skip.
+- **Governor egress:** `buildTxBackendSnapshot`, `kissTxChannelSet`, and `resolveTxChannel` (`pkg/app/wiring.go`) skip disabled channels (`disabledChannelSet`), so a disabled channel is never a TX target -- neither its modem backend nor a KISS-TNC interface bound to it. This composes with invariant 16c: the disabled filter and the two egress projections must stay in lockstep.
+- **KISS device:** a KISS interface whose `Channel` is disabled is stopped so its TNC device (serial fd / socket) is released. Boot goes through `kissComponent`; a live toggle goes through `webapi.notifyKissManager` (which re-reads the channel's enabled state) driven by `reconcileKissForChannel` on the channel update / enable-toggle handlers.
+
+Toggling is hot: `PUT /api/channels/{id}/enabled` (and a full channel PUT) calls `notifyBridgeReload` (modem reconfigure + TX snapshot rebuild) and `reconcileKissForChannel`, so no restart is needed.
+
+*Why:* The feature (graywolf#517) lets an operator park a channel -- e.g. an HF radio usually on voice -- without deleting its config. "Parked" only holds if the channel is inert on *all three* surfaces; a miss on any one leaves the device open or the channel silently egressing. Note the store-layer caveat: `Channel.Enabled` carries a `default:true` GORM tag, so `CreateChannel` cannot distinguish an explicit `false` from an unset zero value -- a create-disabled request is honored one layer up in `webapi.createChannel` off the request's `*bool`, and `dto.ChannelRequest.Enabled` is a pointer for the same reason.
+
+Two deliberate scoping choices: (1) disabling does **not** trigger the channel-referrer guard (no 409) -- it is a reversible park with the config preserved, mirroring the unguarded KISS `setKissEnabled` toggle; `computeTxCapability` intentionally ignores `Enabled` so the guard fires only on real config changes (e.g. removing the output device), not on a park. (2) `computeChannelBacking` / `computeTxCapability` are config-level projections and also ignore `Enabled`; the disabled state is surfaced to the operator by the Channels page (`ChannelRow.svelte`: Disabled badge, dimmed card, a "Disabled" backing row in place of live/down) rather than by mutating those pure functions -- keeping them keyed only on backing config, not runtime enable state.
+
+Source: [`../../pkg/modembridge/session.go`](../../pkg/modembridge/session.go) (`pushConfiguration`),
+[`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`disabledChannelSet`, `buildTxBackendSnapshot`, `kissTxChannelSet`, `resolveTxChannel`, `kissComponent`),
+[`../../pkg/webapi/channels.go`](../../pkg/webapi/channels.go) (`setChannelEnabled`, `reconcileKissForChannel`, `createChannel`),
+[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`notifyKissManager`).
+
 ### 17. RX fanout carries provenance via `ingress.Source` (in-process)
 
 *Why:* Lets KISS broadcast suppress its own loopback without leaking a transport detail into the proto -- the provenance tag is in-process only, never on the wire.
