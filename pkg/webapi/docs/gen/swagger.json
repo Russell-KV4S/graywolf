@@ -2368,6 +2368,70 @@
                 }
             }
         },
+        "/channels/{id}/enabled": {
+            "put": {
+                "security": [
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "channels"
+                ],
+                "summary": "Enable or disable a channel",
+                "operationId": "setChannelEnabled",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Channel id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Enabled flag",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/dto.ChannelEnabledRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/dto.ChannelResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webtypes.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/webtypes.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/webtypes.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/channels/{id}/ptt": {
             "post": {
                 "security": [
@@ -6614,6 +6678,51 @@
                 }
             }
         },
+        "/ptt/check-device": {
+            "post": {
+                "security": [
+                    {
+                        "CookieAuth": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "ptt"
+                ],
+                "summary": "Check a PTT device path",
+                "operationId": "checkPttDevice",
+                "parameters": [
+                    {
+                        "description": "Device path to inspect",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/dto.CheckDeviceRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/dto.CheckDeviceResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/webtypes.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/ptt/gpio-chips/{chip}/lines": {
             "get": {
                 "security": [
@@ -9917,6 +10026,14 @@
                 }
             }
         },
+        "dto.ChannelEnabledRequest": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                }
+            }
+        },
         "dto.ChannelKissTncEntry": {
             "type": "object",
             "properties": {
@@ -9982,6 +10099,10 @@
                 "decoder_offset": {
                     "type": "integer"
                 },
+                "enabled": {
+                    "description": "Enabled gates whether graywolf brings the channel up. A pointer so\nan omitted field means \"leave at the default\" (true) rather than\n\"disable\": older clients and partial callers that never send the\nkey keep their channels running. ToModel substitutes true when nil.\nA channel PUT is a full-resource replace, so an editor that echoes\nthe row's current enabled value preserves a disabled state across\nunrelated field edits.",
+                    "type": "boolean"
+                },
                 "fix_bits": {
                     "type": "string"
                 },
@@ -10041,6 +10162,10 @@
                 "decoder_offset": {
                     "type": "integer"
                 },
+                "enabled": {
+                    "description": "Enabled gates whether graywolf brings the channel up. A pointer so\nan omitted field means \"leave at the default\" (true) rather than\n\"disable\": older clients and partial callers that never send the\nkey keep their channels running. ToModel substitutes true when nil.\nA channel PUT is a full-resource replace, so an editor that echoes\nthe row's current enabled value preserves a disabled state across\nunrelated field edits.",
+                    "type": "boolean"
+                },
                 "fix_bits": {
                     "type": "string"
                 },
@@ -10091,6 +10216,28 @@
                 },
                 "space_freq": {
                     "type": "integer"
+                }
+            }
+        },
+        "dto.CheckDeviceRequest": {
+            "type": "object",
+            "properties": {
+                "device_path": {
+                    "type": "string"
+                }
+            }
+        },
+        "dto.CheckDeviceResponse": {
+            "type": "object",
+            "properties": {
+                "char_device": {
+                    "type": "boolean"
+                },
+                "exists": {
+                    "type": "boolean"
+                },
+                "message": {
+                    "type": "string"
                 }
             }
         },
@@ -12356,7 +12503,7 @@
                     "type": "string"
                 },
                 "via": {
-                    "description": "Via is the callsign of the last digipeater in the most recent packet's H-bit path; empty for direct packets.",
+                    "description": "Via is how the most recent packet reached us: \"rf\" (heard on radio) or \"is\" (received from APRS-IS).",
                     "type": "string"
                 },
                 "weather": {
@@ -12439,7 +12586,7 @@
                     "type": "string"
                 },
                 "via": {
-                    "description": "Via is the callsign of the last digipeater (H-bit) that forwarded this position packet; empty for direct.",
+                    "description": "Via is how this position packet reached us: \"rf\" (heard on radio) or \"is\" (received from APRS-IS).",
                     "type": "string"
                 }
             }

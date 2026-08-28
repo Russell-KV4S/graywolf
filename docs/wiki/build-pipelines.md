@@ -42,6 +42,34 @@ The pre-commit hook in [`../../.githooks/`](../../.githooks/) (wired via
 `make install-hooks`) runs the same `docs-check` / `api-client-check`
 guards locally.
 
+## Rust modem uses the pure-Rust HID backend (no system libhidapi/libudev)
+
+The CM108 HID PTT path depends on `hidapi`, but
+[`../../graywolf-modem/Cargo.toml`](../../graywolf-modem/Cargo.toml) pins it
+with `default-features = false, features = ["linux-native-basic-udev"]` on
+non-Android targets. That selects hidapi's **pure-Rust hidraw backend** plus
+the pure-Rust `basic-udev` enumeration crate:
+
+- **No system `libhidapi`** is compiled or linked on Linux -- the C backend
+  (which emits `hid_init` / `hid_enumerate` / `hid_free_enumeration` and needs
+  `-lhidapi` at link time) is never selected. `cargo tree -e features -i hidapi`
+  should show only the `linux-native-basic-udev` feature.
+- **No `libudev`** build/runtime dependency (device discovery walks
+  `/sys/class/hidraw/` directly). Deliberately avoid the plain `linux-native`
+  feature -- it pulls the libudev-FFI `udev` crate and re-triggers the cross-rs
+  armv6 link failure.
+- macOS (IOKit) and Windows (SetupAPI) backends are `cfg(target_os = ...)`
+  gated and unaffected.
+
+Historical context: GH [#512](https://github.com/chrissnell/graywolf/issues/512)
+reported `undefined symbol: hid_enumerate` building on CachyOS/Arch. That was an
+**old release (0.10.1)** that predated this backend selection and linked the C
+backend without system libhidapi present. The pure-Rust backend landed in
+`cbfa1c4b` (first shipped in v0.13.13); any release from v0.13.13 on links no
+C hidapi and needs no `hidapi` system package. To verify a fresh build:
+`readelf -d target/release/graywolf-modem | grep -i hidapi` prints nothing and
+`nm -D` shows no undefined `hid_*` symbols.
+
 ## Two 32-bit ARM builds share one dpkg arch
 
 There are two distinct 32-bit ARM hard-float builds, and both the Go

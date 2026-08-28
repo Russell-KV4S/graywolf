@@ -76,6 +76,15 @@ type Channel struct {
 	NumDecoders    uint32       `gorm:"not null;default:1" json:"num_decoders"`
 	DecoderOffset  int32        `gorm:"not null;default:0" json:"decoder_offset"`
 	Mode           string       `gorm:"not null;default:'aprs'" json:"mode"` // aprs|packet|aprs+packet
+	// Enabled gates whether graywolf brings this channel up. When false
+	// the channel is fully inert: the modem subprocess is never told
+	// about it (no audio device opened, no RX/TX), any KISS interface
+	// bound to it is stopped (device released), and it is not registered
+	// as a governor TX backend, so outbound routing never selects it.
+	// The row's configuration is preserved for a later re-enable. Default
+	// true so pre-existing channels and any client that omits the field
+	// keep running. See graywolf#517.
+	Enabled        bool         `gorm:"not null;default:true" json:"enabled"`
 	CreatedAt      time.Time    `json:"-"`
 	UpdatedAt      time.Time    `json:"-"`
 }
@@ -371,13 +380,14 @@ type IGateConfig struct {
 	UpdatedAt time.Time `json:"-"`
 }
 
-// IGateRfFilter is a per-channel allow/deny rule used to decide which
-// RF-originated packets are forwarded to APRS-IS. Evaluation: lowest
+// IGateRfFilter is a per-channel allow/deny rule for the IS->RF gate: it
+// decides which packets received from APRS-IS are forwarded out to RF
+// (tier 2 of the gate; see pkg/igate/filters). Evaluation: lowest
 // Priority first (ascending order); first match determines action.
 type IGateRfFilter struct {
 	ID        uint32    `gorm:"primaryKey;autoIncrement" json:"id"`
 	Channel   uint32    `gorm:"not null;index" json:"channel"`
-	Type      string    `gorm:"not null" json:"type"` // callsign|prefix|message_dest|object
+	Type      string    `gorm:"not null" json:"type"` // callsign|prefix|message_dest|object|packet_type
 	Pattern   string    `gorm:"not null" json:"pattern"`
 	Action    string    `gorm:"not null;default:'allow'" json:"action"` // allow|deny
 	Priority  uint32    `gorm:"not null;default:100" json:"priority"`

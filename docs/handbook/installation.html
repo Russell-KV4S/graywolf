@@ -215,6 +215,22 @@ makepkg -si</code></pre>
 
 <pre><code>sudo systemctl enable --now graywolf-aprs</code></pre>
 
+        <div class="callout info">
+          <span class="callout-icon">&#9432;</span>
+          <div class="callout-body">
+            <p>
+              <strong>No <code>hidapi</code> system package is required.</strong>
+              Graywolf's modem uses a pure-Rust <code>hidraw</code> backend for
+              CM108 PTT, so it does not link the system <code>libhidapi</code> C
+              library. If an older AUR build (0.10.x or earlier) failed with
+              <code>undefined symbol: hid_enumerate</code> /
+              <code>hid_init</code> under the <code>lld</code> linker, update to
+              the current package -- v0.13.13 and later removed that C link
+              dependency entirely.
+            </p>
+          </div>
+        </div>
+
       </div>
 
       <!-- ── Windows ── -->
@@ -402,8 +418,17 @@ volumes:
           <li>Go 1.22+</li>
           <li>Node.js 22+ and npm (for the web UI)</li>
           <li>GNU Make</li>
-          <li>ALSA development headers (<code>libasound2-dev</code> on Debian/Ubuntu)</li>
+          <li>ALSA development headers (<code>libasound2-dev</code> on Debian/Ubuntu, <code>alsa-lib</code> on Arch)</li>
         </ul>
+
+        <p>
+          <code>libhidapi</code> and <code>libudev</code> are <strong>not</strong>
+          required: the Rust modem uses a pure-Rust <code>hidraw</code> backend
+          for CM108 PTT and enumerates HID devices via <code>/sys</code>
+          directly, so nothing links the system <code>libhidapi</code> C library
+          (the source of the old <code>undefined symbol: hid_enumerate</code>
+          link error on Arch/CachyOS).
+        </p>
 
         <h2>Build</h2>
 
@@ -608,7 +633,7 @@ sudo packaging/scripts/postinstall.sh</code></pre>
         <table>
           <tr>
             <td><code>version</code></td>
-            <td>Print the version string (<code>v0.14.13-abc1234</code>)</td>
+            <td>Print the version string (<code>v0.14.14-abc1234</code>)</td>
           </tr>
           <tr>
             <td><code>auth set-password --user NAME</code></td>

@@ -125,7 +125,8 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 	const (
 		errMissingType  = "type is required"
 		errMissingPat   = "pattern is required"
-		errBareWildcard = "pattern must not be empty or a bare wildcard"
+		errEmptyPat     = "pattern must not be empty"
+		errBareStarType = "a bare `*` wildcard is only supported for message_dest"
 		errWildcardType = "`*` wildcard is only supported for message_dest and object types"
 		errTrailingOnly = "`*` is only supported as a trailing wildcard"
 	)
@@ -165,6 +166,16 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "NW5W-*"},
 		},
 		{
+			// A bare `*` ("any addressee") is allowed only for
+			// message_dest: tier-1's heard-direct check bounds delivery.
+			name: "accept_message_dest_bare_star",
+			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "*"},
+		},
+		{
+			name: "accept_message_dest_padded_bare_star",
+			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "  *  "},
+		},
+		{
 			name: "accept_object_exact",
 			req:  IGateRfFilterRequest{Type: "object", Pattern: "WX-001"},
 		},
@@ -177,21 +188,28 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "  NW5W-*  "},
 		},
 
-		// --- bare-wildcard / empty-after-trim (flooding guard) -----------
+		// --- empty-after-trim (flooding guard) ---------------------------
 		{
 			name:    "reject_whitespace_only_pattern",
 			req:     IGateRfFilterRequest{Type: "message_dest", Pattern: "   "},
-			wantErr: errBareWildcard,
+			wantErr: errEmptyPat,
 		},
+
+		// --- bare `*` on non-message_dest types (flooding guard) ---------
 		{
-			name:    "reject_bare_star",
-			req:     IGateRfFilterRequest{Type: "message_dest", Pattern: "*"},
-			wantErr: errBareWildcard,
-		},
-		{
-			name:    "reject_padded_bare_star",
+			name:    "reject_object_bare_star",
 			req:     IGateRfFilterRequest{Type: "object", Pattern: " * "},
-			wantErr: errBareWildcard,
+			wantErr: errBareStarType,
+		},
+		{
+			name:    "reject_callsign_bare_star",
+			req:     IGateRfFilterRequest{Type: "callsign", Pattern: "*"},
+			wantErr: errBareStarType,
+		},
+		{
+			name:    "reject_prefix_bare_star",
+			req:     IGateRfFilterRequest{Type: "prefix", Pattern: "*"},
+			wantErr: errBareStarType,
 		},
 
 		// --- wildcard in wrong type --------------------------------------
@@ -231,6 +249,30 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 			name:    "reject_object_star_with_trailing_whitespace_internal",
 			req:     IGateRfFilterRequest{Type: "object", Pattern: "WX* X"},
 			wantErr: errTrailingOnly,
+		},
+
+		// --- packet_type: fixed category, not a wildcard string ----------
+		{
+			name: "accept_packet_type_message",
+			req:  IGateRfFilterRequest{Type: "packet_type", Pattern: "message"},
+		},
+		{
+			name: "accept_packet_type_position",
+			req:  IGateRfFilterRequest{Type: "packet_type", Pattern: "position"},
+		},
+		{
+			name: "accept_packet_type_case_insensitive_padded",
+			req:  IGateRfFilterRequest{Type: "packet_type", Pattern: "  Weather  "},
+		},
+		{
+			name:    "reject_packet_type_unknown_category",
+			req:     IGateRfFilterRequest{Type: "packet_type", Pattern: "bogus"},
+			wantErr: "packet_type pattern must be one of: message, position, weather, object, item, telemetry, status, query",
+		},
+		{
+			name:    "reject_packet_type_wildcard",
+			req:     IGateRfFilterRequest{Type: "packet_type", Pattern: "message*"},
+			wantErr: "packet_type pattern must be one of: message, position, weather, object, item, telemetry, status, query",
 		},
 	}
 

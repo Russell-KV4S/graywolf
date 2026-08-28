@@ -1115,6 +1115,11 @@ definitions:
       tx:
         $ref: '#/definitions/dto.TxCapability'
     type: object
+  dto.ChannelEnabledRequest:
+    properties:
+      enabled:
+        type: boolean
+    type: object
   dto.ChannelKissTncEntry:
     properties:
       allow_tx_from_governor:
@@ -1161,6 +1166,16 @@ definitions:
         type: integer
       decoder_offset:
         type: integer
+      enabled:
+        description: |-
+          Enabled gates whether graywolf brings the channel up. A pointer so
+          an omitted field means "leave at the default" (true) rather than
+          "disable": older clients and partial callers that never send the
+          key keep their channels running. ToModel substitutes true when nil.
+          A channel PUT is a full-resource replace, so an editor that echoes
+          the row's current enabled value preserves a disabled state across
+          unrelated field edits.
+        type: boolean
       fix_bits:
         type: string
       fx25_encode:
@@ -1200,6 +1215,16 @@ definitions:
         type: integer
       decoder_offset:
         type: integer
+      enabled:
+        description: |-
+          Enabled gates whether graywolf brings the channel up. A pointer so
+          an omitted field means "leave at the default" (true) rather than
+          "disable": older clients and partial callers that never send the
+          key keep their channels running. ToModel substitutes true when nil.
+          A channel PUT is a full-resource replace, so an editor that echoes
+          the row's current enabled value preserves a disabled state across
+          unrelated field edits.
+        type: boolean
       fix_bits:
         type: string
       fx25_encode:
@@ -1234,6 +1259,20 @@ definitions:
         $ref: '#/definitions/dto.ChannelPtt'
       space_freq:
         type: integer
+    type: object
+  dto.CheckDeviceRequest:
+    properties:
+      device_path:
+        type: string
+    type: object
+  dto.CheckDeviceResponse:
+    properties:
+      char_device:
+        type: boolean
+      exists:
+        type: boolean
+      message:
+        type: string
     type: object
   dto.ConversationPrefsRequest:
     properties:
@@ -2930,7 +2969,7 @@ definitions:
         description: SymbolTable is the APRS symbol table character ("/" primary, "\\" alternate, or an overlay char).
         type: string
       via:
-        description: Via is the callsign of the last digipeater in the most recent packet's H-bit path; empty for direct packets.
+        description: 'Via is how the most recent packet reached us: "rf" (heard on radio) or "is" (received from APRS-IS).'
         type: string
       weather:
         allOf:
@@ -2989,7 +3028,7 @@ definitions:
         description: Timestamp is the UTC RFC3339 time the position was received.
         type: string
       via:
-        description: Via is the callsign of the last digipeater (H-bit) that forwarded this position packet; empty for direct.
+        description: 'Via is how this position packet reached us: "rf" (heard on radio) or "is" (received from APRS-IS).'
         type: string
     type: object
   webapi.StationRosterDTO:
@@ -4839,6 +4878,47 @@ paths:
       security:
         - CookieAuth: []
       summary: Update channel
+      tags:
+        - channels
+  /channels/{id}/enabled:
+    put:
+      consumes:
+        - application/json
+      operationId: setChannelEnabled
+      parameters:
+        - description: Channel id
+          in: path
+          name: id
+          required: true
+          type: integer
+        - description: Enabled flag
+          in: body
+          name: body
+          required: true
+          schema:
+            $ref: '#/definitions/dto.ChannelEnabledRequest'
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.ChannelResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      security:
+        - CookieAuth: []
+      summary: Enable or disable a channel
       tags:
         - channels
   /channels/{id}/ptt:
@@ -7613,6 +7693,34 @@ paths:
       security:
         - CookieAuth: []
       summary: Get PTT capabilities
+      tags:
+        - ptt
+  /ptt/check-device:
+    post:
+      consumes:
+        - application/json
+      operationId: checkPttDevice
+      parameters:
+        - description: Device path to inspect
+          in: body
+          name: body
+          required: true
+          schema:
+            $ref: '#/definitions/dto.CheckDeviceRequest'
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/dto.CheckDeviceResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/webtypes.ErrorResponse'
+      security:
+        - CookieAuth: []
+      summary: Check a PTT device path
       tags:
         - ptt
   /ptt/gpio-chips/{chip}/lines:

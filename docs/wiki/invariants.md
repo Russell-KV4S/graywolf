@@ -172,12 +172,50 @@ Source:
 [`../../pkg/app/config.go`](../../pkg/app/config.go),
 [`../../graywolf-modem/build.rs`](../../graywolf-modem/build.rs).
 
-### 15. Default IS->RF policy is deny
+### 15. IS->RF gating is a two-tier AND; default policy is deny
 
-*Why:* The IS->RF rule engine evaluates rules in priority order and drops anything no rule matches, preventing accidental flooding of RF with arbitrary internet traffic.
+IS->RF transmission requires **both** tiers to allow a packet:
 
-Source: [`../../pkg/igate/filters/filters.go`](../../pkg/igate/filters/filters.go)
-(package comment).
+- **Tier 1 — hardcoded** (`Igate.shouldForwardISToRF`, `pkg/igate/igate.go`):
+  directed messages only forward to an addressee heard **directly** on RF
+  within `heardDirectTTL` (30 min, `pkg/igate/heard.go`); non-message
+  traffic only forwards if sourced from one of the operator's own SSIDs
+  (`sourceIsOwnSSID`). Not operator-configurable.
+- **Tier 2 — the rule engine** (`filters.Engine.Allow`): priority-ordered,
+  first-match-wins, **default deny**. Rule types: `callsign`, `prefix`,
+  `message_dest`, `object`, `packet_type`. `packet_type` matches on the
+  decoded `aprs.PacketType`; its Pattern is a fixed category key (`message`,
+  `position`, `weather`, `object`, `item`, `telemetry`, `status`, `query`)
+  mapped to the aprs.is `t/…` classes, not a wildcard string. The category
+  set lives in `packetTypeCategories` (`pkg/igate/filters/filters.go`) and is
+  mirrored as strings in the DTO validator (`packetTypeCategoryKeys`,
+  `pkg/webapi/dto/igate.go`) and the Svelte `packetTypeOptions` — keep the
+  three in sync. Messages-only IS→RF gating is one allow rule of type
+  `packet_type` = `message` (graywolf #518).
+
+A bare `*` pattern is a flooding footgun for source-side rules
+(`callsign`/`prefix`) and a silent no-op elsewhere, so it is rejected —
+**except for `message_dest`, where a bare `*` means "any addressee" and is
+allowed**: tier 1's heard-direct check already bounds directed-message
+delivery to stations physically heard on RF, so it cannot flood. This is
+the one-rule way to get the textbook iGate "deliver to whoever we heard"
+behavior (graywolf #496). The bare-`*` allowance is enforced in the engine
+(`matches`), the DTO validator (`validateIGateRfFilterPattern`), and the
+Svelte client mirror (`validatePattern`) — keep all three in sync.
+
+The master IS->RF on/off switch is `IGateConfig.GateIsToRf`: when false the
+TX governor is never wired into the iGate, so no packet reaches RF
+regardless of the rule table (`buildIgateInstance` / `reloadIgate` in
+`pkg/app/wiring.go`). It is surfaced as the "Enable IS→RF gating" toggle on
+the iGate page's gating tab.
+
+*Why:* preventing accidental flooding of RF with arbitrary internet traffic
+while still allowing standard iGate message forwarding to be enabled in one
+step.
+
+Source: [`../../pkg/igate/filters/filters.go`](../../pkg/igate/filters/filters.go),
+[`../../pkg/igate/igate.go`](../../pkg/igate/igate.go) (`shouldForwardISToRF`),
+[`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (governor wiring).
 
 ### 16. TX path is single-source-of-truth via `txgovernor`
 
@@ -193,6 +231,34 @@ Source: [`../../pkg/txgovernor/governor.go`](../../pkg/txgovernor/governor.go)
 Source: [`../../pkg/webapi/dto/kiss.go`](../../pkg/webapi/dto/kiss.go),
 [`../../pkg/configstore/store.go`](../../pkg/configstore/store.go) (`normalizeKissInterface`),
 [`../../pkg/configstore/migrate.go`](../../pkg/configstore/migrate.go) (`migrateKissTcpClientTxDefault`).
+
+### 16c. `resolveTxChannel` honors KISS-TNC channels, not just modem channels
+
+`App.resolveTxChannel` (`pkg/app/wiring.go`) picks the default TX egress channel for messages / iGate traffic. A channel is a valid egress target if it has **either** a modem input device (`Channel.InputDeviceID != nil`) **or** a KISS-TNC governor backend -- an enabled `Mode=tnc` interface with `AllowTxFromGovernor=true` and `Channel != 0`. The KISS-TNC set is computed by `kissTxChannelSet`, mirroring `buildTxBackendSnapshot`'s eligibility as a pure config projection (it does **not** require the interface's queue to be live, matching how the modem side ignores bridge-subprocess health). A configured channel that maps to either backend is returned as-is; otherwise the resolver falls back to the lowest modem channel, then to the lowest KISS-TNC channel, then to the lowest channel ID overall.
+
+*Why:* A KISS-TNC channel legitimately has no `InputDeviceID`. The earlier modem-only resolver skipped it and silently overrode the operator's KISS channel to the first modem channel whenever both were configured, so messages routed to KISS were logged but egressed on the internal APRS modem (graywolf#503). Any change to what counts as a governor egress target must update `buildTxBackendSnapshot` and `kissTxChannelSet` together, or resolution and dispatch drift apart.
+
+Source: [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`resolveTxChannel`, `kissTxChannelSet`, `buildTxBackendSnapshot`),
+[`../../pkg/app/resolve_tx_channel_test.go`](../../pkg/app/resolve_tx_channel_test.go).
+
+### 16d. A disabled channel (`Channel.Enabled == false`) is inert across every backend
+
+`Channel.Enabled` (default true; column added by migration 29) is the single authoritative gate for whether graywolf brings a channel up. A disabled channel must be excluded at **every** place that enumerates channels for a backend, so it opens no device and moves no traffic:
+
+- **Modem:** `pushConfiguration` (`pkg/modembridge/session.go`) filters disabled channels before emitting `ConfigureAudio` / `ConfigureChannel` / `ConfigurePtt`, so the Rust modem never opens the audio device or decodes the channel -- same treatment as the `InputDeviceID == nil` KISS-only skip.
+- **Governor egress:** `buildTxBackendSnapshot`, `kissTxChannelSet`, and `resolveTxChannel` (`pkg/app/wiring.go`) skip disabled channels (`disabledChannelSet`), so a disabled channel is never a TX target -- neither its modem backend nor a KISS-TNC interface bound to it. This composes with invariant 16c: the disabled filter and the two egress projections must stay in lockstep.
+- **KISS device:** a KISS interface whose `Channel` is disabled is stopped so its TNC device (serial fd / socket) is released. Boot goes through `kissComponent`; a live toggle goes through `webapi.notifyKissManager` (which re-reads the channel's enabled state) driven by `reconcileKissForChannel` on the channel update / enable-toggle handlers.
+
+Toggling is hot: `PUT /api/channels/{id}/enabled` (and a full channel PUT) calls `notifyBridgeReload` (modem reconfigure + TX snapshot rebuild) and `reconcileKissForChannel`, so no restart is needed.
+
+*Why:* The feature (graywolf#517) lets an operator park a channel -- e.g. an HF radio usually on voice -- without deleting its config. "Parked" only holds if the channel is inert on *all three* surfaces; a miss on any one leaves the device open or the channel silently egressing. Note the store-layer caveat: `Channel.Enabled` carries a `default:true` GORM tag, so `CreateChannel` cannot distinguish an explicit `false` from an unset zero value -- a create-disabled request is honored one layer up in `webapi.createChannel` off the request's `*bool`, and `dto.ChannelRequest.Enabled` is a pointer for the same reason.
+
+Two deliberate scoping choices: (1) disabling does **not** trigger the channel-referrer guard (no 409) -- it is a reversible park with the config preserved, mirroring the unguarded KISS `setKissEnabled` toggle; `computeTxCapability` intentionally ignores `Enabled` so the guard fires only on real config changes (e.g. removing the output device), not on a park. (2) `computeChannelBacking` / `computeTxCapability` are config-level projections and also ignore `Enabled`; the disabled state is surfaced to the operator by the Channels page (`ChannelRow.svelte`: Disabled badge, dimmed card, a "Disabled" backing row in place of live/down) rather than by mutating those pure functions -- keeping them keyed only on backing config, not runtime enable state.
+
+Source: [`../../pkg/modembridge/session.go`](../../pkg/modembridge/session.go) (`pushConfiguration`),
+[`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`disabledChannelSet`, `buildTxBackendSnapshot`, `kissTxChannelSet`, `resolveTxChannel`, `kissComponent`),
+[`../../pkg/webapi/channels.go`](../../pkg/webapi/channels.go) (`setChannelEnabled`, `reconcileKissForChannel`, `createChannel`),
+[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`notifyKissManager`).
 
 ### 17. RX fanout carries provenance via `ingress.Source` (in-process)
 
@@ -1971,3 +2037,66 @@ Source: [`../../web/src/lib/map/focus-hash-core.js`](../../web/src/lib/map/focus
 listener registration), `node_modules/svelte-spa-router/Router.svelte`
 (`push()`'s `window.location.hash` assignment, the `<svelte:component>`
 render).
+
+### 69. `messages.Store.List` keyset order MUST match the cursor predicate's whole-second resolution
+
+The chat UI pages through messages with a forward cursor
+(`web/src/lib/messagesTransport.js` `fetchDelta`), so `(*Store).List`
+does keyset pagination on `(updated_at, id)`. The cursor stores
+`updated_at` at **whole-second** resolution (`strftime('%s', ...)`), so
+the `ORDER BY` MUST truncate to the same resolution --
+`CAST(strftime('%s', updated_at) AS INTEGER) ASC, id ASC`. Do NOT
+"optimize" it back to `ORDER BY updated_at ASC` (full precision): that
+mismatch makes the sort key finer than the cursor and silently strands
+rows. Concretely, when an older/lower-id row's `updated_at` is bumped
+into the same second as a newer, higher-id insert (routine ack
+correlation / retry bookkeeping on a busy two-way thread), the older row
+sorts after the cursor tip yet loses the `id` tiebreak and is never
+returned again -- messages stop appearing in the chat window under
+sustained volume (graywolf #521).
+
+Full-precision text comparison is not an escape hatch: glebarez stores
+time as trailing-zero-trimmed RFC3339Nano, whose lexicographic order is
+not chronological (`".9Z"` sorts after `".90000001Z"`), and SQLite cannot
+recover sub-second precision from the text via `strftime`/`julianday`
+without loss. Whole-second resolution keeps the keyset key unique (id
+breaks ties) and monotonic, which is all forward pagination needs.
+
+*Why:* keyset pagination is correct only when the `ORDER BY` expression
+is identical to the cursor predicate; any resolution gap between them
+drops rows.
+
+Source: [`../../pkg/messages/store.go`](../../pkg/messages/store.go)
+(`(*Store).List`, `encodeCursor`),
+[`../../pkg/messages/store_pagination_test.go`](../../pkg/messages/store_pagination_test.go)
+(`TestListCursorHighVolumeNoSkips`),
+[`../../web/src/lib/messagesTransport.js`](../../web/src/lib/messagesTransport.js)
+(`fetchDelta`).
+
+### 70. Web UI renders in Inconsolata everywhere; no system/Helvetica stack
+
+Every visible glyph in the web UI is Inconsolata. The font is applied
+through the `--font-mono` custom property (`'Inconsolata', 'Courier New',
+monospace`), set on `body` by both `chonky-ui` and `web/src/app.css` and
+inherited by headings and controls. Component CSS must not override
+`font-family` with a system stack (`-apple-system`, `BlinkMacSystemFont`,
+`system-ui`, `'Helvetica Neue'`, `Arial`, `sans-serif`); use
+`var(--font-mono)`. The Messages surface (bubbles, invite text, compose
+box) once carried an iOS-style stack "to feel like messaging" -- that was
+removed so the product reads as one typeface (graywolf #576).
+
+*Why:* a lone component reintroducing the platform font is exactly the
+regression this issue fixed; it looks like a native iOS control dropped
+into an otherwise-monospace app.
+
+Two intentional exceptions, neither a UI text font:
+
+- Emoji-only spans (e.g. the `.bolt` zap glyph) use an `'Apple Color
+  Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', system-ui, sans-serif`
+  stack to render color emoji, not Latin text.
+- MapLibre label layers name glyph sets (`'Open Sans ...'`, `'Arial
+  Unicode MS ...'` in `web/src/lib/map/layers/fronts.js`) that must match
+  the tile server's font stack; these are map-render font names, not CSS.
+
+The per-tab page header (`web/src/components/PageHeader.svelte`,
+`.page-title`) is pinned to `var(--font-mono)` at 22px.

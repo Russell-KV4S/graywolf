@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"strings"
 
 	"github.com/chrissnell/graywolf/pkg/configstore"
 	"github.com/chrissnell/graywolf/pkg/pttdevice"
@@ -43,6 +44,7 @@ func (s *Server) registerPtt(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/ptt/available", s.listPttDevices)
 	mux.HandleFunc("GET /api/ptt/capabilities", s.getPttCapabilities)
 	mux.HandleFunc("POST /api/ptt/test-rigctld", s.testRigctld)
+	mux.HandleFunc("POST /api/ptt/check-device", s.checkPttDevice)
 	mux.HandleFunc("GET /api/ptt/gpio-chips/{chip}/lines", s.listGpioLines)
 	mux.HandleFunc("GET /api/ptt/{channel}", s.getPttConfig)
 	mux.HandleFunc("PUT /api/ptt/{channel}", s.updatePttConfig)
@@ -215,6 +217,42 @@ func (s *Server) getPttCapabilities(w http.ResponseWriter, r *http.Request) {
 // @Router   /ptt/test-rigctld [post]
 func (s *Server) testRigctld(w http.ResponseWriter, r *http.Request) {
 	s.handleTestRigctld(w, r)
+}
+
+// checkPttDevice inspects a manually-entered PTT device path on behalf of
+// the UI's device dialog. It stats the path (never opens it — opening a
+// serial device can briefly key the radio) and reports whether it exists
+// and looks like a character device. This is advisory only: the response
+// is always HTTP 200 for a non-empty path, and a "not present yet" result
+// must not stop the operator from saving, since a udev-named device is
+// allowed to be absent at config time and appear on plug-in (GH #511).
+//
+// @Summary  Check a PTT device path
+// @Tags     ptt
+// @ID       checkPttDevice
+// @Accept   json
+// @Produce  json
+// @Param    body body     dto.CheckDeviceRequest true "Device path to inspect"
+// @Success  200  {object} dto.CheckDeviceResponse
+// @Failure  400  {object} webtypes.ErrorResponse
+// @Security CookieAuth
+// @Router   /ptt/check-device [post]
+func (s *Server) checkPttDevice(w http.ResponseWriter, r *http.Request) {
+	req, err := decodeJSON[dto.CheckDeviceRequest](r)
+	if err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.DevicePath) == "" {
+		badRequest(w, "device_path is required")
+		return
+	}
+	res := pttdevice.Probe(req.DevicePath)
+	writeJSON(w, http.StatusOK, dto.CheckDeviceResponse{
+		Exists:     res.Exists,
+		CharDevice: res.CharDevice,
+		Message:    res.Detail,
+	})
 }
 
 // listGpioLines enumerates the lines of a gpiochip character device.

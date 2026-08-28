@@ -417,6 +417,25 @@ func TestRouterDMBareBaseCallAddressClaimed(t *testing.T) {
 	}, "auto-ACK submitted for bare base-call address")
 }
 
+func TestRouterDMDashZeroSSIDOfOurBareCallClaimed(t *testing.T) {
+	// We run as bare K0TFU. A radio that always appends "-0" replies to
+	// K0TFU-0; per AX.25 that is the same station, so the reply must be
+	// filed and auto-ACKed so it lands in the DM thread (graywolf#500).
+	r, store, sink, _, _, _, cleanup := buildRouter(t, "K0TFU", nil)
+	defer cleanup()
+
+	pkt := makeMessagePacket(t, "W1ABC", "K0TFU-0", "reply from a -0 radio", "001", aprs.DirectionRF)
+	_ = r.SendPacket(context.Background(), pkt)
+
+	waitFor(t, time.Second, func() bool {
+		ms, _, _ := store.List(context.Background(), Filter{})
+		return len(ms) == 1
+	}, "row persisted for -0 SSID of our bare call")
+	waitFor(t, time.Second, func() bool {
+		return len(sink.list()) >= 1
+	}, "auto-ACK submitted for -0 SSID of our bare call")
+}
+
 func TestMatchAddresseeSSIDAware(t *testing.T) {
 	tac := NewTacticalSet()
 	tac.Store(map[string]struct{}{"NET": {}})
@@ -437,6 +456,12 @@ func TestMatchAddresseeSSIDAware(t *testing.T) {
 		{"different base", "K0TFU-1", "W1ABC", false, false},
 		{"tactical alias", "K0TFU-1", "NET", true, true},
 		{"empty addressee", "K0TFU-1", "", false, false},
+		// AX.25 SSID 0 is canonically the bare call, so <base>-0 and bare
+		// <base> address the same station (graywolf#500).
+		{"dash-zero addressee for bare our call", "K0TFU", "K0TFU-0", true, false},
+		{"bare addressee for dash-zero our call", "K0TFU-0", "K0TFU", true, false},
+		{"dash-zero both sides", "K0TFU-0", "K0TFU-0", true, false},
+		{"dash-zero addressee for ssid our call", "K0TFU-1", "K0TFU-0", true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -444,6 +469,35 @@ func TestMatchAddresseeSSIDAware(t *testing.T) {
 			if got.IsForUs != tc.wantForUs || got.IsTactical != tc.wantTac {
 				t.Fatalf("MatchAddressee(%q,%q) = %+v, want ForUs=%v Tactical=%v",
 					tc.ourCall, tc.addressee, got, tc.wantForUs, tc.wantTac)
+			}
+		})
+	}
+}
+
+func TestCallAddressedToUsDashZeroSSID(t *testing.T) {
+	// Per AX.25, SSID 0 is the same station as the bare call, so a "-0"
+	// SSID collapses to the bare call on either side. Every other SSID
+	// identifies a distinct peer and must stay distinct (graywolf#500).
+	cases := []struct {
+		name      string
+		addressee string
+		ourCall   string
+		want      bool
+	}{
+		{"dash-zero addressee, bare our call", "CALL-0", "CALL", true},
+		{"bare addressee, dash-zero our call", "CALL", "CALL-0", true},
+		{"dash-zero both sides", "CALL-0", "CALL-0", true},
+		{"dash-zero addressee, ssid our call", "CALL-0", "CALL-7", true},
+		{"distinct non-zero ssids do not match", "CALL-7", "CALL-1", false},
+		{"same non-zero ssid matches", "CALL-7", "CALL-7", true},
+		{"different base does not match", "CALL-0", "OTHER", false},
+		{"case insensitive dash-zero", "call-0", "CALL", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := callAddressedToUs(tc.addressee, tc.ourCall); got != tc.want {
+				t.Fatalf("callAddressedToUs(%q, %q) = %v, want %v",
+					tc.addressee, tc.ourCall, got, tc.want)
 			}
 		})
 	}
@@ -560,6 +614,40 @@ func TestRouterDMAckCorrelationFlipsOutbound(t *testing.T) {
 	}
 }
 
+func TestRouterDMAckCorrelationTrailingCRFlipsOutbound(t *testing.T) {
+	// Regression for GH #507: a Kenwood TH-D75A appends a trailing CR to
+	// its ack info field (":N0CALL:ack042\r"). The parsed msgid must be
+	// trimmed so it correlates against the stored outbound "042".
+	r, store, _, _, _, _, cleanup := buildRouter(t, "N0CALL", nil)
+	defer cleanup()
+
+	ctx := context.Background()
+	out := &configstore.Message{
+		Direction:  "out",
+		OurCall:    "N0CALL",
+		FromCall:   "N0CALL",
+		ToCall:     "W1ABC",
+		Text:       "ping",
+		MsgID:      "042",
+		ThreadKind: ThreadKindDM,
+		Source:     "rf",
+	}
+	if err := store.Insert(ctx, out); err != nil {
+		t.Fatalf("Insert out: %v", err)
+	}
+
+	pkt := makeAckRejPacket(t, "W1ABC", "N0CALL", "ack", "042\r")
+	if pkt.Message.MessageID != "042" {
+		t.Fatalf("expected trimmed msgid %q, got %q", "042", pkt.Message.MessageID)
+	}
+	_ = r.SendPacket(ctx, pkt)
+
+	waitFor(t, time.Second, func() bool {
+		got, _ := store.GetByID(ctx, out.ID)
+		return got != nil && got.AckState == AckStateAcked
+	}, "ack state flip with trailing CR")
+}
+
 func TestRouterDMRejCorrelationFlipsOutbound(t *testing.T) {
 	r, store, _, _, _, _, cleanup := buildRouter(t, "N0CALL", nil)
 	defer cleanup()
@@ -611,6 +699,39 @@ func TestRouterReplyAckCorrelationDMClosesAsAcked(t *testing.T) {
 		got, _ := store.GetByID(ctx, out.ID)
 		return got != nil && got.AckState == AckStateAcked
 	}, "DM reply-ack flip")
+}
+
+func TestRouterReplyAckCorrelationTrailingCRClosesAsAcked(t *testing.T) {
+	// Regression for GH #507: a radio that appends a trailing CR puts it
+	// at the tail of the info field, i.e. inside the reply-ack piggyback
+	// id ("yo{12}100\r"). The parsed ReplyAck must be trimmed to "100" so
+	// correlateReplyAck flips the outbound.
+	r, store, _, _, _, _, cleanup := buildRouter(t, "N0CALL", nil)
+	defer cleanup()
+	ctx := context.Background()
+
+	out := &configstore.Message{
+		Direction:  "out",
+		OurCall:    "N0CALL",
+		FromCall:   "N0CALL",
+		ToCall:     "W1ABC",
+		Text:       "hi",
+		MsgID:      "100",
+		ThreadKind: ThreadKindDM,
+	}
+	if err := store.Insert(ctx, out); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	pkt := makeReplyAckPacket(t, "W1ABC", "N0CALL", "yo", "12", "100\r")
+	if pkt.Message.ReplyAck != "100" {
+		t.Fatalf("expected trimmed reply-ack %q, got %q", "100", pkt.Message.ReplyAck)
+	}
+	_ = r.SendPacket(ctx, pkt)
+	waitFor(t, time.Second, func() bool {
+		got, _ := store.GetByID(ctx, out.ID)
+		return got != nil && got.AckState == AckStateAcked
+	}, "DM reply-ack flip with trailing CR")
 }
 
 func TestRouterReplyAckTacticalSetsReceivedByCallOnly(t *testing.T) {

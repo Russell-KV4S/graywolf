@@ -477,6 +477,7 @@
   bind:open={dialogDeviceOpen}
   method={dialogMethodChosen}
   {deviceSource}
+  allowManualEntry={!isAndroid}
   initialDevicePath={dialogContext?.item?.device_path || null}
   initialGpioLine={dialogContext?.item?.gpio_line ?? 0}
   initialGpioPin={dialogContext?.item?.gpio_pin ?? 3}

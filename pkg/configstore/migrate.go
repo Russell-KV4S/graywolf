@@ -204,6 +204,12 @@ type migration struct {
 //	    direction index for list queries, next_send_at index for the
 //	    outbound scheduler). The Bulletin model is NOT in the AutoMigrate
 //	    list; this migration is the single source of truth for its schema.
+//	29 — bulletin_interval: add retransmit_interval_secs to bulletins
+//	    (default 20 minutes). Post-AutoMigrate; backfills any row
+//	    AutoMigrate left at 0 to the default.
+//	30 — bulletin_row_interval: make the retransmit interval a per-row
+//	    setting instead of a global default, backfilling existing rows
+//	    from the prior global value.
 //	31 — igate_is_tx_via: replace the inert i_gate_configs.max_msg_hops
 //	    WIDE-hop count with the is_tx_via literal via-path string
 //	    (Direwolf-style IGTXVIA). AutoMigrate adds is_tx_via (empty
@@ -212,6 +218,21 @@ type migration struct {
 //	    an empty path before the fix, so an empty is_tx_via preserves
 //	    behavior exactly. Post-AutoMigrate, guarded by columnExists
 //	    (issue #489).
+//	32 — igate_gate_is_to_rf_backfill: GateIsToRf became the real IS->RF
+//	    master switch (the TX governor is now wired on it, not on the old
+//	    implicit "has >=1 enabled rule"). Sets gate_is_to_rf=true on the
+//	    singleton iff an enabled RF filter exists, so operators who had
+//	    IS->RF active keep it on upgrade instead of silently losing it.
+//	    Post-AutoMigrate; no-op on fresh DBs (issue #496).
+//	33 — channels_enabled: add the channels.enabled column (default 1)
+//	    so a channel can be disabled without deleting it. Backfills
+//	    enabled=1 on every existing row so upgrades keep all channels
+//	    running. SQLite's ALTER TABLE ADD COLUMN with a constant DEFAULT 1
+//	    already returns 1 for pre-existing rows; the explicit UPDATE is
+//	    belt-and-suspenders so every row carries a written value regardless
+//	    of how the column was created. Post-AutoMigrate; the ALTER is
+//	    skipped when AutoMigrate already added the column (columnExists
+//	    guard). See graywolf#517.
 var schemaMigrations = []migration{
 	{version: 1, name: "beacon_compress_default", phase: postAutoMigrate, run: migrateBeaconCompressDefault},
 	{version: 2, name: "channel_device_fields", phase: preAutoMigrate, run: migrateChannelDeviceFields},
@@ -244,6 +265,8 @@ var schemaMigrations = []migration{
 	{version: 29, name: "bulletin_interval", phase: postAutoMigrate, run: migrateBulletinInterval},
 	{version: 30, name: "bulletin_row_interval", phase: postAutoMigrate, run: migrateBulletinRowInterval},
 	{version: 31, name: "igate_is_tx_via", phase: postAutoMigrate, run: migrateIGateIsTxVia},
+	{version: 32, name: "igate_gate_is_to_rf_backfill", phase: postAutoMigrate, run: migrateIGateGateIsToRfBackfill},
+	{version: 33, name: "channels_enabled", phase: postAutoMigrate, run: migrateChannelsEnabled},
 }
 
 // runMigrations applies every pending migration in the given phase,

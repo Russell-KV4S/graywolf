@@ -487,6 +487,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/channels/{id}/enabled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Enable or disable a channel */
+        put: operations["setChannelEnabled"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/channels/{id}/ptt": {
         parameters: {
             query?: never;
@@ -1540,6 +1557,23 @@ export interface paths {
         get: operations["getPttCapabilities"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ptt/check-device": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check a PTT device path */
+        post: operations["checkPttDevice"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2712,6 +2746,9 @@ export interface components {
             summary?: string;
             tx?: components["schemas"]["dto.TxCapability"];
         };
+        "dto.ChannelEnabledRequest": {
+            enabled?: boolean;
+        };
         "dto.ChannelKissTncEntry": {
             allow_tx_from_governor?: boolean;
             interface_id?: number;
@@ -2740,6 +2777,16 @@ export interface components {
         "dto.ChannelRequest": {
             bit_rate?: number;
             decoder_offset?: number;
+            /**
+             * @description Enabled gates whether graywolf brings the channel up. A pointer so
+             *     an omitted field means "leave at the default" (true) rather than
+             *     "disable": older clients and partial callers that never send the
+             *     key keep their channels running. ToModel substitutes true when nil.
+             *     A channel PUT is a full-resource replace, so an editor that echoes
+             *     the row's current enabled value preserves a disabled state across
+             *     unrelated field edits.
+             */
+            enabled?: boolean;
             fix_bits?: string;
             fx25_encode?: boolean;
             il2p_encode?: boolean;
@@ -2760,6 +2807,16 @@ export interface components {
             backing?: components["schemas"]["dto.ChannelBacking"];
             bit_rate?: number;
             decoder_offset?: number;
+            /**
+             * @description Enabled gates whether graywolf brings the channel up. A pointer so
+             *     an omitted field means "leave at the default" (true) rather than
+             *     "disable": older clients and partial callers that never send the
+             *     key keep their channels running. ToModel substitutes true when nil.
+             *     A channel PUT is a full-resource replace, so an editor that echoes
+             *     the row's current enabled value preserves a disabled state across
+             *     unrelated field edits.
+             */
+            enabled?: boolean;
             fix_bits?: string;
             fx25_encode?: boolean;
             id?: number;
@@ -2777,6 +2834,14 @@ export interface components {
             profile?: string;
             ptt?: components["schemas"]["dto.ChannelPtt"];
             space_freq?: number;
+        };
+        "dto.CheckDeviceRequest": {
+            device_path?: string;
+        };
+        "dto.CheckDeviceResponse": {
+            char_device?: boolean;
+            exists?: boolean;
+            message?: string;
         };
         "dto.ConversationPrefsRequest": {
             /**
@@ -3846,7 +3911,7 @@ export interface components {
             symbol_code?: string;
             /** @description SymbolTable is the APRS symbol table character ("/" primary, "\\" alternate, or an overlay char). */
             symbol_table?: string;
-            /** @description Via is the callsign of the last digipeater in the most recent packet's H-bit path; empty for direct packets. */
+            /** @description Via is how the most recent packet reached us: "rf" (heard on radio) or "is" (received from APRS-IS). */
             via?: string;
             /** @description Weather is optional weather telemetry; present only when include=weather is requested and the station reports weather. */
             weather?: components["schemas"]["webapi.WeatherDTO"];
@@ -3880,7 +3945,7 @@ export interface components {
             speed_kt?: number;
             /** @description Timestamp is the UTC RFC3339 time the position was received. */
             timestamp?: string;
-            /** @description Via is the callsign of the last digipeater (H-bit) that forwarded this position packet; empty for direct. */
+            /** @description Via is how this position packet reached us: "rf" (heard on radio) or "is" (received from APRS-IS). */
             via?: string;
         };
         "webapi.StationRosterDTO": {
@@ -6207,6 +6272,61 @@ export interface operations {
                 };
                 content: {
                     "*/*": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    setChannelEnabled: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Channel id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        /** @description Enabled flag */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["dto.ChannelEnabledRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.ChannelResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
                 };
             };
         };
@@ -9994,6 +10114,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["webapi.pttCapabilities"];
+                };
+            };
+        };
+    };
+    checkPttDevice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Device path to inspect */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["dto.CheckDeviceRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.CheckDeviceResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
                 };
             };
         };
