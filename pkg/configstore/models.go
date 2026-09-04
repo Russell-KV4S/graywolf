@@ -592,13 +592,21 @@ type MapsDownload struct {
 }
 
 // GPSConfig is a singleton (id=1) row for the GPS receiver.
+//
+// SourceType "fixed" is a manually-entered station coordinate rather than
+// a live receiver: FixedLat / FixedLon / FixedAlt supply the position that
+// is fed into the same cache the serial/gpsd readers write, so distance,
+// bearing, beacons, and the station list all consume it identically.
 type GPSConfig struct {
 	ID         uint32    `gorm:"primaryKey;autoIncrement" json:"id"`
-	SourceType string    `gorm:"not null;default:'none'" json:"source"` // none|serial|gpsd
+	SourceType string    `gorm:"not null;default:'none'" json:"source"` // none|serial|gpsd|fixed
 	Device     string    `json:"serial_port"`                           // serial device path, e.g. /dev/ttyUSB0
 	BaudRate   uint32    `gorm:"not null;default:4800" json:"baud_rate"`
 	GpsdHost   string    `gorm:"not null;default:'localhost'" json:"gpsd_host"`
 	GpsdPort   uint32    `gorm:"not null;default:2947" json:"gpsd_port"`
+	FixedLat   float64   `gorm:"not null;default:0" json:"fixed_lat"` // decimal degrees, north positive (source=fixed)
+	FixedLon   float64   `gorm:"not null;default:0" json:"fixed_lon"` // decimal degrees, east positive (source=fixed)
+	FixedAlt   float64   `gorm:"not null;default:0" json:"fixed_alt"` // metres above MSL; 0 = unspecified
 	Enabled    bool      `gorm:"not null;default:false" json:"enabled"`
 	CreatedAt  time.Time `json:"-"`
 	UpdatedAt  time.Time `json:"-"`
