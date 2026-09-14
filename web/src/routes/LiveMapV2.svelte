@@ -996,7 +996,8 @@
   // reconcile it as the manifest poll rolls frames in and out. Looping then
   // toggles opacity between already-loaded frames rather than refetching tiles.
   $effect(() => {
-    radarLayer?.setFrames(radarFrames.frames.map((f) => f.ts));
+    const tsList = radarFrames.frames.map((f) => f.ts);
+    radarLayer?.setFrames(tsList);
   });
   // Drive the current animation frame into the layer. setFrameTs hands the
   // visible opacity from the previous frame to the current one (no refetch).
