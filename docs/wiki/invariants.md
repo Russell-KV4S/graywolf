@@ -668,8 +668,36 @@ threading one. Regression coverage:
 drives a real socket and asserts the gate hook fires after a hot reload; a
 mock-based field assertion would not have caught the omission.
 
+**The escape hatch is to make the field manager-owned instead.**
+`kiss.Manager` installs `OnDecodeError`, `OnFrameIngress`,
+`OnClientTxAccepted`, `RxIngress`, `Clock`, `Sink` and `InterfaceID` onto
+every config it starts, from `ManagerConfig`, whenever the per-start
+literal leaves them nil. A field handled that way cannot be forgotten by
+either dispatch site, because neither site sets it. `OnClientChange`
+joined that set in graywolf#548: it had been the lone metrics hook still
+supplied per-`Start`, set only by the boot literal, so any config save
+replaced the running server with one that had no reporter and
+`graywolf_kiss_clients_active` read 0 until the next restart. It is now
+installed by `Manager.Start` from `ManagerConfig.OnClientChange`, wrapped
+with the interface's row ID and display name, and the boot literal no
+longer sets it. An explicit per-start hook still wins, so direct callers
+and tests are unaffected.
+
+Prefer this shape for any new cross-cutting hook. As of #548 the only
+behavioural field still duplicated across both literals is `GateTxToIs`,
+which is genuinely per-interface config rather than a shared hook.
+
+Regression coverage:
+[`../../pkg/kiss/manager_test.go`](../../pkg/kiss/manager_test.go)
+(`TestManagerInstallsOnClientChangeWithIfaceAndName`,
+`TestManagerOnClientChangePerStartWins`) and
+[`../../pkg/webapi/kiss_client_gauge_test.go`](../../pkg/webapi/kiss_client_gauge_test.go),
+which drives the hot-reload path through the real handler and socket.
+
 Source: [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`kissComponent`),
-[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`notifyKissManager`).
+[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`notifyKissManager`),
+[`../../pkg/kiss/manager.go`](../../pkg/kiss/manager.go) (`Manager.Start`
+hook installs).
 
 ### 35. All blocking Bluetooth and USB calls run on a worker thread
 
