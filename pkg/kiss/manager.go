@@ -83,6 +83,7 @@ type Manager struct {
 	// per-instance tx enqueue fails. Labels: interface_id, reason.
 	onTxQueueDrop func(ifaceID uint32, reason string)
 	// onClientStateChange fires on every tcp-client state transition.
+	onClientChange      func(ifaceID uint32, name string, active int)
 	onClientStateChange func(ifaceID uint32, name string, st InterfaceStatus)
 	// onClientReconnect fires once per successful dial.
 	onClientReconnect   func(ifaceID uint32)
@@ -175,6 +176,15 @@ type ManagerConfig struct {
 	// OnTxQueueDrop is an optional counter incrementer invoked when a
 	// per-instance tx enqueue fails ("busy" | "down").
 	OnTxQueueDrop func(ifaceID uint32, reason string)
+	// OnClientChange, if non-nil, is installed on every Server
+	// launched by this Manager whose ServerConfig leaves the
+	// per-start hook nil. The Manager wraps it with the interface's
+	// DB row ID and display name so the wiring layer can report the
+	// active-client gauge from one place instead of every caller
+	// having to remember the field (graywolf#548). Server-listen
+	// only -- tcp-client and serial interfaces have no inbound
+	// clients to count.
+	OnClientChange func(ifaceID uint32, name string, active int)
 	// OnClientStateChange, if non-nil, is invoked on every state
 	// transition of a tcp-client supervisor. The wiring layer uses
 	// this to surface the Phase 4 kiss_client metrics (connected
@@ -213,6 +223,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		running:               make(map[uint32]*managedServer),
 		onTxQueueDepth:        cfg.OnTxQueueDepth,
 		onTxQueueDrop:         cfg.OnTxQueueDrop,
+		onClientChange:        cfg.OnClientChange,
 		onClientStateChange:   cfg.OnClientStateChange,
 		onClientReconnect:     cfg.OnClientReconnect,
 		onSerialStateChange:   cfg.OnSerialStateChange,
@@ -267,6 +278,15 @@ func (m *Manager) Start(parent context.Context, id uint32, cfg ServerConfig) {
 		cfg.OnClientTxAccepted = func(ctx context.Context, channel uint32, f *ax25.Frame) {
 			fn(ctx, ifaceID, channel, f)
 		}
+	}
+	if cfg.OnClientChange == nil && m.onClientChange != nil {
+		// Capture the name as well as the ID: the active-client gauge
+		// is labelled by interface name, and on a rename the outgoing
+		// server's teardown must report 0 under the name it was
+		// started with so the old series retires instead of sticking.
+		ifaceID, name := id, cfg.Name
+		fn := m.onClientChange
+		cfg.OnClientChange = func(active int) { fn(ifaceID, name, active) }
 	}
 	if cfg.RxIngress == nil {
 		cfg.RxIngress = m.rxIngress
