@@ -37,12 +37,26 @@
     which packet types get gated, and you can now gate messages to any
     station you have heard directly on RF, not just ones in a fixed list.
 
+    Home stations without a GPS receiver can now enter a fixed latitude,
+    longitude, and altitude as their station location. It's used the same
+    way as a live GPS fix for distance and bearing to other stations and
+    for position beacons.
+
+    Map station and trail popups now show speed and altitude in your
+    chosen units. If you've turned on metric units, popups show km/h and
+    meters instead of always showing mph and feet.
+
+    More radio models are recognized correctly in station popups,
+    including some that were previously missing.
+
     Fixes: messages to and from Kenwood TH-D75 radios no longer break on a
     stray carriage return in the message ID, so acks match up correctly; a
     station running SSID -0 is treated the same as its bare call sign when
     routing direct messages; outbound traffic no longer gets forced onto
-    the modem channel when it should go out a KISS TNC; and busy message
-    threads no longer strand older messages when you page through them.
+    the modem channel when it should go out a KISS TNC; busy message
+    threads no longer strand older messages when you page through them;
+    and a separate chat-window bug that could silently drop your own most
+    recent outgoing messages on a busy thread is also fixed.
 
 - version: "0.14.13"
   date: "2026-07-31"
