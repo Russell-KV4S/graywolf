@@ -1859,3 +1859,54 @@ Source: [`../../pkg/messages/store.go`](../../pkg/messages/store.go)
 (`TestListNewestWindowReturnsMostRecent`),
 [`../../web/src/components/messages/MessageThread.svelte`](../../web/src/components/messages/MessageThread.svelte)
 (`fetchThread`).
+
+### 66. A map-layer `$effect` MUST read reactive state before the optional chain
+
+Every map layer module (`stationsLayer`, `trailsLayer`, `radarLayer`,
+`heatmapLayer`, ...) is a plain non-reactive `let` in
+[`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte),
+assigned inside `onMapReady()` -- which fires on MapLibre's `load` event,
+*after* the component's effects have already run once. So on run 1 every
+one of those variables is `null`.
+
+Svelte 5 tracks dependencies dynamically: only signals actually *read*
+during a run are registered. That makes this shape a silent no-op:
+
+```js
+$effect(() => {
+  layer?.setThing(someStore.value);   // WRONG
+});
+```
+
+On run 1 `layer` is null, `?.` short-circuits, the argument is never
+evaluated, `someStore.value` is never read, and the effect ends up with
+**zero dependencies**. Assigning `layer` later re-triggers nothing,
+because it is not `$state`. The effect never runs again for the life of
+that map generation. Always hoist the read:
+
+```js
+$effect(() => {
+  const v = someStore.value;          // RIGHT -- dep registered on run 1
+  layer?.setThing(v);
+});
+```
+
+*Why:* the failure is invisible. The UI control still moves, still
+persists to localStorage, and the value is still picked up by the layer's
+*mount* options on the next page load, so the setting appears to work
+until you watch it live. This shipped twice: the RX heatmap opacity
+slider (graywolf #578, dead outright) and the radar frame
+preload/eviction reconcile (graywolf #584, masked by `setFrameTs`'s
+`ensureFrame` fallback, leaking one MapLibre source+layer per frame).
+
+The layer modules' own unit tests cannot catch it -- they call
+`setOpacity()`/`setFrames()` directly and pass either way -- and the web
+suite is plain `node --test` over pure JS with no Svelte component
+harness. The rule is therefore enforced as a source-level check over
+every `.svelte` file by
+[`../../web/src/routes/LiveMapV2.effect-deps.test.js`](../../web/src/routes/LiveMapV2.effect-deps.test.js).
+
+Source: [`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
+(the `setVisible`/`setOpacity`/`setFrames` effects and the comment above
+the `layerToggles.stations` effect),
+[`../../web/src/routes/LiveMapV2.effect-deps.test.js`](../../web/src/routes/LiveMapV2.effect-deps.test.js).
