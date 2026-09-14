@@ -1096,7 +1096,8 @@
   });
 
   $effect(() => {
-    heatmapLayer?.setOpacity(layerToggles.directRxHeatmapOpacity);
+    const v = layerToggles.directRxHeatmapOpacity;
+    heatmapLayer?.setOpacity(v);
   });
 
   $effect(() => {
