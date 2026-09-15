@@ -168,12 +168,12 @@ func (a *App) dispatchRxFrame(ctx context.Context, item rxFanoutItem, aprsSubmit
 	}
 
 	if srv := a.currentAgwServer(); srv != nil {
-		srv.BroadcastRawKISS(uint8(rf.Channel), rf.Data)
+		srv.BroadcastRawKISS(rf.Channel, rf.Data)
 	}
 
 	if f.IsUI() {
 		if srv := a.currentAgwServer(); srv != nil {
-			srv.BroadcastMonitoredUI(uint8(rf.Channel), f)
+			srv.BroadcastMonitoredUI(rf.Channel, f)
 		}
 		a.digi.Handle(ctx, rf.Channel, f, src)
 		if pkt, err := aprs.Parse(f); err == nil && pkt != nil {
