@@ -134,6 +134,13 @@ func (a *App) dispatchRxFrame(ctx context.Context, item rxFanoutItem, aprsSubmit
 		alevel = audioLevelFromFrame(rf)
 	}
 
+	// Raw KISS clients (e.g. Xastir) do their own decoding and want every
+	// frame, including ones graywolf itself fails to decode — so this must
+	// run before the decode early-return below, not after it.
+	if srv := a.currentAgwServer(); srv != nil {
+		srv.BroadcastRawKISS(rf.Channel, rf.Data)
+	}
+
 	f, err := ax25.Decode(rf.Data)
 	if err != nil {
 		a.plog.Record(packetlog.Entry{
@@ -165,10 +172,6 @@ func (a *App) dispatchRxFrame(ctx context.Context, item rxFanoutItem, aprsSubmit
 			"frame_len", len(rf.Data),
 			"source_callsign", f.Source.String(),
 		)
-	}
-
-	if srv := a.currentAgwServer(); srv != nil {
-		srv.BroadcastRawKISS(rf.Channel, rf.Data)
 	}
 
 	if f.IsUI() {
