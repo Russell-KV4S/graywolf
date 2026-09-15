@@ -177,9 +177,13 @@ Source:
 IS->RF transmission requires **both** tiers to allow a packet:
 
 - **Tier 1 — hardcoded** (`Igate.shouldForwardISToRF`, `pkg/igate/igate.go`):
-  directed messages only forward to an addressee heard **directly** on RF
-  within `heardDirectTTL` (30 min, `pkg/igate/heard.go`); non-message
-  traffic only forwards if sourced from one of the operator's own SSIDs
+  loop prevention runs first and covers both kinds of traffic —
+  `pathContainsSelf` drops any packet already carrying our own callsign in
+  its path. Directed messages then forward only to an addressee heard
+  **directly** on RF within `heardDirectTTL` (30 min,
+  `pkg/igate/heard.go`), and never when the message is a bulletin or an NWS
+  broadcast or carries an empty addressee; non-message traffic only
+  forwards if sourced from one of the operator's own SSIDs
   (`sourceIsOwnSSID`). Not operator-configurable.
 - **Tier 2 — the rule engine** (`filters.Engine.Allow`): priority-ordered,
   first-match-wins, **default deny**. Rule types: `callsign`, `prefix`,
@@ -192,6 +196,12 @@ IS->RF transmission requires **both** tiers to allow a packet:
   `pkg/webapi/dto/igate.go`) and the Svelte `packetTypeOptions` — keep the
   three in sync. Messages-only IS→RF gating is one allow rule of type
   `packet_type` = `message` (graywolf #518).
+
+**"Heard directly" is literal.** `pathIsDirect` (`pkg/igate/heard.go`) admits
+a station to the heard tracker only when no element of its path ends in `*`,
+so a digipeated copy never qualifies the source. A station you can reach only
+through a digipeater is therefore not eligible for IS→RF directed-message
+delivery, even though it is plainly on the air and shows up on the map.
 
 A bare `*` pattern is a flooding footgun for source-side rules
 (`callsign`/`prefix`) and a silent no-op elsewhere, so it is rejected —
@@ -214,7 +224,10 @@ while still allowing standard iGate message forwarding to be enabled in one
 step.
 
 Source: [`../../pkg/igate/filters/filters.go`](../../pkg/igate/filters/filters.go),
-[`../../pkg/igate/igate.go`](../../pkg/igate/igate.go) (`shouldForwardISToRF`),
+[`../../pkg/igate/igate.go`](../../pkg/igate/igate.go)
+(`shouldForwardISToRF`, `pathContainsSelf`, `sourceIsOwnSSID`),
+[`../../pkg/igate/heard.go`](../../pkg/igate/heard.go)
+(`heardDirectTTL`, `pathIsDirect`),
 [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (governor wiring).
 
 ### 16. TX path is single-source-of-truth via `txgovernor`
