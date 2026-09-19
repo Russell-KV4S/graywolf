@@ -13,6 +13,7 @@
   import { channelsStore, start as startChannelsStore, invalidate as refreshChannels, getChannel as lookupChannel } from '../lib/stores/channels.svelte.js';
   import { txPredicate, TX_REASON_FALLBACK } from '../lib/channelBacking.js';
   import { isStationCallsignMissing } from '../lib/callsign.js';
+  import { CUSTOM_IGATE_SERVER, IGATE_SERVER_OPTIONS, igateServerSelection } from '../lib/igateServer.js';
 
   let activeTab = $state('config');
 
@@ -27,6 +28,14 @@
     rf_channel: 0, is_tx_via: '', software_name: 'graywolf', software_version: '0.1',
   });
   let loading = $state(false);
+  let serverSelection = $state(CUSTOM_IGATE_SERVER);
+  let customServer = $state('rotate.aprs2.net');
+
+  function handleServerSelection(next) {
+    if (serverSelection === CUSTOM_IGATE_SERVER) customServer = form.server;
+    serverSelection = next;
+    form.server = next === CUSTOM_IGATE_SERVER ? customServer : next;
+  }
 
   // Last-persisted config body. The master Enable toggle auto-saves
   // against this snapshot (see autoSaveEnabled) so flipping it never
@@ -375,6 +384,8 @@
           software_name: data.software_name,
           software_version: data.software_version,
         };
+        serverSelection = igateServerSelection(form.server);
+        customServer = serverSelection === CUSTOM_IGATE_SERVER ? form.server : '';
         savedConfig = buildBody();
         filters = await api.get('/igate/filters') || [];
       })(),
@@ -724,8 +735,18 @@
       />
       <div style="margin-top: 16px;">
         <FormField label="APRS-IS Server" id="ig-server">
-          <Input id="ig-server" bind:value={form.server} placeholder="rotate.aprs2.net" />
+          <Select
+            id="ig-server"
+            value={serverSelection}
+            options={IGATE_SERVER_OPTIONS}
+            onValueChange={handleServerSelection}
+          />
         </FormField>
+        {#if serverSelection === CUSTOM_IGATE_SERVER}
+          <FormField label="Custom APRS-IS Server" id="ig-server-custom">
+            <Input id="ig-server-custom" bind:value={form.server} placeholder="rotate.aprs2.net" />
+          </FormField>
+        {/if}
         <FormField label="Port" id="ig-port">
           <Input id="ig-port" bind:value={form.port} type="number" placeholder="14580" />
         </FormField>
