@@ -13,7 +13,7 @@
   import { channelsStore, start as startChannelsStore, invalidate as refreshChannels, getChannel as lookupChannel } from '../lib/stores/channels.svelte.js';
   import { txPredicate, TX_REASON_FALLBACK } from '../lib/channelBacking.js';
   import { isStationCallsignMissing } from '../lib/callsign.js';
-  import { CUSTOM_IGATE_SERVER, IGATE_SERVER_OPTIONS, igateServerSelection } from '../lib/igateServer.js';
+  import { CUSTOM_IGATE_SERVER, IGATE_SERVER_OPTIONS, igateServerSelection, nextIgateServerState } from '../lib/igateServer.js';
 
   let activeTab = $state('config');
 
@@ -32,9 +32,13 @@
   let customServer = $state('rotate.aprs2.net');
 
   function handleServerSelection(next) {
-    if (serverSelection === CUSTOM_IGATE_SERVER) customServer = form.server;
-    serverSelection = next;
-    form.server = next === CUSTOM_IGATE_SERVER ? customServer : next;
+    const state = nextIgateServerState(
+      { selection: serverSelection, server: form.server, customServer },
+      next
+    );
+    serverSelection = state.selection;
+    form.server = state.server;
+    customServer = state.customServer;
   }
 
   // Last-persisted config body. The master Enable toggle auto-saves

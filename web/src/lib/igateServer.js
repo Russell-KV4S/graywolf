@@ -18,3 +18,17 @@ const regionalServers = new Set(
 export function igateServerSelection(server) {
   return regionalServers.has(server) ? server : CUSTOM_IGATE_SERVER;
 }
+
+export function nextIgateServerState({ selection, server, customServer }, nextSelection) {
+  const rememberedCustomServer = selection === CUSTOM_IGATE_SERVER
+    ? server
+    : customServer;
+
+  return {
+    selection: nextSelection,
+    server: nextSelection === CUSTOM_IGATE_SERVER
+      ? (rememberedCustomServer || server)
+      : nextSelection,
+    customServer: rememberedCustomServer,
+  };
+}

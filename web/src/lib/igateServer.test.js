@@ -5,6 +5,7 @@ import {
   CUSTOM_IGATE_SERVER,
   IGATE_SERVER_OPTIONS,
   igateServerSelection,
+  nextIgateServerState,
 } from './igateServer.js';
 
 test('offers the five Tier-2 regional rotate addresses and Custom', () => {
@@ -28,4 +29,38 @@ test('selects a known regional server directly', () => {
 test('preserves legacy and operator-provided hosts through Custom', () => {
   assert.equal(igateServerSelection('rotate.aprs2.net'), CUSTOM_IGATE_SERVER);
   assert.equal(igateServerSelection('aprs.example.net'), CUSTOM_IGATE_SERVER);
+});
+
+test('uses the selected regional host when switching to Custom without a remembered host', () => {
+  assert.deepEqual(
+    nextIgateServerState(
+      { selection: 'euro.aprs2.net', server: 'euro.aprs2.net', customServer: '' },
+      CUSTOM_IGATE_SERVER
+    ),
+    {
+      selection: CUSTOM_IGATE_SERVER,
+      server: 'euro.aprs2.net',
+      customServer: '',
+    }
+  );
+});
+
+test('remembers a custom host while switching between server options', () => {
+  const regional = nextIgateServerState(
+    {
+      selection: CUSTOM_IGATE_SERVER,
+      server: 'aprs.example.net',
+      customServer: 'rotate.aprs2.net',
+    },
+    'asia.aprs2.net'
+  );
+
+  assert.deepEqual(
+    nextIgateServerState(regional, CUSTOM_IGATE_SERVER),
+    {
+      selection: CUSTOM_IGATE_SERVER,
+      server: 'aprs.example.net',
+      customServer: 'aprs.example.net',
+    }
+  );
 });
