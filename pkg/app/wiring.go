@@ -527,6 +527,14 @@ func (a *App) wireServicesInner(ctx context.Context) error {
 		// dispatcher's per-instance instance label already mixes
 		// into the same series when the queues are fanned out.
 		OnTxQueueDrop: a.metrics.ObserveKissClientTxDrop,
+		// Active-client gauge for server-listen interfaces. Manager-owned
+		// on purpose: both dispatch sites (kissComponent boot and
+		// notifyKissManager hot-reload) build their own ServerConfig
+		// literal, and the hot-reload one used to omit this, leaving the
+		// gauge reading 0 forever after any config save (graywolf#548).
+		OnClientChange: func(_ uint32, name string, n int) {
+			a.metrics.SetKissClients(name, n)
+		},
 		OnClientStateChange: func(ifaceID uint32, name string, st kiss.InterfaceStatus) {
 			connected := st.State == kiss.StateConnected
 			a.metrics.SetKissClientConnected(ifaceID, name, connected)
@@ -1434,7 +1442,9 @@ func (a *App) wireHTTP(ctx context.Context) error {
 		KissCtx:            ctx,
 		KissSerialOpenFunc: a.kissSerialOpenFunc(),
 		Logger:             a.logger,
+		ConfigDBPath:       a.cfg.DBPath,
 		HistoryDBPath:      a.cfg.HistoryDBPath,
+		TileCacheDir:       a.cfg.TileCacheDir,
 		Version:            a.cfg.Version,
 		Commit:             a.cfg.GitCommit,
 		MapsCache:          mapsCache,
@@ -2151,9 +2161,6 @@ func (a *App) kissComponent() namedComponent {
 					AllowTxFromGovernor: ki.AllowTxFromGovernor,
 					AllowConnectedMode:  ki.AllowConnectedMode,
 					GateTxToIs:          ki.GateTxToIs,
-					OnClientChange: func(n int) {
-						a.metrics.SetKissClients(name, n)
-					},
 				})
 			}
 			// Nudge the TX dispatcher to rebuild its snapshot now that

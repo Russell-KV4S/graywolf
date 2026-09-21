@@ -177,9 +177,13 @@ Source:
 IS->RF transmission requires **both** tiers to allow a packet:
 
 - **Tier 1 — hardcoded** (`Igate.shouldForwardISToRF`, `pkg/igate/igate.go`):
-  directed messages only forward to an addressee heard **directly** on RF
-  within `heardDirectTTL` (30 min, `pkg/igate/heard.go`); non-message
-  traffic only forwards if sourced from one of the operator's own SSIDs
+  loop prevention runs first and covers both kinds of traffic —
+  `pathContainsSelf` drops any packet already carrying our own callsign in
+  its path. Directed messages then forward only to an addressee heard
+  **directly** on RF within `heardDirectTTL` (30 min,
+  `pkg/igate/heard.go`), and never when the message is a bulletin or an NWS
+  broadcast or carries an empty addressee; non-message traffic only
+  forwards if sourced from one of the operator's own SSIDs
   (`sourceIsOwnSSID`). Not operator-configurable.
 - **Tier 2 — the rule engine** (`filters.Engine.Allow`): priority-ordered,
   first-match-wins, **default deny**. Rule types: `callsign`, `prefix`,
@@ -192,6 +196,12 @@ IS->RF transmission requires **both** tiers to allow a packet:
   `pkg/webapi/dto/igate.go`) and the Svelte `packetTypeOptions` — keep the
   three in sync. Messages-only IS→RF gating is one allow rule of type
   `packet_type` = `message` (graywolf #518).
+
+**"Heard directly" is literal.** `pathIsDirect` (`pkg/igate/heard.go`) admits
+a station to the heard tracker only when no element of its path ends in `*`,
+so a digipeated copy never qualifies the source. A station you can reach only
+through a digipeater is therefore not eligible for IS→RF directed-message
+delivery, even though it is plainly on the air and shows up on the map.
 
 A bare `*` pattern is a flooding footgun for source-side rules
 (`callsign`/`prefix`) and a silent no-op elsewhere, so it is rejected —
@@ -214,7 +224,10 @@ while still allowing standard iGate message forwarding to be enabled in one
 step.
 
 Source: [`../../pkg/igate/filters/filters.go`](../../pkg/igate/filters/filters.go),
-[`../../pkg/igate/igate.go`](../../pkg/igate/igate.go) (`shouldForwardISToRF`),
+[`../../pkg/igate/igate.go`](../../pkg/igate/igate.go)
+(`shouldForwardISToRF`, `pathContainsSelf`, `sourceIsOwnSSID`),
+[`../../pkg/igate/heard.go`](../../pkg/igate/heard.go)
+(`heardDirectTTL`, `pathIsDirect`),
 [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (governor wiring).
 
 ### 16. TX path is single-source-of-truth via `txgovernor`
@@ -648,8 +661,56 @@ The two switches are independent; omitting #2 means a config write calls `Stop()
 
 *Why:* There is no shared dispatch table -- each switch is a separate match on the stored `InterfaceType` string, so a new type added to one switch must be consciously added to the other.
 
+**This extends to every field, not just the type arms.** Each arm builds a
+`kiss.ServerConfig` / `ClientConfig` / `SerialConfig` struct literal by hand at
+both sites, so a `KissInterface` column that one literal sets and the other
+omits silently takes its zero value on whichever path skipped it. Adding a
+per-interface flag means touching **both** literals for **every** arm that
+supports it. The failure is quiet by construction: the boot path is correct,
+so the feature works until the operator saves the config, and then works
+again after the next restart.
+
+The concrete instance this rule was written from: `GateTxToIs` reached the
+`tcp` (server-listen) arm at boot but not in `notifyKissManager`, so any save
+of a KISS TNC config -- including saving with the box freshly checked --
+restarted the server with APRS-IS forwarding off until the next restart. RF TX
+kept working throughout (that leg is `Sink.Submit`, which does not consult the
+flag), which is what made it look like a routing bug rather than a config-
+threading one. Regression coverage:
+[`../../pkg/webapi/kiss_gate_tx_to_is_test.go`](../../pkg/webapi/kiss_gate_tx_to_is_test.go)
+drives a real socket and asserts the gate hook fires after a hot reload; a
+mock-based field assertion would not have caught the omission.
+
+**The escape hatch is to make the field manager-owned instead.**
+`kiss.Manager` installs `OnDecodeError`, `OnFrameIngress`,
+`OnClientTxAccepted`, `RxIngress`, `Clock`, `Sink` and `InterfaceID` onto
+every config it starts, from `ManagerConfig`, whenever the per-start
+literal leaves them nil. A field handled that way cannot be forgotten by
+either dispatch site, because neither site sets it. `OnClientChange`
+joined that set in graywolf#548: it had been the lone metrics hook still
+supplied per-`Start`, set only by the boot literal, so any config save
+replaced the running server with one that had no reporter and
+`graywolf_kiss_clients_active` read 0 until the next restart. It is now
+installed by `Manager.Start` from `ManagerConfig.OnClientChange`, wrapped
+with the interface's row ID and display name, and the boot literal no
+longer sets it. An explicit per-start hook still wins, so direct callers
+and tests are unaffected.
+
+Prefer this shape for any new cross-cutting hook. As of #548 the only
+behavioural field still duplicated across both literals is `GateTxToIs`,
+which is genuinely per-interface config rather than a shared hook.
+
+Regression coverage:
+[`../../pkg/kiss/manager_test.go`](../../pkg/kiss/manager_test.go)
+(`TestManagerInstallsOnClientChangeWithIfaceAndName`,
+`TestManagerOnClientChangePerStartWins`) and
+[`../../pkg/webapi/kiss_client_gauge_test.go`](../../pkg/webapi/kiss_client_gauge_test.go),
+which drives the hot-reload path through the real handler and socket.
+
 Source: [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`kissComponent`),
-[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`notifyKissManager`).
+[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`notifyKissManager`),
+[`../../pkg/kiss/manager.go`](../../pkg/kiss/manager.go) (`Manager.Start`
+hook installs).
 
 ### 35. All blocking Bluetooth and USB calls run on a worker thread
 
@@ -2150,3 +2211,94 @@ Source: [`../../pkg/messages/store.go`](../../pkg/messages/store.go)
 (`TestListNewestWindowReturnsMostRecent`),
 [`../../web/src/components/messages/MessageThread.svelte`](../../web/src/components/messages/MessageThread.svelte)
 (`fetchThread`).
+
+### 66. A map-layer `$effect` MUST read reactive state before the optional chain
+
+Every map layer module (`stationsLayer`, `trailsLayer`, `radarLayer`,
+`heatmapLayer`, ...) is a plain non-reactive `let` in
+[`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte),
+assigned inside `onMapReady()` -- which fires on MapLibre's `load` event,
+*after* the component's effects have already run once. So on run 1 every
+one of those variables is `null`.
+
+Svelte 5 tracks dependencies dynamically: only signals actually *read*
+during a run are registered. That makes this shape a silent no-op:
+
+```js
+$effect(() => {
+  layer?.setThing(someStore.value);   // WRONG
+});
+```
+
+On run 1 `layer` is null, `?.` short-circuits, the argument is never
+evaluated, `someStore.value` is never read, and the effect ends up with
+**zero dependencies**. Assigning `layer` later re-triggers nothing,
+because it is not `$state`. The effect never runs again for the life of
+that map generation. Always hoist the read:
+
+```js
+$effect(() => {
+  const v = someStore.value;          // RIGHT -- dep registered on run 1
+  layer?.setThing(v);
+});
+```
+
+*Why:* the failure is invisible. The UI control still moves, still
+persists to localStorage, and the value is still picked up by the layer's
+*mount* options on the next page load, so the setting appears to work
+until you watch it live. This shipped twice: the RX heatmap opacity
+slider (graywolf #578, dead outright) and the radar frame
+preload/eviction reconcile (graywolf #584, masked by `setFrameTs`'s
+`ensureFrame` fallback, leaking one MapLibre source+layer per frame).
+
+The layer modules' own unit tests cannot catch it -- they call
+`setOpacity()`/`setFrames()` directly and pass either way -- and the web
+suite is plain `node --test` over pure JS with no Svelte component
+harness. The rule is therefore enforced as a source-level check over
+every `.svelte` file by
+[`../../web/src/routes/LiveMapV2.effect-deps.test.js`](../../web/src/routes/LiveMapV2.effect-deps.test.js).
+
+Source: [`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
+(the `setVisible`/`setOpacity`/`setFrames` effects and the comment above
+the `layerToggles.stations` effect),
+[`../../web/src/routes/LiveMapV2.effect-deps.test.js`](../../web/src/routes/LiveMapV2.effect-deps.test.js).
+
+### 67. A KISS server-listen row must be waited out, not just cancelled, before its address is rebound
+
+`kiss.Manager.stopManaged` has three arms, one per interface kind. The
+`client` and `serial` arms call `close()`, which cancels *and then blocks*
+on the supervisor's `done` channel. The server-listen arm must do the
+equivalent -- cancel, then wait on `managedServer.serveDone`, which the
+`Start` goroutine closes only after `Server.ListenAndServe` returns.
+
+*Why:* `ListenAndServe` guarantees the bound port is free **when it
+returns** ([`../../pkg/kiss/server.go`](../../pkg/kiss/server.go), and
+`TestKissServerPortFreeAfterCancel` guards that from the server side).
+`cancel()` alone only signals the watcher goroutine that closes the
+listener. `Manager.Start`'s replace-if-running branch calls `stopManaged`
+and then immediately binds the same address, so a cancel-only stop races
+the old close against the new `net.Listen` -- measured losing on roughly
+8% of restarts during development, and load- and platform-dependent.
+
+The failure is silent and looks like health. `Start` has no error return,
+so a lost race surfaces only as an `ERROR msg="kiss server" err="listen
+tcp ...: bind: address already in use"` log line. The row stays in
+`m.running`, so `Status()` and the Kiss page keep reporting the interface
+as present while nothing is listening -- from the operator's seat, a KISS
+TNC that stopped accepting connections after a config save, with the web
+UI insisting it is fine.
+
+The wait is bounded by `serveShutdownGrace` because `stopManaged` runs on
+the config-write HTTP handler's goroutine (via `notifyKissManager`) and on
+the shutdown path (via `StopAll`); neither may hang. Overshooting the
+grace costs a warning log, undershooting reopens the race.
+
+Corollary for anyone adding a fourth interface kind: whatever owns the
+listener or device must expose a "fully stopped" signal, and `stopManaged`
+must block on it. Cancel-and-return is only safe for something nothing
+rebinds.
+
+Source: [`../../pkg/kiss/manager.go`](../../pkg/kiss/manager.go)
+(`stopManaged`, `Manager.Start`, `managedServer.serveDone`,
+`serveShutdownGrace`);
+[`../../pkg/kiss/manager_rebind_test.go`](../../pkg/kiss/manager_rebind_test.go).

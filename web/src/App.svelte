@@ -39,6 +39,7 @@
   import About from './routes/About.svelte';
   import Preferences from './routes/Preferences.svelte';
   import MapsSettings from './routes/MapsSettings.svelte';
+  import StorageSettings from './routes/StorageSettings.svelte';
   import MessagesSettings from './routes/MessagesSettings.svelte';
   import NotificationsSettings from './routes/NotificationsSettings.svelte';
   import Messages from './routes/Messages.svelte';
@@ -74,6 +75,7 @@
     '/system-logs': SystemLogs,
     '/preferences': Preferences,
     '/preferences/maps': MapsSettings,
+    '/preferences/storage': StorageSettings,
     '/preferences/messages': MessagesSettings,
     '/preferences/notifications': NotificationsSettings,
     '/about': About,
