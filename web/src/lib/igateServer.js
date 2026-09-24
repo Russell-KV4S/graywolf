@@ -1,6 +1,7 @@
 export const CUSTOM_IGATE_SERVER = '__custom__';
 
 export const IGATE_SERVER_OPTIONS = [
+  { value: 'rotate.aprs2.net', label: 'Worldwide — rotate.aprs2.net' },
   { value: 'noam.aprs2.net', label: 'North America — noam.aprs2.net' },
   { value: 'soam.aprs2.net', label: 'South America — soam.aprs2.net' },
   { value: 'euro.aprs2.net', label: 'Europe & Africa — euro.aprs2.net' },

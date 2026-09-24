@@ -28,8 +28,8 @@
     rf_channel: 0, is_tx_via: '', software_name: 'graywolf', software_version: '0.1',
   });
   let loading = $state(false);
-  let serverSelection = $state(CUSTOM_IGATE_SERVER);
-  let customServer = $state('rotate.aprs2.net');
+  let serverSelection = $state('rotate.aprs2.net');
+  let customServer = $state('');
 
   function handleServerSelection(next) {
     const state = nextIgateServerState(

@@ -8,10 +8,11 @@ import {
   nextIgateServerState,
 } from './igateServer.js';
 
-test('offers the five Tier-2 regional rotate addresses and Custom', () => {
+test('offers Worldwide, the five Tier-2 regional rotate addresses, and Custom', () => {
   assert.deepEqual(
     IGATE_SERVER_OPTIONS.map((option) => option.value),
     [
+      'rotate.aprs2.net',
       'noam.aprs2.net',
       'soam.aprs2.net',
       'euro.aprs2.net',
@@ -26,8 +27,12 @@ test('selects a known regional server directly', () => {
   assert.equal(igateServerSelection('euro.aprs2.net'), 'euro.aprs2.net');
 });
 
-test('preserves legacy and operator-provided hosts through Custom', () => {
-  assert.equal(igateServerSelection('rotate.aprs2.net'), CUSTOM_IGATE_SERVER);
+test('selects Worldwide for the default rotate.aprs2.net server', () => {
+  // Fresh installs default to rotate.aprs2.net; it must not render as Custom.
+  assert.equal(igateServerSelection('rotate.aprs2.net'), 'rotate.aprs2.net');
+});
+
+test('preserves operator-provided hosts through Custom', () => {
   assert.equal(igateServerSelection('aprs.example.net'), CUSTOM_IGATE_SERVER);
 });
 
