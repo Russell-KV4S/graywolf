@@ -154,10 +154,26 @@ test('analyzeFrame does not flag a DEL byte in the Mic-E minutes/hundredths byte
   assert.equal(r.issues.length, 0);
 });
 
-test('analyzeFrame warns on a SPACE byte in the Mic-E speed/course field', () => {
-  const f = frame('T7SUTV', 'NW5W', ['`', 0x6c, 0x6d, 0x6e, 0x6f, 0x20, 0x70, 0x72, 0x2f]);
+test('analyzeFrame does not flag an aligned SPACE byte in the Mic-E speed/course field', () => {
+  // In the speed/course bytes 0x20 is just digit 4 and the Go decoder
+  // reads it normally (this frame decodes to 30 kt / 84 degrees). Only
+  // the longitude bytes treat SPACE as the "unknown data" sentinel.
+  for (const i of [4, 5, 6]) {
+    const info = ['`', 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x2f];
+    info[i] = 0x20;
+    const r = analyzeFrame(frame('T7SUTV', 'NW5W', info));
+    assert.deepEqual(r.issues, [], `SPACE at info offset ${i}`);
+  }
+});
+
+test('analyzeFrame warns on a squashed Mic-E speed/course field', () => {
+  // A double space collapsed to one shifts the symbol code+table a byte
+  // early: info[7] is '/', info[8] is not a table. Same shape the Go
+  // decoder's accept_broken_mice realigns (to symbol '/>').
+  const f = frame('T7SUTV', 'NW5W', ['`', 0x6c, 0x6d, 0x6e, 0x6c, 0x20, 0x3e, 0x2f, 0x5d]);
   const r = analyzeFrame(f);
-  assert.ok(r.issues.some((i) => i.severity === 'warn' && /speed\/course/.test(i.text)));
+  assert.ok(r.issues.some((i) => i.severity === 'warn' && /squashed/.test(i.text)));
+  assert.ok(!r.issues.some((i) => i.severity === 'error'));
 });
 
 test('analyzeFrame accepts live Mic-E zero-speed wrap bytes', () => {
