@@ -160,6 +160,28 @@ test('analyzeFrame warns on a SPACE byte in the Mic-E speed/course field', () =>
   assert.ok(r.issues.some((i) => i.severity === 'warn' && /speed\/course/.test(i.text)));
 });
 
+test('analyzeFrame accepts live Mic-E zero-speed wrap bytes', () => {
+  // F4MLV-7>4R5WV3,TCPIP:`w26l `[/"=I}
+  // The speed/course triplet 0x6c 0x20 0x60 encodes 0 kt / 68 degrees.
+  // 0x20 is below printable-safe 0x26 but is valid Mic-E (offset +28).
+  const f = new Uint8Array([
+    0x68, 0xa4, 0x6a, 0xae, 0xac, 0x66, 0xe0, 0x8c,
+    0x68, 0x9a, 0x98, 0xac, 0x40, 0x6e, 0xa8, 0x86,
+    0xa0, 0x92, 0xa0, 0x40, 0x61, 0x03, 0xf0, 0x60,
+    0x77, 0x32, 0x36, 0x6c, 0x20, 0x60, 0x5b, 0x2f,
+    0x22, 0x3d, 0x49, 0x7d,
+  ]);
+  const r = analyzeFrame(f);
+  assert.equal(r.isMicE, true);
+  assert.deepEqual(r.issues, []);
+});
+
+test('analyzeFrame rejects a Mic-E offset byte below 0x1C', () => {
+  const f = frame('T7SUTV', 'NW5W', [0x60, 0x77, 0x32, 0x36, 0x6c, 0x1b, 0x60, 0x5b, 0x2f]);
+  const r = analyzeFrame(f);
+  assert.ok(r.issues.some((i) => /outside the encodable range 0x1C-0x7F/.test(i.text)));
+});
+
 test('analyzeFrame flags malformed Mic-E destination characters', () => {
   // 'M', 'N', 'O' sit in the illegal Mic-E gap between L and P.
   const f = frame('MNOPQR', 'NW5W', '`abcdef gh');
