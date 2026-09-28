@@ -68,6 +68,7 @@ background, the operator handbook is the starting point.
 | GPS (gpsd) | Reads positions from a local gpsd daemon. | [`../../pkg/gps/gpsd.go`](../../pkg/gps/gpsd.go), [`../handbook/gps.html`](../handbook/gps.html) |
 | GPS (serial NMEA) | Reads positions directly from a serial GPS speaking NMEA. | [`../../pkg/gps/serial.go`](../../pkg/gps/serial.go), [`../handbook/gps.html`](../handbook/gps.html) |
 | GPS (fixed coordinate) | Manually-entered station lat/lon/alt published into the same cache the live readers feed; the way a home station gets distance/bearing without a live receiver (GH #510). Source type `fixed`. | [`../../pkg/gps/fixed.go`](../../pkg/gps/fixed.go), [`../handbook/gps.html`](../handbook/gps.html) |
+| GPS (Android) | On the Android build the phone's own location service feeds the cache through the Kotlin platform service. `platformGpsAlwaysOn` makes the reader unconditional: the stored `GPSConfig` (serial/gpsd/fixed) is ignored, and if the platform client is missing the manager bails rather than falling back to serial or gpsd. The web GPS page swaps to a status-only view (`GpsAndroid.svelte`). | [`../../pkg/app/gpsmanager_android.go`](../../pkg/app/gpsmanager_android.go), [`../../pkg/gps/android.go`](../../pkg/gps/android.go), [`../handbook/gps.html`](../handbook/gps.html) |
 | CPAL | Upstream Rust audio crate; cross-platform live audio I/O. | integration in [`../../graywolf-modem/src/audio/soundcard.rs`](../../graywolf-modem/src/audio/soundcard.rs) |
 
 ## Project-internal
