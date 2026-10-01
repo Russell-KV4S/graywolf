@@ -15,14 +15,14 @@ Linux/macOS/Windows binaries, Docker, `.deb`/`.rpm`, NSIS) and
 `android.yml`. The Android workflow builds a release-signed `.aab` +
 `.apk`, attaches both to the GitHub Release goreleaser created, and
 uploads the `.aab` to the Play **Closed Testing** track (Play's `alpha`
-track), so every tagged release reaches the ~15-person private beta.
-Promotion onward to **Open Testing** (the `beta` track) is a separate,
-deliberate manual step (`gh workflow run android.yml --field
-version=X.Y.Z --field track=beta`). Production is never targeted -- the
-service account lacks the permission. **One caveat right now:** the app
-is still a draft in the Play Console, so the upload lands as a *draft*
-release that a human rolls out -- see
-[Release status and the draft app](#release-status-and-the-draft-app).
+track), where the ~15-person private beta lives. Promotion onward to
+**Open Testing** (the `beta` track) is a separate, deliberate manual step
+(`gh workflow run android.yml --field version=X.Y.Z --field track=beta`).
+Production is never targeted -- the service account lacks the permission.
+**One caveat right now:** the app is still a draft in the Play Console, so
+the upload lands as a *draft* release and a human has to roll it out
+before testers see it -- see [Release status and the draft
+app](#release-status-and-the-draft-app).
 
 ## Workflow triggers and jobs (`android.yml`)
 
@@ -60,7 +60,7 @@ Google holds it.
 
 ## Play upload service account
 
-The auto-upload (and the closed-beta promotion) authenticate to the Play
+The tag-push upload (and the closed-beta promotion) authenticate to the Play
 Developer API with a Google Cloud service account.
 
 - GCP project `graywolf-play-upload`, service account `play-upload@...`,
@@ -83,36 +83,54 @@ Developer API with a Google Cloud service account.
 
 ## Release status and the draft app
 
-The upload step's `status:` decides whether Play *commits* the release or
-parks it for a human. It is wired to a repo variable so it can be flipped
+Whether Play *commits* a release or parks it for a human is the `status:`
+on the upload step. It is driven by a repo variable so the value can change
 without editing the workflow:
 
 ```yaml
 status: ${{ vars.GRAYWOLF_PLAY_RELEASE_STATUS || 'draft' }}
 ```
 
-- **Today it resolves to `draft`.** `com.nw5w.graywolf` has never
-  completed its first publish in the Play Console, so the app is a *draft
-  app*, and the Play Developer API rejects any release on it that isn't
-  itself a draft: `Only releases with status draft may be created on
-  draft app.` With `status: completed` this failed the upload step on
-  every tag from v0.14.11 through v0.14.14 (GH #619) -- the `.aab`
-  uploaded fine, Play just refused to commit the release. `draft` keeps
-  the step green; the build sits on the alpha track as a draft release
-  that someone rolls out from Play Console -> Closed testing.
-- **The same rule blocks promotion.** `promote-to-closed` moves a
-  versionCode to `beta`/`internal` as a non-draft release, so it hits the
-  identical error while the app is a draft. Open testing is unreachable
-  until the first publish lands.
-- **To get back to hands-off publishing:** finish the app's first publish
-  in the Play Console (store listing, content rating, data safety,
-  target-audience and the rest of the "App content" checklist, then a
-  first rollout), then set repo variable `GRAYWOLF_PLAY_RELEASE_STATUS`
-  to `completed` under Settings -> Secrets and variables -> Actions ->
-  Variables. No code change or release is needed; the next tag picks it
-  up. Unset or empty falls back to `draft`.
-- Testers can always install the signed `.apk` attached to the GitHub
-  Release in the meantime.
+Unset or empty falls back to `draft`. Check Settings -> Secrets and
+variables -> Actions -> Variables for the value in force; the run log also
+prints it ("Play release status: ...") and emits a `::notice::` when a
+build parked as a draft.
+
+**Why the default is `draft`.** `com.nw5w.graywolf` has never completed its
+first publish in the Play Console, so it is a *draft app*, and the Play
+Developer API refuses any release on it that isn't itself a draft:
+
+```
+Only releases with status draft may be created on draft app.
+```
+
+With `status: completed` this failed the upload step on every tag from
+v0.14.11 through v0.14.14 (GH #619). The rejection lands on `edits.commit`
+-- the `.aab` bytes upload fine and the log even reaches "Committing the
+Edit" first -- and a Play edit is transactional, so a failed commit applies
+*nothing*. Those versionCodes were never consumed, which is why re-tagging
+a failed version is safe here and doesn't hit the duplicate-versionCode
+problem the [retag section](#retag-flow-on-ci-failure) warns about.
+
+With `draft`, the commit succeeds and the build sits on the alpha track as
+a draft release that someone rolls out from Play Console -> Closed testing.
+Testers can install the signed `.apk` off the GitHub Release in the
+meantime.
+
+**The same variable covers promotion.** A promotion creates a release on
+the *target* track, so `promote-to-closed` hits the identical rule.
+`android.yml` passes the variable to fastlane as `PLAY_RELEASE_STATUS`,
+which [`../../fastlane/Fastfile`](../../fastlane/Fastfile) reads for
+`release_status` (falling back to `completed` for a local `bundle exec
+fastlane promote`). One knob, both paths. Promotion still needs the
+versionCode to actually be on `alpha`, so a tag whose upload step failed
+has nothing to promote.
+
+**To get back to hands-off publishing:** finish the app's first publish in
+the Play Console -- store listing, content rating, data safety,
+target audience and the rest of the "App content" checklist, then a first
+rollout -- and set `GRAYWOLF_PLAY_RELEASE_STATUS` to `completed`. The next
+tag picks it up; no code change or release needed.
 
 ## Version derivation
 
@@ -152,10 +170,11 @@ Play's track IDs are fixed: `internal`, `alpha` (closed testing), `beta`
 "graywolf-beta") does not change the API id -- the closed track is still
 addressed as `alpha` by `supply` / `upload-google-play`.
 
-- **Closed testing (`alpha`)** -- auto-published on every `v*` tag; this
-  is where the ~15-person private beta lives. Add testers in Play Console
-  -> Closed testing -> Testers (email list); they install via the track's
-  opt-in URL.
+- **Closed testing (`alpha`)** -- uploaded on every `v*` tag (as a draft
+  release while the app is a draft, see [Release status and the draft
+  app](#release-status-and-the-draft-app)); this is where the ~15-person
+  private beta lives. Add testers in Play Console -> Closed testing ->
+  Testers (email list); they install via the track's opt-in URL.
 - **Open testing (`beta`)** -- public opt-in. A vetted closed build is
   promoted here with the manual `promote-to-closed` workflow
   (`--field track=beta`).
@@ -171,9 +190,12 @@ in [`../../CLAUDE.md`](../../CLAUDE.md): fix the cause, delete and re-tag
 the same version (`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`,
 commit fix, re-tag, push), and **do not rewrite the release note**. A
 re-tag re-runs both workflows. Note Play rejects a duplicate
-`versionCode`, so if the `.aab` already uploaded to Closed Testing
-(`alpha`) before the failure, a plain re-tag's upload step will conflict
--- in that case bump to a new patch instead.
+`versionCode`, so if the upload to Closed Testing (`alpha`) already
+*succeeded* and a later step failed, a plain re-tag's upload step will
+conflict -- in that case bump to a new patch instead. A failure of the
+upload step itself does not burn the versionCode: the step's Play edit
+never commits, and an uncommitted edit applies nothing (see [Release
+status and the draft app](#release-status-and-the-draft-app)).
 
 ## armv6 (Pi 1 / Pi Zero) -- temporarily dropped
 
