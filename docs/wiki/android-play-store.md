@@ -14,12 +14,15 @@ push fires two workflows in parallel: `release.yml` (goreleaser:
 Linux/macOS/Windows binaries, Docker, `.deb`/`.rpm`, NSIS) and
 `android.yml`. The Android workflow builds a release-signed `.aab` +
 `.apk`, attaches both to the GitHub Release goreleaser created, and
-auto-publishes the `.aab` to the Play **Closed Testing** track (Play's
-`alpha` track), so every tagged release reaches the ~15-person private
-beta. Promotion onward to **Open Testing** (the `beta` track) is a
-separate, deliberate manual step (`gh workflow run android.yml --field
+uploads the `.aab` to the Play **Closed Testing** track (Play's `alpha`
+track), so every tagged release reaches the ~15-person private beta.
+Promotion onward to **Open Testing** (the `beta` track) is a separate,
+deliberate manual step (`gh workflow run android.yml --field
 version=X.Y.Z --field track=beta`). Production is never targeted -- the
-service account lacks the permission.
+service account lacks the permission. **One caveat right now:** the app
+is still a draft in the Play Console, so the upload lands as a *draft*
+release that a human rolls out -- see
+[Release status and the draft app](#release-status-and-the-draft-app).
 
 ## Workflow triggers and jobs (`android.yml`)
 
@@ -27,7 +30,7 @@ service account lacks the permission.
 |---|---|---|
 | `pull_request` -> main | `build` | Unsigned debug APK artifact (sanity check) |
 | `push` -> main | `build` | Same; catches breakage before a tag |
-| `push` tag `v*` | `build` + `release-sign` | Signed `.aab`+`.apk` on the GH Release; `.aab` auto-published to Play Closed Testing (`alpha`) |
+| `push` tag `v*` | `build` + `release-sign` | Signed `.aab`+`.apk` on the GH Release; `.aab` uploaded to Play Closed Testing (`alpha`) |
 | `workflow_dispatch` (no `version`) | `build` | Manual build re-run |
 | `workflow_dispatch` (`version=X.Y.Z`) | `promote-to-closed` | Promotes that release's `.aab` from Closed Testing (`alpha`) to the chosen track (default `beta` = open testing) |
 
@@ -77,6 +80,39 @@ Developer API with a Google Cloud service account.
   up to 24h to take effect. Check without burning a release:
   `make android-play-check JSON=path/to/service-account.json` -- HTTP 200
   means ready, 403 means not propagated yet, 401 means a bad key.
+
+## Release status and the draft app
+
+The upload step's `status:` decides whether Play *commits* the release or
+parks it for a human. It is wired to a repo variable so it can be flipped
+without editing the workflow:
+
+```yaml
+status: ${{ vars.GRAYWOLF_PLAY_RELEASE_STATUS || 'draft' }}
+```
+
+- **Today it resolves to `draft`.** `com.nw5w.graywolf` has never
+  completed its first publish in the Play Console, so the app is a *draft
+  app*, and the Play Developer API rejects any release on it that isn't
+  itself a draft: `Only releases with status draft may be created on
+  draft app.` With `status: completed` this failed the upload step on
+  every tag from v0.14.11 through v0.14.14 (GH #619) -- the `.aab`
+  uploaded fine, Play just refused to commit the release. `draft` keeps
+  the step green; the build sits on the alpha track as a draft release
+  that someone rolls out from Play Console -> Closed testing.
+- **The same rule blocks promotion.** `promote-to-closed` moves a
+  versionCode to `beta`/`internal` as a non-draft release, so it hits the
+  identical error while the app is a draft. Open testing is unreachable
+  until the first publish lands.
+- **To get back to hands-off publishing:** finish the app's first publish
+  in the Play Console (store listing, content rating, data safety,
+  target-audience and the rest of the "App content" checklist, then a
+  first rollout), then set repo variable `GRAYWOLF_PLAY_RELEASE_STATUS`
+  to `completed` under Settings -> Secrets and variables -> Actions ->
+  Variables. No code change or release is needed; the next tag picks it
+  up. Unset or empty falls back to `draft`.
+- Testers can always install the signed `.apk` attached to the GitHub
+  Release in the meantime.
 
 ## Version derivation
 

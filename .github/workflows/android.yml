@@ -3,8 +3,10 @@ name: Android
 # PR / push:main: build an unsigned debug APK and upload as an artifact.
 # Tag pushes (v*): also build a release-signed AAB + APK and attach them
 # to the GitHub Release (which goreleaser/release.yml creates in parallel),
-# then auto-publish the AAB to the Play Closed Testing track (the `alpha`
-# track) so every tagged release reaches the private beta testers.
+# then upload the AAB to the Play Closed Testing track (the `alpha` track)
+# so every tagged release reaches the private beta testers. The release
+# status there is `draft` until the app's first Play publish completes --
+# see the `status:` comment on the upload step.
 
 on:
   push:
@@ -317,10 +319,11 @@ jobs:
           echo "---- whatsnew-en-US ----"
           cat staging/whatsnew/whatsnew-en-US
 
-      # Auto-publish the signed AAB to Play Closed Testing -- the `alpha`
+      # Publish the signed AAB to Play Closed Testing -- the `alpha`
       # track (Play's track IDs are fixed: internal, alpha=closed,
-      # beta=open, production). Every v* tag now reaches the private beta
-      # testers. Gated on the service-account secret so it safely skips
+      # beta=open, production). Every v* tag uploads there; whether testers
+      # get it immediately or after a Console rollout depends on `status:`
+      # below. Gated on the service-account secret so it safely skips
       # (not fails) when GRAYWOLF_PLAY_SERVICE_ACCOUNT_JSON is absent. The
       # service account still lacks production permission, so a CI tag can
       # never reach production.
@@ -332,7 +335,17 @@ jobs:
           packageName: com.nw5w.graywolf
           releaseFiles: staging/graywolf-*.aab
           track: alpha
-          status: completed
+          # Play refuses any non-draft release while the app itself is
+          # still a draft in the Console ("Only releases with status draft
+          # may be created on draft app."), which failed this step on every
+          # tag from v0.14.11 through v0.14.14 (GH #619). `draft` keeps the
+          # upload green: the AAB lands on the alpha track as a draft
+          # release an operator rolls out from the Console. Once the app's
+          # first publish is finished, set the repo variable
+          # GRAYWOLF_PLAY_RELEASE_STATUS to `completed` (Settings ->
+          # Secrets and variables -> Actions -> Variables) to restore
+          # hands-off publishing -- no workflow edit or release needed.
+          status: ${{ vars.GRAYWOLF_PLAY_RELEASE_STATUS || 'draft' }}
           # Per-locale release notes (whatsnew-en-US) generated above.
           whatsNewDirectory: staging/whatsnew
 
