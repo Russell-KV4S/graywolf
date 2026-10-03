@@ -7,6 +7,39 @@
 # route the body references via [text](link) markdown; renderer only
 # accepts internal #/... routes.
 
+- version: "0.14.15"
+  date: "2026-10-02"
+  style: info
+  schema_version: 1
+  link: "#/igate"
+  title: "AGWPE connected mode, regional APRS-IS servers, storage page, Mic-E fixes"
+  body: |
+    AGWPE clients can make connected-mode sessions. Programs like Paracon,
+    AGWTerm, and EasyTerm can now connect through graywolf to BBSes and
+    other connected packet systems. Xastir and other programs that ask for
+    raw packet data over AGWPE now get it.
+
+    The [iGate page](#/igate) offers a dropdown with the regional APRS-IS
+    servers for North America, South America, Europe and Africa, Asia, and
+    Oceania. The default rotate.aprs2.net shows up as Worldwide. You can
+    still choose Custom and pick whatever server you want.
+
+    A new Storage page under Preferences shows how much disk space offline
+    map tiles, position history, and configuration are using, and where
+    they live.
+
+    Messages now use the same Inconsolata font as the rest of graywolf.
+
+    Fixes: valid Mic-E position packets from some radios were being thrown
+    away and never gated to APRS-IS, and now decode normally; the packet
+    inspector no longer flags valid Mic-E packets as broken; packets heard
+    from APRS-IS no longer show up in the packet log as if they were heard
+    on RF; AGWPE clients now see monitored packets on the port you actually
+    configured instead of one port higher; a KISS TCP server keeps
+    forwarding client transmissions to APRS-IS and keeps accepting
+    connections after you save KISS settings; and the live map's heatmap
+    opacity slider and radar animation work properly again.
+
 - version: "0.14.14"
   date: "2026-08-28"
   style: info
