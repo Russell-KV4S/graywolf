@@ -292,7 +292,9 @@ function getMockData(method, path, body) {
 
   // Packets
   if (path.startsWith('/packets')) return delay(mockPackets);
-  if (path === '/position') return delay(mockPosition);
+  // A live receiver re-stamps its fix constantly; do the same so the
+  // mock's fix stays inside the freshness window Read GPS enforces.
+  if (path === '/position') return delay({ ...mockPosition, timestamp: new Date().toISOString().slice(0, 19) + 'Z' });
 
   // Simulation
   if (path === '/simulation' && method === 'GET') return delay(mockSimulation);

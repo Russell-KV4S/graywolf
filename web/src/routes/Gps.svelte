@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { Button, Input, Select, Badge, AlertDialog } from '@chrissnell/chonky-ui';
   import { api } from '../lib/api.js';
-  import { fixedCoordsFromPosition } from '../lib/gps-fixed-core.js';
+  import { canReadGps, fixedCoordsFromPosition } from '../lib/gps-fixed-core.js';
   import { toasts } from '../lib/stores.js';
   import { Platform } from '../lib/platform.js';
   import PageHeader from '../components/PageHeader.svelte';
@@ -91,13 +91,16 @@
   // Fill the fixed-coordinate fields from the current GPS fix, so the
   // operator doesn't have to copy lat/lon off the receiver by hand
   // (GH #621). The saved config is untouched until Save; /api/position
-  // keeps reporting the live receiver fix until then.
+  // keeps reporting the live receiver fix until then. The button is
+  // disabled unless the saved source is a receiver (readGpsAllowed):
+  // with Fixed Coordinate saved, this same endpoint would hand the
+  // saved coordinate back as if it were a fix.
   async function readGpsPosition() {
     readingGps = true;
     try {
       const coords = fixedCoordsFromPosition(await api.get('/position'));
       if (!coords) {
-        toasts.error('No GPS position available — check the receiver has a fix');
+        toasts.error('No current GPS position available — check the receiver has a fresh fix');
         return;
       }
       form.fixed_lat = coords.lat;
@@ -173,6 +176,11 @@
   }
 
   let hasGps = $derived(config && config.source && config.source !== 'none');
+
+  // Read GPS only works while a receiver is the SAVED source: with
+  // Fixed Coordinate saved, /api/position reports the saved coordinate
+  // itself back as a "gps" fix, so there is nothing to read (GH #621).
+  let readGpsAllowed = $derived(canReadGps(config?.source));
 </script>
 
 {#if Platform.kind === 'android'}
@@ -323,10 +331,16 @@
       <Input id="gps-fixed-alt" bind:value={form.fixed_alt} type="number" step="any" placeholder="0" />
     </FormField>
     <div class="read-gps-row">
-      <Button onclick={readGpsPosition} disabled={readingGps}>
+      <Button onclick={readGpsPosition} disabled={readingGps || !readGpsAllowed}>
         {readingGps ? 'Reading...' : 'Read GPS'}
       </Button>
-      <span class="read-gps-hint">Fill the fields above from the current GPS fix.</span>
+      <span class="read-gps-hint">
+        {#if readGpsAllowed}
+          Fill the fields above from the current GPS fix.
+        {:else}
+          Read GPS needs a serial or GPSD receiver running. Save that source first, then switch to Fixed Coordinate.
+        {/if}
+      </span>
     </div>
   {/if}
   <div class="modal-actions">
