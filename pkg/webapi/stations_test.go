@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -388,7 +389,7 @@ func TestStations_DeltaTrailTruncation(t *testing.T) {
 
 	// Delta: only positions[0]
 	since := now.Add(-time.Minute).Format(time.RFC3339Nano)
-	delta := decodeStations(t, getStations(t, h, "bbox="+defaultBBox+"&since="+since, nil))
+	delta := decodeStations(t, getStations(t, h, "bbox="+defaultBBox+"&since="+url.QueryEscape(since), nil))
 	if len(delta[0].Positions) != 1 {
 		t.Fatalf("delta: expected 1 position, got %d", len(delta[0].Positions))
 	}
@@ -574,7 +575,7 @@ func TestStations_TrailPositionsTrimmedByTimerange(t *testing.T) {
 
 	// Delta mode keeps emitting only positions[0] regardless of cutoff.
 	since := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
-	dtos = decodeStations(t, getStations(t, h, "bbox="+defaultBBox+"&timerange=900&since="+since, nil))
+	dtos = decodeStations(t, getStations(t, h, "bbox="+defaultBBox+"&timerange=900&since="+url.QueryEscape(since), nil))
 	if got := len(dtos[0].Positions); got != 1 {
 		t.Fatalf("delta mode: got %d positions, want 1", got)
 	}

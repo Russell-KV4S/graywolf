@@ -2014,7 +2014,75 @@ Source: [`../../pkg/kiss/manager.go`](../../pkg/kiss/manager.go)
 `serveShutdownGrace`);
 [`../../pkg/kiss/manager_rebind_test.go`](../../pkg/kiss/manager_rebind_test.go).
 
-### 68. Message unread counts update optimistically on mark-read, not only via the rollup poll
+### 68. 32-bit ARM builds are time32; ALSA timestamps cross an ABI boundary
+
+The armv6/armv7 (`armhf`) modem is built with the **default 32-bit
+`time_t`** (no `RUST_LIBC_UNSTABLE_GNU_TIME_BITS`), because the cross-rs
+images ship glibc 2.27 and a time64 build does not link. That has three
+consequences that must hold together:
+
+1. **Keep the `alsa` fork pinned** in the root `Cargo.toml`
+   `[patch.crates-io]`. On a t64 userland (current 32-bit Pi OS)
+   `libasound` writes a 16-byte `struct timespec` into what Rust thinks is
+   an 8-byte slot; the fork's `Status` htstamp accessors read into a
+   zeroed 16-byte buffer and decode per ABI. Without it: SIGSEGV
+   crash-loop (#231). With a wrong decode: htstamp error floods (#336).
+2. **cpal must be >= 0.18.** cpal 0.17's ALSA backend computed
+   `tv_sec * 1_000_000_000` in the native `time_t` width, which on a
+   time32 build is `i32` and wraps after ~2 s of uptime. The negative
+   result tripped "get_htstamp ... was earlier than get_trigger_htstamp"
+   on every output period, so the TX stream rebuilt continuously: PTT
+   keyed on time but audio arrived late, truncated, or not at all (#628).
+   0.18 widens to `i64` before multiplying and clamps instead of erroring.
+3. **Any of our own code doing `timespec`/`time_t`/`c_long` arithmetic, or
+   keeping long-running `usize` totals, must widen to 64-bit first.** On
+   armhf `usize` is 32 bits: the TX sink's cumulative sample counters
+   (`AudioSink::submitted`/`drained`) are `AtomicU64` because a `usize`
+   total wraps after ~24.8 h of cumulative TX audio at 48 kHz. The Go side
+   has the matching rule in invariant 43, and CI vets with `GOARCH=arm`.
+
+*Why:* every failure here is invisible on amd64/arm64 (where `time_t` and
+`usize` are 64-bit) and only shows up on real 32-bit hardware, so this
+area has regressed three times. If you bump `alsa` or `cpal`, re-check that
+the fork still applies (`Cargo.lock` must show the `git+...alsa-rs` source)
+and that cpal's ALSA timestamp math is still 64-bit.
+
+Source: [`../../Cargo.toml`](../../Cargo.toml) (`[patch.crates-io]` comment);
+[`../../graywolf-modem/src/audio/soundcard.rs`](../../graywolf-modem/src/audio/soundcard.rs)
+(`AudioSink`, `StreamErrorPolicy`);
+[`../../.github/workflows/armhf-t64-htstamp.yml`](../../.github/workflows/armhf-t64-htstamp.yml);
+`docs/plans/2026-06-11-armhf-t64-alsa-htstamp-fix.md`.
+
+### 69. KISS FEND is a frame delimiter: the decoder syncs once, then never discards frame bytes
+
+`kiss.Decoder` (`pkg/kiss/framing.go`) discards leading bytes only until the
+**first** FEND on a stream (`synced` flag) — that handles a TNC text banner or
+a mid-stream connect. After that first delimiter it never discards again: the
+byte immediately following a frame's closing FEND is the *start of the next
+frame*, and the read loop's `len(buf)==0` skip absorbs any run of delimiters
+(leading FENDs, empty frames, a shared single FEND between back-to-back
+frames).
+
+*Why:* KISS FEND (0xC0) is a delimiter, not a per-frame wrapper. Real TNCs vary:
+some send `C0 <frame> C0 C0 <frame> C0` (double FEND), some share one FEND
+(`C0 f1 C0 f2 C0`), and some emit only a trailing FEND per frame with no
+leading FEND at all. The original decoder re-ran "skip until the next FEND" on
+every `Next()` call, so after emitting a frame it threw away the following
+frame's bytes while hunting for a leading FEND that shared/trailing-only TNCs
+never send — silent RX loss (every-other frame, or effectively all frames when
+packets arrive with idle gaps). This was the "connects fine but sees no
+packets" report against the tcp-client path; the server/serial paths share the
+same decoder and had the same latent bug. Only the first pre-sync frame in
+trailing-FEND-only framing is (unavoidably) lost.
+
+*How to apply:* do not reintroduce a discard-until-FEND step that runs per
+frame. Regression guards: `TestDecodeSharedDelimiter`, `TestDecodeTrailingFendOnly`,
+`TestDecodeMultipleFrames`, `TestDecodeSkipsLeadingFends` in
+[`../../pkg/kiss/framing_test.go`](../../pkg/kiss/framing_test.go).
+
+Source: [`../../pkg/kiss/framing.go`](../../pkg/kiss/framing.go) (`Decoder.synced`, `Decoder.Next`).
+
+### 70. Message unread counts update optimistically on mark-read, not only via the rollup poll
 
 `MessageThread.svelte`'s `flushBatch` calls `store.adjustUnread(threadId, -n)`
 for every thread in the batch *before* the `markRead` requests resolve,
@@ -2024,6 +2092,12 @@ is reconciliation for drift, not the primary signal path. Each batched
 message carries its own `thread_kind`/`thread_key`, because the
 component is not remounted on a thread switch and a batch can straddle
 two threads.
+
+A message's `unread` flag is cleared the moment it is batched (and
+restored if its `markRead` fails). `msgs` is loaded once per thread
+visit, so without that, scrolling a read message out of view and back,
+or a tab switch that runs `rebuildIO()`, would batch it again and lower
+the count a second time.
 
 Each `MessageBubble` hands its element back on unmount
 (`registerRef(el, false)`) so `MessageThread` can unobserve it and drop
