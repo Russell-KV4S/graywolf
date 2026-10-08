@@ -247,7 +247,9 @@
   // component instance persists across thread switches, so anything
   // derived from an outer variable could be stale by the time the 2s
   // batch below flushes.
-  /** @type {Map<number, {kind: string, key: string}>} */
+  // `row` is the underlying `msgs` row, kept so its `unread` flag can be
+  // restored if markRead fails.
+  /** @type {Map<number, {kind: string, key: string, row: any}>} */
   const batchedIds = new Map();
   let batchTimer = null;
 
@@ -271,7 +273,9 @@
       const rollback = new Map();
       results.forEach((r, i) => {
         if (r.status === 'rejected') {
-          const tid = store.threadIdFor(entries[i][1].kind, entries[i][1].key);
+          const t = entries[i][1];
+          if (t.row) t.row.unread = true;
+          const tid = store.threadIdFor(t.kind, t.key);
           rollback.set(tid, (rollback.get(tid) || 0) + 1);
         }
       });
@@ -308,8 +312,15 @@
             // just the primary, or the thread's unread count never
             // reaches zero for the hidden duplicates.
             const ids = Array.isArray(m.mergedIds) && m.mergedIds.length ? m.mergedIds : [m.id];
+            // msgs is loaded once per thread visit, so clear each row's
+            // `unread` flag here (on the msgs rows, not the collapsed copy,
+            // which is rebuilt on every recompute) or scrolling back over
+            // the bubble, or a tab-switch rebuildIO, would batch it again
+            // and lower the count a second time.
             for (const id of ids) {
-              batchedIds.set(id, { kind: m.thread_kind, key: m.thread_key });
+              const row = msgs.find((r) => r.id === id);
+              batchedIds.set(id, { kind: m.thread_kind, key: m.thread_key, row });
+              if (row) row.unread = false;
             }
             dwellStart.delete(m.id);
             scheduleFlush();

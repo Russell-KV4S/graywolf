@@ -1851,6 +1851,13 @@ synchronously. The periodic rollup poll
 `bulletinsTransport.js`'s 30s snapshot) is reconciliation for drift, not
 the primary signal path.
 
+A message row's `unread` flag is cleared the moment it is batched (and
+restored if its `markRead` fails). `msgs` is loaded once per thread
+visit, so without that, scrolling a read message out of view and back,
+or a tab switch that runs `rebuildIO()`, would batch it again and lower
+the count a second time. Clear it on the `msgs` rows, not on the
+collapsed IS/RF-echo bubble, which is a fresh copy on every recompute.
+
 *Why:* neither backend mark-read endpoint publishes an event
 (`pkg/messages/service.go`'s `MarkRead`/`MarkUnread` and
 `pkg/webapi/bulletins.go`'s `markBulletinRead`/`markAllBulletinsRead` are
