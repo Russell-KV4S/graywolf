@@ -177,6 +177,11 @@
   @media (max-width: 768px) {
     .server-updated-banner {
       margin-left: 0;
+      /* Portrait phones: the sidebar is a fixed top bar (56px tall plus
+         the safe area, the same calc .main-content clears in App.svelte)
+         at z-index 100, so a banner sticky at top: 0 renders underneath
+         it and is never seen. Stick below the bar instead. */
+      top: calc(56px + var(--safe-area-top));
     }
   }
 
@@ -185,6 +190,9 @@
       margin-left: calc(
         var(--landscape-rail-width) + env(safe-area-inset-left)
       );
+      /* No top bar in landscape (the rail is on the left), so undo the
+         portrait top offset for the narrow phones that match both. */
+      top: 0;
     }
   }
 </style>
