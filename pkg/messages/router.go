@@ -35,16 +35,20 @@ func (realRouterClock) Now() time.Time { return time.Now().UTC() }
 // RouterConfig captures the router's collaborators. All fields except
 // Logger, Registerer, and Clock are required.
 type RouterConfig struct {
-	Store         *Store
-	TxSink        txgovernor.TxSink
-	IGateSender   IGateLineSender
-	OurCall       func() string // returns our primary callsign (possibly with SSID)
-	LocalTxRing   *LocalTxRing
-	TacticalSet   *TacticalSet
-	EventHub      *EventHub
-	Logger        *slog.Logger
-	Registerer    prometheus.Registerer
-	Clock         RouterClock
+	Store       *Store
+	TxSink      txgovernor.TxSink
+	IGateSender IGateLineSender
+	OurCall     func() string // returns our primary callsign (possibly with SSID)
+	LocalTxRing *LocalTxRing
+	TacticalSet *TacticalSet
+	// BlockedSet is the enabled call-sign blocklist. Optional: when nil
+	// the router constructs an empty set so nothing is blocked. Swapped
+	// by Service.ReloadBlockedCallsigns on CRUD mutations.
+	BlockedSet *BlocklistSet
+	EventHub   *EventHub
+	Logger     *slog.Logger
+	Registerer prometheus.Registerer
+	Clock      RouterClock
 	// AutoAckChannel is the RF channel used when submitting auto-ACKs.
 	// Defaults to 1 (mirrors IGateConfig.TxChannel semantics). Forwarded
 	// into Preflight when Preflight is nil.
@@ -148,6 +152,10 @@ func NewRouter(cfg RouterConfig) (*Router, error) {
 	}
 	if cfg.TacticalSet == nil {
 		return nil, errors.New("messages: router requires TacticalSet")
+	}
+	// BlockedSet is optional; an empty set blocks nothing.
+	if cfg.BlockedSet == nil {
+		cfg.BlockedSet = NewBlocklistSet()
 	}
 	if cfg.EventHub == nil {
 		return nil, errors.New("messages: router requires EventHub")
@@ -344,10 +352,12 @@ func (r *Router) classify(ctx context.Context, pkt *aprs.DecodedAPRSPacket) {
 	// Step 2 — self-filter. Full-call match (SSID-aware) or LocalTxRing
 	// hit. Base-call match is intentionally NOT used: two stations under
 	// the same base callsign with different SSIDs are distinct peers and
-	// must be able to message each other (e.g. NW5W-5 ↔ NW5W-13). The
-	// LocalTxRing already covers the precise (source, msgid) loopback
-	// case if a same-base packet is genuinely our own echo.
-	if ourCallFull != "" && source == ourCallFull {
+	// must be able to message each other (e.g. NW5W-5 ↔ NW5W-13). A
+	// trailing "-0" is canonicalized first so a radio that echoes our own
+	// traffic as <base>-0 is still recognized as us (canonicalCall keeps
+	// non-zero SSIDs distinct). The LocalTxRing already covers the precise
+	// (source, msgid) loopback case if a same-base packet is our own echo.
+	if ourCallFull != "" && canonicalCall(source) == canonicalCall(ourCallFull) {
 		r.mClassified.WithLabelValues("self_filter").Inc()
 		return
 	}
@@ -356,13 +366,28 @@ func (r *Router) classify(ctx context.Context, pkt *aprs.DecodedAPRSPacket) {
 		return
 	}
 
-	addressee := strings.ToUpper(strings.TrimSpace(effMsg.Addressee))
-	baseAddressee := baseCall(addressee)
+	// Blocklist filter. A muted sender's traffic is dropped here — before
+	// addressee classification, persistence, and auto-ACK — so blocked
+	// certificate-claim style messages never reach the inbox and we never
+	// ACK them back. Checked after the self-filter so we can't accidentally
+	// block our own echo path. See upstream #465.
+	if r.cfg.BlockedSet.Blocked(source) {
+		r.mClassified.WithLabelValues("blocked").Inc()
+		return
+	}
 
-	// Step 5 — addressee match determines thread_kind.
+	addressee := strings.ToUpper(strings.TrimSpace(effMsg.Addressee))
+
+	// Step 5 — addressee match determines thread_kind. The DM match is
+	// SSID-aware (see callAddressedToUs), mirroring the self-filter: a
+	// message to a different SSID of our base call (e.g. we are K0TFU-1,
+	// addressee K0TFU-7) belongs to a distinct peer and must NOT be
+	// claimed, filed, or auto-ACKed by us. Matching only on the base
+	// call here would let us send the sender a false delivery
+	// confirmation for a message that never reached the intended station.
 	var threadKind, threadKey string
 	switch {
-	case ourCall != "" && baseAddressee == ourCall:
+	case callAddressedToUs(addressee, ourCallFull):
 		threadKind = ThreadKindDM
 		threadKey = source
 	case r.cfg.TacticalSet.Contains(addressee):
@@ -631,6 +656,19 @@ func baseCall(s string) string {
 	return s
 }
 
+// canonicalCall collapses the AX.25 SSID 0 to the bare call. Per AX.25,
+// SSID 0 is canonically the station with no SSID, so <base>-0 is the same
+// station as bare <base> (some radios, e.g. the BTech DA-7X2, always emit
+// the "-0" form). Every other SSID identifies a distinct peer and is left
+// intact, so this does not weaken same-base different-SSID separation
+// (K0TFU-1 vs K0TFU-7 stay distinct). Input should already be trimmed.
+func canonicalCall(s string) string {
+	if i := strings.IndexByte(s, '-'); i >= 0 && s[i+1:] == "0" {
+		return s[:i]
+	}
+	return s
+}
+
 // joinPath renders pkt.Path (already a []string in TNC-2 form) into a
 // comma-separated display string.
 func joinPath(p []string) string {
@@ -784,6 +822,11 @@ func unwrapThirdParty(pkt *aprs.DecodedAPRSPacket) (string, *aprs.Message) {
 		out.MessageID = out.Text[3:]
 		out.Text = ""
 	}
+	// Mirror parseMessage: strip any trailing CR/whitespace a radio
+	// appended to the info field so the msgid (and reply-ack piggyback id,
+	// which trails the field) correlate cleanly.
+	out.MessageID = strings.TrimRight(out.MessageID, " \r\n\t")
+	out.ReplyAck = strings.TrimRight(out.ReplyAck, " \r\n\t")
 	return innerSrc, out
 }
 
@@ -795,20 +838,50 @@ type AddresseeMatch struct {
 }
 
 // MatchAddressee reports whether addressee is one we should handle.
-// ourCall is the primary station callsign (with or without SSID); the
-// match against ourCall is base-call only. tactical may be nil.
+// ourCall is the primary station callsign (with or without SSID). The
+// match against ourCall is SSID-aware (see callAddressedToUs): an exact
+// full-call match, or a bare base-call address with no SSID; a trailing
+// "-0" SSID is treated as the bare call. A distinct, non-zero SSID of our
+// base call is a separate peer and does not match. tactical may be nil.
 func MatchAddressee(ourCall, addressee string, tactical *TacticalSet) AddresseeMatch {
 	addr := strings.ToUpper(strings.TrimSpace(addressee))
 	if addr == "" {
 		return AddresseeMatch{}
 	}
-	base := baseCall(addr)
-	our := baseCallUpper(ourCall)
-	if our != "" && base == our {
+	if callAddressedToUs(addr, ourCall) {
 		return AddresseeMatch{IsForUs: true}
 	}
 	if tactical != nil && tactical.Contains(addr) {
 		return AddresseeMatch{IsForUs: true, IsTactical: true}
 	}
 	return AddresseeMatch{}
+}
+
+// callAddressedToUs reports whether a directed-message addressee targets
+// our station, SSID-aware. It matches when the addressee is an exact
+// full-call match of our call, or a bare base-call address (no SSID)
+// whose base equals our base call. A trailing "-0" SSID is canonically
+// the bare call (see canonicalCall), so <base>-0 and bare <base> match
+// each other and our station; a <base>-0 addressee therefore also inherits
+// the generic bare-call semantics below (any station on that base answers
+// it). A different, non-zero SSID of our base call
+// (e.g. our K0TFU-1 vs addressee K0TFU-7) is a distinct peer and does
+// NOT match — this mirrors the router self-filter's full-call logic so
+// addressee matching and self-filtering treat SSIDs consistently. Both
+// arguments may carry or omit an SSID and need not be pre-normalized.
+func callAddressedToUs(addressee, ourCall string) bool {
+	addr := canonicalCall(strings.ToUpper(strings.TrimSpace(addressee)))
+	our := canonicalCall(strings.ToUpper(strings.TrimSpace(ourCall)))
+	if addr == "" || our == "" {
+		return false
+	}
+	if addr == our {
+		return true
+	}
+	// A bare base-call address (no SSID) is generic: any station sharing
+	// that base call answers it. addr has no '-', so addr == baseCall(addr).
+	if !strings.ContainsRune(addr, '-') && addr == baseCall(our) {
+		return true
+	}
+	return false
 }

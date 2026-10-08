@@ -22,15 +22,17 @@ const aprsGatewayToCall = "APGWLF"
 // third-party format so other iGates and client apps can see the
 // packet originated on the internet side. The outer AX.25 frame is
 // sourced from the iGate's own call (so other iGates don't conclude
-// the original sender is local RF) with an empty digipeater path
-// (IS→RF targets stations in direct RF range of the iGate). The inner
-// payload follows the format:
+// the original sender is local RF). The digipeater via-path is set
+// from via — the operator's configured IS→RF path (Direwolf IGTXVIA
+// equivalent); a nil/empty via sends direct, targeting only stations
+// in direct RF range of the iGate. The inner payload follows the
+// format:
 //
 //	}origSrc>origDest[,origPath…],TCPIP,IGATECALL*:origInfo
 //
 // The inner "TCPIP,IGATECALL*" marker is what other iGates look at to
 // decide "I already have this from the net — do not re-gate".
-func wrapThirdParty(inner *ax25.Frame, igateCall string) (*ax25.Frame, error) {
+func wrapThirdParty(inner *ax25.Frame, igateCall string, via []ax25.Address) (*ax25.Frame, error) {
 	if inner == nil {
 		return nil, errors.New("igate: wrapThirdParty: nil frame")
 	}
@@ -54,6 +56,14 @@ func wrapThirdParty(inner *ax25.Frame, igateCall string) (*ax25.Frame, error) {
 	hdr.WriteByte('>')
 	hdr.WriteString(inner.Dest.String())
 	for _, a := range inner.Path {
+		// Drop any inbound TCPIP/TCPXX markers: the packet arrived from
+		// APRS-IS so its path may already carry one, and we append the
+		// canonical ",TCPIP,IGATECALL*" below. Re-emitting the inbound
+		// one produces a duplicate "TCPIP,TCPIP" that Kenwood radios
+		// (e.g. TH-D75) reject, silently dropping the igated message.
+		if u := strings.ToUpper(a.Call); u == "TCPIP" || u == "TCPXX" {
+			continue
+		}
 		// Strip the H bit for the serialized form; the third-party
 		// inner path is informational and the '*' marker would
 		// confuse downstream parsers.
@@ -71,7 +81,9 @@ func wrapThirdParty(inner *ax25.Frame, igateCall string) (*ax25.Frame, error) {
 	info = append(info, hdr.Bytes()...)
 	info = append(info, inner.Info...)
 
-	// IS→RF third-party packets target stations in direct RF range of
-	// the iGate; no digipeater path is included per IGATE-HINTS.
-	return ax25.NewUIFrame(outerSrc, outerDest, nil, info)
+	// The via-path (nil = direct) is the operator's configured IS→RF
+	// path. Historically this was always direct per IGATE-HINTS, but
+	// asymmetric-RF sites need to reach recipients via digipeaters
+	// (issue #489).
+	return ax25.NewUIFrame(outerSrc, outerDest, via, info)
 }

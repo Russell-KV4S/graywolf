@@ -116,13 +116,22 @@
             </tr>
             <tr>
               <td>APRS-IS Server</td>
-              <td><code>rotate.aprs2.net</code></td>
-              <td>APRS-IS server hostname</td>
+              <td><code>rotate.aprs2.net</code> (shown as Worldwide)</td>
+              <td>
+                Select the <a href="https://www.aprs2.net/">Tier-2 regional
+                rotate address</a> nearest your station, or leave it on
+                <strong>Worldwide</strong> to use the global rotation. Select
+                <strong>Custom</strong> to enter another APRS-IS hostname.
+              </td>
             </tr>
             <tr>
               <td>Port</td>
               <td><code>14580</code></td>
-              <td>APRS-IS server port</td>
+              <td>
+                APRS-IS server port. <code>14580</code> is the client-defined
+                filter port that <a href="https://www.aprs2.net/">aprs2.net</a>
+                asks all users to connect to; you should not need to change it.
+              </td>
             </tr>
             <tr>
               <td>Callsign</td>
@@ -136,6 +145,32 @@
             </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <div class="callout tip">
+      <span class="callout-icon">&#10003;</span>
+      <div class="callout-body">
+        <p>
+          <strong>Choosing an APRS-IS server.</strong> Pick the regional
+          address for where your station is:
+        </p>
+        <ul>
+          <li><strong>North America</strong> &mdash; <code>noam.aprs2.net</code></li>
+          <li><strong>South America</strong> &mdash; <code>soam.aprs2.net</code></li>
+          <li><strong>Europe &amp; Africa</strong> &mdash; <code>euro.aprs2.net</code></li>
+          <li><strong>Asia</strong> &mdash; <code>asia.aprs2.net</code></li>
+          <li><strong>Oceania</strong> &mdash; <code>aunz.aprs2.net</code></li>
+        </ul>
+        <p>
+          Each regional address rotates among Tier 2 servers in that part of
+          the world, and these are the addresses
+          <a href="https://www.aprs2.net/">aprs2.net</a> asks clients to use.
+          <strong>Worldwide</strong> (<code>rotate.aprs2.net</code>) can hand
+          you a server on the other side of the world, adding latency to every
+          packet you gate. graywolf only defaults to Worldwide because it
+          can't tell which region a new install is in.
+        </p>
       </div>
     </div>
 
@@ -263,7 +298,7 @@
           <tbody>
             <tr>
               <td>Type</td>
-              <td>Match type: Callsign, Prefix, Message Dest, or Object</td>
+              <td>Match type: Callsign, Prefix, Message Dest, Object, or Packet Type</td>
             </tr>
             <tr>
               <td>Pattern</td>
@@ -491,6 +526,49 @@
       </div>
     </div>
 
+    <h4>Packet Type</h4>
+
+    <p>
+      Match on the <strong>type of the APRS packet</strong> rather than on
+      any callsign or name. Instead of a free-text pattern, the Pattern
+      field becomes a drop-down of packet-type categories mapped to the
+      standard aprs.is <code>t/&hellip;</code> filter classes:
+      <strong>Message</strong>, <strong>Position</strong>,
+      <strong>Weather</strong>, <strong>Object</strong>,
+      <strong>Item</strong>, <strong>Telemetry</strong>,
+      <strong>Status</strong>, and <strong>Query</strong>.
+      (Position also covers Mic-E reports.) This lets you gate only a
+      chosen kind of traffic to RF &mdash; for example, messages only in
+      areas where no iGate should transmit anything else on the air.
+    </p>
+
+    <div class="callout info">
+      <span class="callout-icon">&#9432;</span>
+      <div class="callout-body">
+        <p>
+          A weather station&rsquo;s position report is classified as
+          <strong>Weather</strong>, not <strong>Position</strong> &mdash;
+          the weather data determines the category. If you want to gate
+          weather stations, use the Weather category; a Position rule will
+          not match them.
+        </p>
+      </div>
+    </div>
+
+    <div class="callout info">
+      <span class="callout-icon">&#9432;</span>
+      <div class="callout-body">
+        <p>
+          Packet Type rules still pass through the hardcoded policy gate:
+          non-message types only transmit when the packet is sourced from
+          one of your own station SSIDs, and directed messages only
+          transmit to a station heard directly on RF in the last 30
+          minutes. A Packet Type rule narrows <em>what</em> is gated; it
+          never widens who or what the policy gate already allows.
+        </p>
+      </div>
+    </div>
+
     <h3>Example: Gate a Single Station</h3>
 
     <p>
@@ -536,6 +614,31 @@ Priority: 100</code></pre>
       messages but never transmit them.
     </p>
 
+    <h3>Example: Gate Messages Only</h3>
+
+    <p>
+      To transmit <strong>only messages</strong> to RF and nothing else,
+      add a single Packet Type rule. The default-deny policy handles the
+      rest: any packet that isn&rsquo;t a message falls through to deny.
+      Pair it with a <code>t/m</code> server filter so APRS-IS only sends
+      you message traffic in the first place:
+    </p>
+
+<pre><code>APRS-IS Server Filter: t/m
+
+Type:     Packet Type
+Pattern:  Message
+Action:   Allow
+Priority: 100</code></pre>
+
+    <p>
+      This is the recommended setup for service areas where an iGate
+      should relay directed messages to local stations but must never put
+      position, weather, object, or telemetry traffic on the air. The
+      heard-direct check still applies, so a message only transmits when
+      its addressee was recently heard directly on RF.
+    </p>
+
     <h2 id="simulation-mode">Simulation Mode</h2>
 
     <p>
@@ -575,8 +678,14 @@ Priority: 100</code></pre>
         <a href="https://github.com/hessu/aprsc/blob/main/doc/IGATE-HINTS.md">IGATE-HINTS</a>.</li>
       <li><strong>Third-party wrapping</strong> &mdash; every IS&rarr;RF
         frame is wrapped in APRS third-party format (APRS101 &sect;20)
-        with an empty digipeater path, so other iGates can see the
-        packet originated on the internet side</li>
+        so other iGates can see the packet originated on the internet
+        side. The outer frame&rsquo;s digipeater path comes from the
+        <strong>IS&rarr;RF Digipeater Path</strong> setting (the
+        Direwolf <code>IGTXVIA</code> equivalent): leave it empty to
+        transmit direct &mdash; only stations in direct RF range hear
+        the packet &mdash; or set a literal path such as
+        <code>WIDE1-1,WIDE2-1</code> when your recipients sit behind a
+        digipeater (a common asymmetric-RF situation)</li>
       <li><strong>Reconnection</strong> &mdash; the APRS-IS connection
         is automatically re-established if it drops, with DNS
         re-resolved on every attempt so hostnames like

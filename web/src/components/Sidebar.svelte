@@ -50,6 +50,7 @@
     { path: '/ptt', label: 'PTT' },
     { path: '/simulation', label: 'Simulation' },
     { path: '/callsign', label: 'Station Callsign' },
+    { path: '/preferences/storage', label: 'Storage' },
   ];
   // mainItems carries the icon'd top section; it's filtered by the
   // same HIDDEN_ON_ANDROID set as the settings group so an entry like
@@ -810,8 +811,8 @@
       top: 0;
       left: 0;
       right: 0;
-      height: calc(56px + env(safe-area-inset-top));
-      padding: env(safe-area-inset-top) 8px 0
+      height: calc(56px + var(--safe-area-top));
+      padding: var(--safe-area-top) 8px 0
         max(8px, env(safe-area-inset-right));
       padding-left: max(8px, env(safe-area-inset-left));
       background: var(--bg-secondary);

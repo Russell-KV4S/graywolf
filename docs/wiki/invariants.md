@@ -172,12 +172,63 @@ Source:
 [`../../pkg/app/config.go`](../../pkg/app/config.go),
 [`../../graywolf-modem/build.rs`](../../graywolf-modem/build.rs).
 
-### 15. Default IS->RF policy is deny
+### 15. IS->RF gating is a two-tier AND; default policy is deny
 
-*Why:* The IS->RF rule engine evaluates rules in priority order and drops anything no rule matches, preventing accidental flooding of RF with arbitrary internet traffic.
+IS->RF transmission requires **both** tiers to allow a packet:
 
-Source: [`../../pkg/igate/filters/filters.go`](../../pkg/igate/filters/filters.go)
-(package comment).
+- **Tier 1 — hardcoded** (`Igate.shouldForwardISToRF`, `pkg/igate/igate.go`):
+  loop prevention runs first and covers both kinds of traffic —
+  `pathContainsSelf` drops any packet already carrying our own callsign in
+  its path. Directed messages then forward only to an addressee heard
+  **directly** on RF within `heardDirectTTL` (30 min,
+  `pkg/igate/heard.go`), and never when the message is a bulletin or an NWS
+  broadcast or carries an empty addressee; non-message traffic only
+  forwards if sourced from one of the operator's own SSIDs
+  (`sourceIsOwnSSID`). Not operator-configurable.
+- **Tier 2 — the rule engine** (`filters.Engine.Allow`): priority-ordered,
+  first-match-wins, **default deny**. Rule types: `callsign`, `prefix`,
+  `message_dest`, `object`, `packet_type`. `packet_type` matches on the
+  decoded `aprs.PacketType`; its Pattern is a fixed category key (`message`,
+  `position`, `weather`, `object`, `item`, `telemetry`, `status`, `query`)
+  mapped to the aprs.is `t/…` classes, not a wildcard string. The category
+  set lives in `packetTypeCategories` (`pkg/igate/filters/filters.go`) and is
+  mirrored as strings in the DTO validator (`packetTypeCategoryKeys`,
+  `pkg/webapi/dto/igate.go`) and the Svelte `packetTypeOptions` — keep the
+  three in sync. Messages-only IS→RF gating is one allow rule of type
+  `packet_type` = `message` (graywolf #518).
+
+**"Heard directly" is literal.** `pathIsDirect` (`pkg/igate/heard.go`) admits
+a station to the heard tracker only when no element of its path ends in `*`,
+so a digipeated copy never qualifies the source. A station you can reach only
+through a digipeater is therefore not eligible for IS→RF directed-message
+delivery, even though it is plainly on the air and shows up on the map.
+
+A bare `*` pattern is a flooding footgun for source-side rules
+(`callsign`/`prefix`) and a silent no-op elsewhere, so it is rejected —
+**except for `message_dest`, where a bare `*` means "any addressee" and is
+allowed**: tier 1's heard-direct check already bounds directed-message
+delivery to stations physically heard on RF, so it cannot flood. This is
+the one-rule way to get the textbook iGate "deliver to whoever we heard"
+behavior (graywolf #496). The bare-`*` allowance is enforced in the engine
+(`matches`), the DTO validator (`validateIGateRfFilterPattern`), and the
+Svelte client mirror (`validatePattern`) — keep all three in sync.
+
+The master IS->RF on/off switch is `IGateConfig.GateIsToRf`: when false the
+TX governor is never wired into the iGate, so no packet reaches RF
+regardless of the rule table (`buildIgateInstance` / `reloadIgate` in
+`pkg/app/wiring.go`). It is surfaced as the "Enable IS→RF gating" toggle on
+the iGate page's gating tab.
+
+*Why:* preventing accidental flooding of RF with arbitrary internet traffic
+while still allowing standard iGate message forwarding to be enabled in one
+step.
+
+Source: [`../../pkg/igate/filters/filters.go`](../../pkg/igate/filters/filters.go),
+[`../../pkg/igate/igate.go`](../../pkg/igate/igate.go)
+(`shouldForwardISToRF`, `pathContainsSelf`, `sourceIsOwnSSID`),
+[`../../pkg/igate/heard.go`](../../pkg/igate/heard.go)
+(`heardDirectTTL`, `pathIsDirect`),
+[`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (governor wiring).
 
 ### 16. TX path is single-source-of-truth via `txgovernor`
 
@@ -193,6 +244,34 @@ Source: [`../../pkg/txgovernor/governor.go`](../../pkg/txgovernor/governor.go)
 Source: [`../../pkg/webapi/dto/kiss.go`](../../pkg/webapi/dto/kiss.go),
 [`../../pkg/configstore/store.go`](../../pkg/configstore/store.go) (`normalizeKissInterface`),
 [`../../pkg/configstore/migrate.go`](../../pkg/configstore/migrate.go) (`migrateKissTcpClientTxDefault`).
+
+### 16c. `resolveTxChannel` honors KISS-TNC channels, not just modem channels
+
+`App.resolveTxChannel` (`pkg/app/wiring.go`) picks the default TX egress channel for messages / iGate traffic. A channel is a valid egress target if it has **either** a modem input device (`Channel.InputDeviceID != nil`) **or** a KISS-TNC governor backend -- an enabled `Mode=tnc` interface with `AllowTxFromGovernor=true` and `Channel != 0`. The KISS-TNC set is computed by `kissTxChannelSet`, mirroring `buildTxBackendSnapshot`'s eligibility as a pure config projection (it does **not** require the interface's queue to be live, matching how the modem side ignores bridge-subprocess health). A configured channel that maps to either backend is returned as-is; otherwise the resolver falls back to the lowest modem channel, then to the lowest KISS-TNC channel, then to the lowest channel ID overall.
+
+*Why:* A KISS-TNC channel legitimately has no `InputDeviceID`. The earlier modem-only resolver skipped it and silently overrode the operator's KISS channel to the first modem channel whenever both were configured, so messages routed to KISS were logged but egressed on the internal APRS modem (graywolf#503). Any change to what counts as a governor egress target must update `buildTxBackendSnapshot` and `kissTxChannelSet` together, or resolution and dispatch drift apart.
+
+Source: [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`resolveTxChannel`, `kissTxChannelSet`, `buildTxBackendSnapshot`),
+[`../../pkg/app/resolve_tx_channel_test.go`](../../pkg/app/resolve_tx_channel_test.go).
+
+### 16d. A disabled channel (`Channel.Enabled == false`) is inert across every backend
+
+`Channel.Enabled` (default true; column added by migration 29) is the single authoritative gate for whether graywolf brings a channel up. A disabled channel must be excluded at **every** place that enumerates channels for a backend, so it opens no device and moves no traffic:
+
+- **Modem:** `pushConfiguration` (`pkg/modembridge/session.go`) filters disabled channels before emitting `ConfigureAudio` / `ConfigureChannel` / `ConfigurePtt`, so the Rust modem never opens the audio device or decodes the channel -- same treatment as the `InputDeviceID == nil` KISS-only skip.
+- **Governor egress:** `buildTxBackendSnapshot`, `kissTxChannelSet`, and `resolveTxChannel` (`pkg/app/wiring.go`) skip disabled channels (`disabledChannelSet`), so a disabled channel is never a TX target -- neither its modem backend nor a KISS-TNC interface bound to it. This composes with invariant 16c: the disabled filter and the two egress projections must stay in lockstep.
+- **KISS device:** a KISS interface whose `Channel` is disabled is stopped so its TNC device (serial fd / socket) is released. Boot goes through `kissComponent`; a live toggle goes through `webapi.notifyKissManager` (which re-reads the channel's enabled state) driven by `reconcileKissForChannel` on the channel update / enable-toggle handlers.
+
+Toggling is hot: `PUT /api/channels/{id}/enabled` (and a full channel PUT) calls `notifyBridgeReload` (modem reconfigure + TX snapshot rebuild) and `reconcileKissForChannel`, so no restart is needed.
+
+*Why:* The feature (graywolf#517) lets an operator park a channel -- e.g. an HF radio usually on voice -- without deleting its config. "Parked" only holds if the channel is inert on *all three* surfaces; a miss on any one leaves the device open or the channel silently egressing. Note the store-layer caveat: `Channel.Enabled` carries a `default:true` GORM tag, so `CreateChannel` cannot distinguish an explicit `false` from an unset zero value -- a create-disabled request is honored one layer up in `webapi.createChannel` off the request's `*bool`, and `dto.ChannelRequest.Enabled` is a pointer for the same reason.
+
+Two deliberate scoping choices: (1) disabling does **not** trigger the channel-referrer guard (no 409) -- it is a reversible park with the config preserved, mirroring the unguarded KISS `setKissEnabled` toggle; `computeTxCapability` intentionally ignores `Enabled` so the guard fires only on real config changes (e.g. removing the output device), not on a park. (2) `computeChannelBacking` / `computeTxCapability` are config-level projections and also ignore `Enabled`; the disabled state is surfaced to the operator by the Channels page (`ChannelRow.svelte`: Disabled badge, dimmed card, a "Disabled" backing row in place of live/down) rather than by mutating those pure functions -- keeping them keyed only on backing config, not runtime enable state.
+
+Source: [`../../pkg/modembridge/session.go`](../../pkg/modembridge/session.go) (`pushConfiguration`),
+[`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`disabledChannelSet`, `buildTxBackendSnapshot`, `kissTxChannelSet`, `resolveTxChannel`, `kissComponent`),
+[`../../pkg/webapi/channels.go`](../../pkg/webapi/channels.go) (`setChannelEnabled`, `reconcileKissForChannel`, `createChannel`),
+[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`notifyKissManager`).
 
 ### 17. RX fanout carries provenance via `ingress.Source` (in-process)
 
@@ -242,6 +321,10 @@ Source: `cmd/graywolf/flare.go`'s control flow: the network `client.Submit` call
 When a channel's `Mode` is `packet`, the beacon scheduler, digipeater engine, iGate IS→RF gate, APRS messages sender, and `ax25conn.Manager.Open` (connected-mode session bring-up) all skip, refuse, or down-shift when asked to transmit on that channel. Conversely, `ax25conn.Manager.Open` rejects channels in `aprs`-only mode. RX is unchanged: frames keep demodulating and fan out via the existing fanout; subscribers self-filter.
 
 The lookup contract is fail-open at the resolver: if `ChannelModeLookup` returns an error or `nil`, callers behave as if the channel were `aprs` (preserves the legacy any-channel-does-anything behavior). The IS→RF runtime gate also fails open -- a transient DB error does not silently suppress beaconing or gating.
+
+**Who hits this refusal.** Two paths call `ax25conn.Manager.Open` and so inherit the `aprs`-only rejection: the web AX.25 terminal, and the AGWPE server's connected mode (`pkg/agw/connected.go`). Because `Channel.Mode` defaults to `aprs`, an operator who has never touched the setting gets refused on both. AGWPE has no error frame, so the refusal is reported to the client as a `'d'` whose text names the channel and the fix -- see [code-map](code-map.md). Silently dropping it instead makes the client hang with no diagnosis (graywolf#561).
+
+**Exception -- KISS `allow_connected_mode` passthrough.** The per-interface KISS `allow_connected_mode` opt-in (`pkg/kiss`, see [code-map](code-map.md)) is a *raw transport* path: it modulates client-supplied connected-mode frames directly via `Sink.Submit`, never touching `ax25conn.Manager`, so it does **not** consult `ChannelModeLookup`. An operator who sets `allow_connected_mode` on an interface mapped to an `aprs`-only channel can therefore transmit SABM/I/S frames there. This is deliberate: the flag is an explicit "stop filtering, KISS is a raw AX.25 transport" opt-in (graywolf#463), and the connecting client -- not graywolf -- owns the session. Default off keeps `aprs`-only channels connected-mode-free unless the operator overrides it.
 
 *Why:* Operators may want to dedicate a channel to AX.25 connected-mode without it accidentally absorbing APRS beacons, digipeated packets, IS→RF traffic, or outbound APRS messages. The `aprs+packet` value preserves the legacy "any channel does anything" behavior for setups that don't care about the split.
 
@@ -580,8 +663,56 @@ The two switches are independent; omitting #2 means a config write calls `Stop()
 
 *Why:* There is no shared dispatch table -- each switch is a separate match on the stored `InterfaceType` string, so a new type added to one switch must be consciously added to the other.
 
+**This extends to every field, not just the type arms.** Each arm builds a
+`kiss.ServerConfig` / `ClientConfig` / `SerialConfig` struct literal by hand at
+both sites, so a `KissInterface` column that one literal sets and the other
+omits silently takes its zero value on whichever path skipped it. Adding a
+per-interface flag means touching **both** literals for **every** arm that
+supports it. The failure is quiet by construction: the boot path is correct,
+so the feature works until the operator saves the config, and then works
+again after the next restart.
+
+The concrete instance this rule was written from: `GateTxToIs` reached the
+`tcp` (server-listen) arm at boot but not in `notifyKissManager`, so any save
+of a KISS TNC config -- including saving with the box freshly checked --
+restarted the server with APRS-IS forwarding off until the next restart. RF TX
+kept working throughout (that leg is `Sink.Submit`, which does not consult the
+flag), which is what made it look like a routing bug rather than a config-
+threading one. Regression coverage:
+[`../../pkg/webapi/kiss_gate_tx_to_is_test.go`](../../pkg/webapi/kiss_gate_tx_to_is_test.go)
+drives a real socket and asserts the gate hook fires after a hot reload; a
+mock-based field assertion would not have caught the omission.
+
+**The escape hatch is to make the field manager-owned instead.**
+`kiss.Manager` installs `OnDecodeError`, `OnFrameIngress`,
+`OnClientTxAccepted`, `RxIngress`, `Clock`, `Sink` and `InterfaceID` onto
+every config it starts, from `ManagerConfig`, whenever the per-start
+literal leaves them nil. A field handled that way cannot be forgotten by
+either dispatch site, because neither site sets it. `OnClientChange`
+joined that set in graywolf#548: it had been the lone metrics hook still
+supplied per-`Start`, set only by the boot literal, so any config save
+replaced the running server with one that had no reporter and
+`graywolf_kiss_clients_active` read 0 until the next restart. It is now
+installed by `Manager.Start` from `ManagerConfig.OnClientChange`, wrapped
+with the interface's row ID and display name, and the boot literal no
+longer sets it. An explicit per-start hook still wins, so direct callers
+and tests are unaffected.
+
+Prefer this shape for any new cross-cutting hook. As of #548 the only
+behavioural field still duplicated across both literals is `GateTxToIs`,
+which is genuinely per-interface config rather than a shared hook.
+
+Regression coverage:
+[`../../pkg/kiss/manager_test.go`](../../pkg/kiss/manager_test.go)
+(`TestManagerInstallsOnClientChangeWithIfaceAndName`,
+`TestManagerOnClientChangePerStartWins`) and
+[`../../pkg/webapi/kiss_client_gauge_test.go`](../../pkg/webapi/kiss_client_gauge_test.go),
+which drives the hot-reload path through the real handler and socket.
+
 Source: [`../../pkg/app/wiring.go`](../../pkg/app/wiring.go) (`kissComponent`),
-[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`notifyKissManager`).
+[`../../pkg/webapi/kiss.go`](../../pkg/webapi/kiss.go) (`notifyKissManager`),
+[`../../pkg/kiss/manager.go`](../../pkg/kiss/manager.go) (`Manager.Start`
+hook installs).
 
 ### 35. All blocking Bluetooth and USB calls run on a worker thread
 
@@ -680,14 +811,29 @@ cannot outlive the app, because no single mechanism covers both cases.
   and a `setOnApplyWindowInsetsListener` that pads the WebView by the side bars and
   `max(systemBars.bottom, ime.bottom)` -- but **leaves the top inset at 0 on purpose**.
   The split is load-bearing and not interchangeable:
-  - **Top is owned by CSS.** The SPA's mobile top bar is `position:fixed; top:0`
-    (`web/.../Sidebar.svelte`), and a fixed element is pinned to the visual viewport,
-    which WebView top-padding does NOT shift -- padding the top leaves the bar stranded
-    behind the status bar (GH #390). Instead `web/index.html` sets `viewport-fit=cover`
-    so `env(safe-area-inset-top)` is populated, and the top bar reserves the status-bar
-    strip itself (`height: calc(56px + env(safe-area-inset-top))`, matching
-    `margin-top` on `.main-content`). Do NOT re-add `bars.top` to the WebView padding and
-    do NOT drop `viewport-fit=cover`.
+  - **Top is owned by CSS, fed the inset by native.** The SPA's mobile top bar is
+    `position:fixed; top:0` (`web/.../Sidebar.svelte`), and a fixed element is pinned to
+    the visual viewport, which WebView top-padding does NOT shift -- padding the top leaves
+    the bar stranded behind the status bar (GH #390). So the top bar reserves the
+    status-bar strip in CSS (`height: calc(56px + var(--safe-area-top))`, matching
+    `margin-top` on `.main-content`). The value is **not** taken from
+    `env(safe-area-inset-top)` alone: Android WebView derives that env var from the
+    display cutout, not the status bar, and returns 0 (or wrong values below WebView 140)
+    on most devices -- relying on it is what made the first GH #390 fix regress. Instead
+    `MainActivity.applyTopInsetToCss` injects the real status-bar inset (`systemBars.top`,
+    converted to CSS px) as the `--android-inset-top` custom property on the document root,
+    re-applied from `onPageFinished` because each `loadUrl` swaps in a fresh document.
+    `web/src/app.css` defines `--safe-area-top: max(env(safe-area-inset-top),
+    var(--android-inset-top, 0px))` so the Android shell (var set, env 0) and iOS / mobile
+    browsers (env populated, var unset) both reserve the strip; all top-inset consumers
+    (`App.svelte`, `Sidebar.svelte`, `RemoteActionsDrawer.svelte`) read `var(--safe-area-top)`.
+    chonky-ui's `<Drawer>` (the mobile nav drawer, `web/.../Sidebar.svelte` `anchor="left"`)
+    bakes raw `env(safe-area-inset-top)` into its `.drawer` rule, so `app.css` overrides
+    `.drawer { padding-top: var(--safe-area-top) }` to feed it the native inset too -- the
+    proper fix belongs in chonky-ui itself; until then any new `.drawer`-based surface
+    inherits the override. Do NOT re-add `bars.top` to the WebView padding, do NOT make the
+    top bar depend on `env(safe-area-inset-top)` directly, and keep `viewport-fit=cover` in
+    `web/index.html` (it is still needed for the env() path on iOS / mobile browsers).
   - **Bottom is owned by native padding.** `env()` cannot express the keyboard, so the
     IME padding is the cross-system load-bearing bit: it shrinks the web viewport above
     the keyboard so the SPA's sticky compose bar (`web/.../ComposeBar.svelte`,
@@ -1249,11 +1395,26 @@ qualifies. RF Only is the looser companion to Direct RX (#48): it keeps
 RF-digipeated stations (`hops > 0`) and drops only APRS-IS and Internet-to-RF
 gated current fixes.
 
+*Surfacing the divergence in the popup (graywolf #482).* The badge-vs-`positions[0]`
+divergence above reads as a filter bug to operators: a station badged `APRS-IS`
+that stays visible under RF Only looks wrong even though it is correct. #482 was
+the second report of exactly this. The popup now renders an `RF-reachable`
+note (`popup.js`, class `.stn-rf-reachable`) whenever
+`rfReachableDespiteNonRfLatest(s)` holds -- the plotted fix (`positions[0]`)
+qualifies as RF-heard while the **latest** packet did not arrive over RF
+(`s.direction !== 'RX' || s.gated`). The RF Only toggle also carries a `title`
+tooltip stating the "ever RF-reachable at the current fix" semantics. This is a
+labeling affordance only; it does **not** change the predicate. If you ever make
+RF Only key on current-packet recency instead (the #482 option 2), retire this
+note too.
+
 Source: [`../../web/src/lib/map/rf-only-core.js`](../../web/src/lib/map/rf-only-core.js)
-(`isRfOnly`),
+(`isRfOnly`, `rfReachableDespiteNonRfLatest`),
 [`../../web/src/lib/map/rf-only-core.test.js`](../../web/src/lib/map/rf-only-core.test.js),
 [`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
-(filter `$effect`, `rfOnlyStationCount`),
+(filter `$effect`, `rfOnlyStationCount`, RF Only toggle `title`, `.stn-rf-reachable` CSS),
+[`../../web/src/lib/map/popup.js`](../../web/src/lib/map/popup.js)
+(`.stn-rf-reachable` note),
 [`../../web/src/lib/map/popup-helpers.js`](../../web/src/lib/map/popup-helpers.js)
 (`viaText`).
 
@@ -1398,6 +1559,29 @@ Source: [`../../cmd/graywolf/main.go`](../../cmd/graywolf/main.go)
 (leftover-positional hint),
 [`../../cmd/graywolf/authcli/authcli.go`](../../cmd/graywolf/authcli/authcli.go).
 
+### 56b. Password length policy has one source of truth and is enforced only at creation
+
+*Why:* `webauth.MinPasswordBytes` (8) and `webauth.MaxPasswordBytes` (72) are
+the single source of truth for the password-length policy. Every
+*creation* path routes through `webauth.HashPassword`, which rejects both
+bounds, so the web setup form (`POST /api/auth/setup`), the `graywolf auth
+set-password` CLI, and the server handler can never disagree — the bug in
+graywolf#476 was setup accepting a sub-8 password the web login then
+refused. Enforcement is at creation ONLY: `HandleLogin` and `CheckPassword`
+do not length-check, so an account whose password predates the minimum
+still authenticates (a login-side minimum locked such users out). The web
+`Login.svelte` mirrors this — it validates min/max/confirm only in
+`setupMode`, never on sign-in. If you change a bound, change the constant
+and the operator docs (`docs/handbook/installation.html`), not a scattered
+literal.
+
+Source: [`../../pkg/webauth/auth.go`](../../pkg/webauth/auth.go)
+(constants + `HashPassword`),
+[`../../pkg/webauth/handlers.go`](../../pkg/webauth/handlers.go)
+(`CreateFirstUser` vs `HandleLogin`),
+[`../../web/src/routes/Login.svelte`](../../web/src/routes/Login.svelte)
+(`validate`).
+
 ### 57. A station's own beacon reaches the map via the TX path, so every transmit leg must feed the station cache
 
 *Why:* The Live Map plots stations from the `stationcache`, and the only
@@ -1464,3 +1648,436 @@ Source: [`../../pkg/beacon/scheduler.go`](../../pkg/beacon/scheduler.go)
 (governor TX hook + `OnISSent` wiring),
 [`../../pkg/beacon/scheduler_test.go`](../../pkg/beacon/scheduler_test.go)
 (`TestOnISSent_FiresForISOnly`, `TestOnISSent_NotFiredForRFOnly`).
+
+### 58. The heatmap counts one `rx_events` row per physical RF frame, at the ingest edge only
+
+The direct-RX heatmap answers "where did RF energy actually reach our antenna
+from," weighted by packet count, so it must count each off-air frame **exactly
+once**. The counting lives at the sole RF-ingest edge — `dispatchRxFrame`
+(`pkg/app/rxfanout.go`) calls `stationcache.BuildRxEvent(pkt)` and, on success,
+`PersistentCache.RecordRxEvent`, which appends one `rx_events` row.
+
+**Do NOT record from the station-cache write path.** `PersistentCache.Update` /
+`historydb.WriteEntries` also run for the iGate RF->IS re-gate hook
+(`wiring.go` `RfToIsHook`, which re-`Update`s the same RF packet with
+`Direction "RX"`) and the startup roster reload (`wiring.go` seeds the cache
+from `LoadRecent`). Counting there double-counts every gateable packet on an
+iGate node and re-counts the whole roster on each restart.
+`TestWriteEntriesDoesNotRecordRxEvents` guards this.
+
+`BuildRxEvent` (`pkg/stationcache/heatmap.go`) is the single source of
+attribution truth:
+
+- **Gated** (third-party, `pkt.ThirdParty != nil`) or sourceless → no event.
+- **Digipeated** (`aprs.CountHops > 0` with a last non-alias H-bit `"*"` digi):
+  `attr_key = "stn:" + lastDigi`, `has_pos = false`. The origin's coordinates
+  are deliberately **not** used — heat belongs at the digi we actually heard.
+  `lastHBitDigi` skips generic aliases (WIDE/RELAY/…) to stay consistent with
+  `aprs.CountHops`, so `SHEPRD*,WIDE1*` attributes to `SHEPRD`, not `WIDE1`.
+- **Direct** (else): `attr_key = "stn:" + source`, carrying the packet's own
+  coordinates when present (`has_pos = true`); positionless direct frames
+  (messages/status) still count with `has_pos = false`.
+
+At query time `QueryHeatmap` resolves every `has_pos = false` event from the
+attributed station's latest stored position; still-unknown ones land in
+`HeatmapResult.Unlocatable` rather than being dropped. Counting uses a dedicated
+append-only table, not the `positions` table, because the latter dedups static
+re-beacons (invariant #54) and would undercount high-volume fixed stations.
+`QueryHeatmap` buckets located events at 4 decimal places (~11m). Retention is
+`rxEventsRetention` (8 days), pruned in `Prune`.
+
+Source: [`../../pkg/stationcache/heatmap.go`](../../pkg/stationcache/heatmap.go)
+(`BuildRxEvent`, `lastHBitDigi`),
+[`../../pkg/app/rxfanout.go`](../../pkg/app/rxfanout.go) (`dispatchRxFrame`),
+[`../../pkg/historydb/historydb.go`](../../pkg/historydb/historydb.go)
+(`RecordRxEvent`, `QueryHeatmap`, `Prune`),
+[`../../pkg/historydb/heatmap_test.go`](../../pkg/historydb/heatmap_test.go),
+[`../../pkg/stationcache/heatmap_test.go`](../../pkg/stationcache/heatmap_test.go).
+
+### 59. An ax25conn session self-removes from the manager on terminal DISCONNECTED
+
+`ax25conn.Manager` keys live sessions by the `(channel, local, peer)`
+triple and rejects a second `Open` on the same triple with
+`ErrSessionExists`. A session is removed from that table only when its
+`Run` goroutine returns — the manager runs `go func(){ s.Run(ctx);
+m.remove(key,id) }()`.
+
+The invariant: **every transition into `StateDisconnected` from a live
+state ends the session's life.** `setState` sets `s.terminated` whenever
+`ns == StateDisconnected` (the initial DISCONNECTED never trips it —
+`setState` short-circuits on an unchanged state), and `handle` returns
+`false` when `terminated` is set, so `Run` exits, `cleanup` emits the
+final DISCONNECTED, and `remove` frees the triple. This covers all
+terminal paths: SABM/N2 timeout and DM-reject during setup, a peer DROP
+while connected, and the DISC/UA release handshake.
+
+*Why:* Before this, terminal transitions returned `true` and the session
+parked in DISCONNECTED forever, leaking a goroutine + manager slot on
+**every** disconnect. The operator-visible symptom (graywolf #456) was a
+reconnect to the same peer failing with "ax25conn: session already
+exists for this triple" until graywolf was restarted; the bridge's
+`Close()` cancels only the bridge/pump context, not the session, so it
+could not clear the stale entry on its own. Relatedly, a frame that
+can't be handed to the TX backend now raises a one-shot `tx-failed`
+error (guarded by `txFailNotified`) so a channel with no TNC/KISS/modem
+backend surfaces the real reason instead of the misleading "no response
+to SABM after N2 retries."
+
+Source: [`../../pkg/ax25conn/session.go`](../../pkg/ax25conn/session.go)
+(`terminated`, `setState`, `handle`, `Run`),
+[`../../pkg/ax25conn/manager.go`](../../pkg/ax25conn/manager.go)
+(`Open`, `remove`, `ErrSessionExists`),
+[`../../pkg/ax25conn/transitions_disconnected.go`](../../pkg/ax25conn/transitions_disconnected.go)
+(`submit` tx-failed emit),
+[`../../pkg/ax25conn/manager_test.go`](../../pkg/ax25conn/manager_test.go)
+(`TestManager_FreesTripleAfterFailedConnect`).
+
+### 60. IS→RF third-party wrap emits exactly one `TCPIP` marker
+
+The inner header `wrapThirdParty` builds for an IS→RF third-party packet
+ends in a single canonical `,TCPIP,IGATECALL*` marker. Because the frame
+arrived from APRS-IS, its inbound path may **already** carry a `TCPIP`
+(or `TCPXX`) element ahead of the `qA*` construct, so the wrapper drops
+any inbound `TCPIP`/`TCPXX` path elements (matched on `Address.Call`, so
+an `*` H-bit marker doesn't defeat the match) before appending its own.
+Legitimate elements like `WIDEn-N` are preserved.
+
+*Why:* re-emitting the inbound `TCPIP` produced a duplicated
+`...,TCPIP,TCPIP,IGATECALL*:` inner path (graywolf #488). Kenwood
+handheld radios (e.g. TH-D75) reject that malformed path and silently
+drop the message -- never displaying it or acking it -- breaking IS→RF
+message delivery. Direwolf emits only a single `TCPIP`; matching that is
+what makes the frame acceptable to strict parsers.
+
+*How to apply:* the strip lives in the path loop of
+[`wrapThirdParty`](../../pkg/igate/third_party.go). Never append a second
+`TCPIP` and never trust the inbound path to be marker-free.
+
+Source: [`../../pkg/igate/third_party.go`](../../pkg/igate/third_party.go)
+(`wrapThirdParty`),
+[`../../pkg/igate/third_party_test.go`](../../pkg/igate/third_party_test.go)
+(`TestWrapThirdPartyStripsInboundTCPIP`,
+`TestWrapThirdPartyStripsInboundTCPIPHBit`,
+`TestWrapThirdPartyStripsInboundTCPXX`).
+
+### 61. Directed-message addressee matching is SSID-aware, symmetric with the self-filter
+
+The router only claims a directed (DM) message as its own when the
+addressee is an **exact full-call match** of our station call, or a
+**bare base-call address** (no SSID) sharing our base call. A distinct
+SSID of our base call is a separate peer: running as `K0TFU-1` we do
+**not** claim, file, or auto-ACK a message addressed to `K0TFU-7`. Both
+`Router.classify` and the exported `MatchAddressee` helper (used by the
+Actions classifier) route through `callAddressedToUs`, so the DM match
+uses the same SSID granularity as the router self-filter (which already
+compared full calls).
+
+*Why:* the self-filter compared full calls but the addressee match
+compared only base calls, an asymmetry that let one station steal a
+sibling SSID's traffic. The sender then received a false delivery
+confirmation -- a bot ACKed by `K0TFU-1` believed its message reached
+`K0TFU-7` when it never did (graywolf #490). Two stations under one base
+call with different SSIDs are distinct peers by design (same principle as
+invariant on same-base delivery -- `NW5W-5` ↔ `NW5W-13`).
+
+*How to apply:* never reintroduce a base-call-only DM addressee compare.
+A bare base-call address stays generic on purpose -- every station
+sharing the base call answers it. Route any new addressee-matching call
+site through `callAddressedToUs` / `MatchAddressee`, never a hand-rolled
+`baseCall(addr) == baseCall(our)`.
+
+Source: [`../../pkg/messages/router.go`](../../pkg/messages/router.go)
+(`Router.classify`, `MatchAddressee`, `callAddressedToUs`),
+[`../../pkg/messages/router_test.go`](../../pkg/messages/router_test.go)
+(`TestRouterDMDifferentSSIDOfOurBaseNotClaimed`,
+`TestRouterDMExactSSIDMatchClaimed`,
+`TestRouterDMBareBaseCallAddressClaimed`,
+`TestMatchAddresseeSSIDAware`),
+[`../../pkg/actions/classifier.go`](../../pkg/actions/classifier.go)
+(`Classify`).
+
+### 62. Inbound connected-mode frames decode with the owning session's negotiated modulus
+
+The RX fanout hands every non-UI frame to `ax25conn.Manager.DispatchRaw`,
+which resolves the owning session from the address header (modulus-
+independent), reads that session's negotiated modulus race-free via
+`Session.Mod128()`, and only then decodes the control field. The fanout
+goroutine must **not** decode with a fixed modulus: a mod-128 (SABME)
+link's I- and S-frames carry a **2-octet** control field, and decoding
+them as mod-8 corrupts `N(S)`/`N(R)` so every inbound frame is dropped
+and the link stalls.
+
+Two sub-invariants make this work:
+
+- **Control-field width is variable under mod-128.** U-frames
+  (SABM/SABME/UA/DM/DISC/FRMR/UI/XID/TEST) stay **1 octet** under either
+  modulus (v2.2 §4.2.2); only I/S frames grow to 2 octets. `Decode` sizes
+  the control field by peeking the low two bits of the first control
+  octet (`11` => U-frame => 1 octet). Assuming 2 octets for all mod-128
+  frames rejects every U-frame — including the UA that completes the
+  handshake — with "missing control field."
+- **The modulus mirror is atomic.** The session goroutine negotiates the
+  modulus at SABM/SABME time; `DispatchRaw` reads it from another
+  goroutine. All writes go through `Session.setMod128`, which mirrors
+  `cfg.Mod128` into an `atomic.Bool` that `Mod128()` reads, so the
+  cross-goroutine read never races the negotiation write.
+
+*Why:* the web AX.25 terminal exposes a "Negotiate modulo-128 (SABME)"
+toggle, so mod-128 links are reachable in production. Before this, the
+fanout decoded every connected-mode frame as mod-8, so an operator who
+enabled extended mode received the BBS welcome but never any further
+frames (graywolf #456).
+
+Source: [`../../pkg/app/rxfanout.go`](../../pkg/app/rxfanout.go)
+(`dispatchRxFrame` -> `DispatchRaw`),
+[`../../pkg/ax25conn/manager.go`](../../pkg/ax25conn/manager.go)
+(`DispatchRaw`),
+[`../../pkg/ax25conn/frame.go`](../../pkg/ax25conn/frame.go)
+(`Decode` control-width peek),
+[`../../pkg/ax25conn/session.go`](../../pkg/ax25conn/session.go)
+(`setMod128`, `Mod128`),
+[`../../pkg/ax25conn/manager_test.go`](../../pkg/ax25conn/manager_test.go)
+(`TestManager_DispatchRawMod128Delivers`).
+
+### 63. `messages.Store.List` keyset order MUST match the cursor predicate's whole-second resolution
+
+The chat UI pages through messages with a forward cursor
+(`web/src/lib/messagesTransport.js` `fetchDelta`), so `(*Store).List`
+does keyset pagination on `(updated_at, id)`. The cursor stores
+`updated_at` at **whole-second** resolution (`strftime('%s', ...)`), so
+the `ORDER BY` MUST truncate to the same resolution --
+`CAST(strftime('%s', updated_at) AS INTEGER) ASC, id ASC`. Do NOT
+"optimize" it back to `ORDER BY updated_at ASC` (full precision): that
+mismatch makes the sort key finer than the cursor and silently strands
+rows. Concretely, when an older/lower-id row's `updated_at` is bumped
+into the same second as a newer, higher-id insert (routine ack
+correlation / retry bookkeeping on a busy two-way thread), the older row
+sorts after the cursor tip yet loses the `id` tiebreak and is never
+returned again -- messages stop appearing in the chat window under
+sustained volume (graywolf #521).
+
+Full-precision text comparison is not an escape hatch: glebarez stores
+time as trailing-zero-trimmed RFC3339Nano, whose lexicographic order is
+not chronological (`".9Z"` sorts after `".90000001Z"`), and SQLite cannot
+recover sub-second precision from the text via `strftime`/`julianday`
+without loss. Whole-second resolution keeps the keyset key unique (id
+breaks ties) and monotonic, which is all forward pagination needs.
+
+*Why:* keyset pagination is correct only when the `ORDER BY` expression
+is identical to the cursor predicate; any resolution gap between them
+drops rows.
+
+Note: this invariant governs the **forward delta-sync feed** (cursor
+present, no `thread_key`). The chat window itself opens a conversation
+through the separate **tail-window** read (invariant #65), which orders by
+`id DESC` and does not use this cursor at all.
+
+Source: [`../../pkg/messages/store.go`](../../pkg/messages/store.go)
+(`(*Store).List`, `encodeCursor`),
+[`../../pkg/messages/store_pagination_test.go`](../../pkg/messages/store_pagination_test.go)
+(`TestListCursorHighVolumeNoSkips`),
+[`../../web/src/lib/messagesTransport.js`](../../web/src/lib/messagesTransport.js)
+(`fetchDelta`).
+
+### 64. Web UI renders in Inconsolata everywhere; no system/Helvetica stack
+
+Every visible glyph in the web UI is Inconsolata. The font is applied
+through the `--font-mono` custom property (`'Inconsolata', 'Courier New',
+monospace`), set on `body` by both `chonky-ui` and `web/src/app.css` and
+inherited by headings and controls. Component CSS must not override
+`font-family` with a system stack (`-apple-system`, `BlinkMacSystemFont`,
+`system-ui`, `'Helvetica Neue'`, `Arial`, `sans-serif`); use
+`var(--font-mono)`. The Messages surface (bubbles, invite text, compose
+box) once carried an iOS-style stack "to feel like messaging" -- that was
+removed so the product reads as one typeface (graywolf #576).
+
+*Why:* a lone component reintroducing the platform font is exactly the
+regression this issue fixed; it looks like a native iOS control dropped
+into an otherwise-monospace app.
+
+Two intentional exceptions, neither a UI text font:
+
+- Emoji-only spans (e.g. the `.bolt` zap glyph) use an `'Apple Color
+  Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', system-ui, sans-serif`
+  stack to render color emoji, not Latin text.
+- MapLibre label layers name glyph sets (`'Open Sans ...'`, `'Arial
+  Unicode MS ...'` in `web/src/lib/map/layers/fronts.js`) that must match
+  the tile server's font stack; these are map-render font names, not CSS.
+
+The per-tab page header (`web/src/components/PageHeader.svelte`,
+`.page-title`) is pinned to `var(--font-mono)` at 22px.
+
+### 65. The chat window reads a thread as a "tail window" (newest by id), not the forward cursor page
+
+Opening a conversation in the chat window (`web/src/components/messages/
+MessageThread.svelte` `fetchThread`) issues a **cursor-less, thread-scoped**
+`GET /api/messages?thread_kind=...&thread_key=...&limit=N`. The handler
+(`pkg/webapi/messages.go` `listMessages`) sets `Filter.Newest` whenever a
+`thread_key` is present and no cursor is supplied, and `(*Store).List`
+then returns the newest `N` rows by **insertion order (`id DESC`)** with an
+empty cursor -- NOT the forward `updated_at ASC` page.
+
+This split is load-bearing and must be preserved:
+
+- The forward `updated_at ASC` page (invariant #63) is the **delta-sync
+  feed** used by the transport poll/SSE (`messagesTransport.js`
+  `fetchDelta`, never sends `thread_key`). It orders by `updated_at` so
+  bumped rows resurface for sync.
+- A bounded read of that same `updated_at ASC` order returns the
+  *least-recently-updated* rows, so once a thread grows past `limit` the
+  newest sends and receives fall off the end and stop rendering. Outbound
+  rows churn `updated_at` fastest (sent/retry/ack `Store.Update` in
+  `retry.go`/`router.go`), so they vanish first -- the "incoming shows,
+  outgoing doesn't" half of graywolf #521 that survived the #63 fix.
+
+`id DESC` is used (not `created_at`/`updated_at`) because `id` is
+autoincrement -- exactly "the N most recently inserted messages", unique,
+monotonic, and immune to the glebarez trailing-zero-trimmed RFC3339Nano
+text-sort hazard (`".9Z"` sorts after `".90000001Z"`) that invariant #63
+also calls out. The client re-sorts the returned rows chronologically for
+display. Do NOT route the chat window through a cursor and do NOT reorder
+the tail window by a time text column.
+
+*Why:* "fetch a conversation" and "sync deltas forward" are different
+queries with opposite ends of the same ordering; collapsing them into one
+bounded `updated_at ASC` read silently hides the newest messages on any
+busy thread.
+
+Source: [`../../pkg/messages/store.go`](../../pkg/messages/store.go)
+(`(*Store).List`, `Filter.Newest`),
+[`../../pkg/webapi/messages.go`](../../pkg/webapi/messages.go)
+(`listMessages`),
+[`../../pkg/messages/store_pagination_test.go`](../../pkg/messages/store_pagination_test.go)
+(`TestListNewestWindowReturnsMostRecent`),
+[`../../web/src/components/messages/MessageThread.svelte`](../../web/src/components/messages/MessageThread.svelte)
+(`fetchThread`).
+
+### 66. A map-layer `$effect` MUST read reactive state before the optional chain
+
+Every map layer module (`stationsLayer`, `trailsLayer`, `radarLayer`,
+`heatmapLayer`, ...) is a plain non-reactive `let` in
+[`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte),
+assigned inside `onMapReady()` -- which fires on MapLibre's `load` event,
+*after* the component's effects have already run once. So on run 1 every
+one of those variables is `null`.
+
+Svelte 5 tracks dependencies dynamically: only signals actually *read*
+during a run are registered. That makes this shape a silent no-op:
+
+```js
+$effect(() => {
+  layer?.setThing(someStore.value);   // WRONG
+});
+```
+
+On run 1 `layer` is null, `?.` short-circuits, the argument is never
+evaluated, `someStore.value` is never read, and the effect ends up with
+**zero dependencies**. Assigning `layer` later re-triggers nothing,
+because it is not `$state`. The effect never runs again for the life of
+that map generation. Always hoist the read:
+
+```js
+$effect(() => {
+  const v = someStore.value;          // RIGHT -- dep registered on run 1
+  layer?.setThing(v);
+});
+```
+
+*Why:* the failure is invisible. The UI control still moves, still
+persists to localStorage, and the value is still picked up by the layer's
+*mount* options on the next page load, so the setting appears to work
+until you watch it live. This shipped twice: the RX heatmap opacity
+slider (graywolf #578, dead outright) and the radar frame
+preload/eviction reconcile (graywolf #584, masked by `setFrameTs`'s
+`ensureFrame` fallback, leaking one MapLibre source+layer per frame).
+
+The layer modules' own unit tests cannot catch it -- they call
+`setOpacity()`/`setFrames()` directly and pass either way -- and the web
+suite is plain `node --test` over pure JS with no Svelte component
+harness. The rule is therefore enforced as a source-level check over
+every `.svelte` file by
+[`../../web/src/routes/LiveMapV2.effect-deps.test.js`](../../web/src/routes/LiveMapV2.effect-deps.test.js).
+
+Source: [`../../web/src/routes/LiveMapV2.svelte`](../../web/src/routes/LiveMapV2.svelte)
+(the `setVisible`/`setOpacity`/`setFrames` effects and the comment above
+the `layerToggles.stations` effect),
+[`../../web/src/routes/LiveMapV2.effect-deps.test.js`](../../web/src/routes/LiveMapV2.effect-deps.test.js).
+
+### 67. A KISS server-listen row must be waited out, not just cancelled, before its address is rebound
+
+`kiss.Manager.stopManaged` has three arms, one per interface kind. The
+`client` and `serial` arms call `close()`, which cancels *and then blocks*
+on the supervisor's `done` channel. The server-listen arm must do the
+equivalent -- cancel, then wait on `managedServer.serveDone`, which the
+`Start` goroutine closes only after `Server.ListenAndServe` returns.
+
+*Why:* `ListenAndServe` guarantees the bound port is free **when it
+returns** ([`../../pkg/kiss/server.go`](../../pkg/kiss/server.go), and
+`TestKissServerPortFreeAfterCancel` guards that from the server side).
+`cancel()` alone only signals the watcher goroutine that closes the
+listener. `Manager.Start`'s replace-if-running branch calls `stopManaged`
+and then immediately binds the same address, so a cancel-only stop races
+the old close against the new `net.Listen` -- measured losing on roughly
+8% of restarts during development, and load- and platform-dependent.
+
+The failure is silent and looks like health. `Start` has no error return,
+so a lost race surfaces only as an `ERROR msg="kiss server" err="listen
+tcp ...: bind: address already in use"` log line. The row stays in
+`m.running`, so `Status()` and the Kiss page keep reporting the interface
+as present while nothing is listening -- from the operator's seat, a KISS
+TNC that stopped accepting connections after a config save, with the web
+UI insisting it is fine.
+
+The wait is bounded by `serveShutdownGrace` because `stopManaged` runs on
+the config-write HTTP handler's goroutine (via `notifyKissManager`) and on
+the shutdown path (via `StopAll`); neither may hang. Overshooting the
+grace costs a warning log, undershooting reopens the race.
+
+Corollary for anyone adding a fourth interface kind: whatever owns the
+listener or device must expose a "fully stopped" signal, and `stopManaged`
+must block on it. Cancel-and-return is only safe for something nothing
+rebinds.
+
+Source: [`../../pkg/kiss/manager.go`](../../pkg/kiss/manager.go)
+(`stopManaged`, `Manager.Start`, `managedServer.serveDone`,
+`serveShutdownGrace`);
+[`../../pkg/kiss/manager_rebind_test.go`](../../pkg/kiss/manager_rebind_test.go).
+
+### 68. 32-bit ARM builds are time32; ALSA timestamps cross an ABI boundary
+
+The armv6/armv7 (`armhf`) modem is built with the **default 32-bit
+`time_t`** (no `RUST_LIBC_UNSTABLE_GNU_TIME_BITS`), because the cross-rs
+images ship glibc 2.27 and a time64 build does not link. That has three
+consequences that must hold together:
+
+1. **Keep the `alsa` fork pinned** in the root `Cargo.toml`
+   `[patch.crates-io]`. On a t64 userland (current 32-bit Pi OS)
+   `libasound` writes a 16-byte `struct timespec` into what Rust thinks is
+   an 8-byte slot; the fork's `Status` htstamp accessors read into a
+   zeroed 16-byte buffer and decode per ABI. Without it: SIGSEGV
+   crash-loop (#231). With a wrong decode: htstamp error floods (#336).
+2. **cpal must be >= 0.18.** cpal 0.17's ALSA backend computed
+   `tv_sec * 1_000_000_000` in the native `time_t` width, which on a
+   time32 build is `i32` and wraps after ~2 s of uptime. The negative
+   result tripped "get_htstamp ... was earlier than get_trigger_htstamp"
+   on every output period, so the TX stream rebuilt continuously: PTT
+   keyed on time but audio arrived late, truncated, or not at all (#628).
+   0.18 widens to `i64` before multiplying and clamps instead of erroring.
+3. **Any of our own code doing `timespec`/`time_t`/`c_long` arithmetic, or
+   keeping long-running `usize` totals, must widen to 64-bit first.** On
+   armhf `usize` is 32 bits: the TX sink's cumulative sample counters
+   (`AudioSink::submitted`/`drained`) are `AtomicU64` because a `usize`
+   total wraps after ~24.8 h of cumulative TX audio at 48 kHz. The Go side
+   has the matching rule in invariant 43, and CI vets with `GOARCH=arm`.
+
+*Why:* every failure here is invisible on amd64/arm64 (where `time_t` and
+`usize` are 64-bit) and only shows up on real 32-bit hardware, so this
+area has regressed three times. If you bump `alsa` or `cpal`, re-check that
+the fork still applies (`Cargo.lock` must show the `git+...alsa-rs` source)
+and that cpal's ALSA timestamp math is still 64-bit.
+
+Source: [`../../Cargo.toml`](../../Cargo.toml) (`[patch.crates-io]` comment);
+[`../../graywolf-modem/src/audio/soundcard.rs`](../../graywolf-modem/src/audio/soundcard.rs)
+(`AudioSink`, `StreamErrorPolicy`);
+[`../../.github/workflows/armhf-t64-htstamp.yml`](../../.github/workflows/armhf-t64-htstamp.yml);
+`docs/plans/2026-06-11-armhf-t64-alsa-htstamp-fix.md`.

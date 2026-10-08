@@ -103,6 +103,42 @@ type Session struct {
 	stats   LinkStats
 	pending [128]*Frame // I-frame retransmit buffer keyed by NS
 	txBuf   []byte      // operator bytes pending TX
+
+	// terminated is set by setState the first time the link reaches
+	// StateDisconnected from a live state (SABM failure, DM reject, a
+	// completed DISC handshake, or a dropped connection). It signals the
+	// run loop to exit so the manager can remove the session from its
+	// triple table — otherwise a dead session lingers and a reconnect to
+	// the same (channel, local, peer) fails with ErrSessionExists until
+	// the process restarts (graywolf #456). The initial DISCONNECTED
+	// state never sets it: setState short-circuits when the state is
+	// unchanged, so only a real transition into DISCONNECTED trips it.
+	terminated bool
+
+	// mod128Bit mirrors cfg.Mod128 as an atomic so Manager.DispatchRaw,
+	// running on the RX-fanout goroutine, can pick the right control-field
+	// octet count (mod-8 vs mod-128) without racing the session goroutine
+	// that negotiates the modulus at SABM/SABME time. Always written via
+	// setMod128; read via Mod128().
+	mod128Bit atomic.Bool
+
+	// outstandingBit mirrors the number of I-frames this session still
+	// owes the peer -- unacked frames in the window plus whole frames'
+	// worth of operator bytes still waiting in txBuf. Kept as an atomic
+	// so callers on other goroutines can read a live count without
+	// touching session-goroutine state; AGWPE clients poll it via 'Y'
+	// for flow control. Always written via syncOutstanding; read via
+	// Outstanding().
+	outstandingBit atomic.Int32
+
+	// txFailNotified guards the one-shot operator-facing error emitted
+	// when a frame cannot be handed to the TX backend (e.g. the channel
+	// has no KISS/modem backend, or the wrong channel was selected).
+	// Without it, a failed SABM submit is silently logged and the link
+	// setup marches to N2 retries and reports the misleading "no
+	// response to SABM" -- even though nothing was ever transmitted
+	// (graywolf #456).
+	txFailNotified bool
 }
 
 // Snapshot returns a goroutine-safe copy of the current LinkStats.
@@ -139,6 +175,7 @@ func NewSession(cfg SessionConfig) (*Session, error) {
 		wakeup: make(chan struct{}, 1),
 		state:  StateDisconnected,
 	}
+	s.mod128Bit.Store(cfg.Mod128)
 	s.t1 = newTimer(cfg.Clock, cfg.T1, func() { s.signalTimer(pendT1) })
 	s.t2 = newTimer(cfg.Clock, cfg.T2, func() { s.signalTimer(pendT2) })
 	s.t3 = newTimer(cfg.Clock, cfg.T3, func() { s.signalTimer(pendT3) })
@@ -154,6 +191,19 @@ func (s *Session) modulus() int {
 	}
 	return 8
 }
+
+// setMod128 updates the active modulus. Called only from the session
+// goroutine; mirrors the value into an atomic so Manager.DispatchRaw can
+// decode inbound control fields with the matching octet count without
+// racing this write.
+func (s *Session) setMod128(v bool) {
+	s.cfg.Mod128 = v
+	s.mod128Bit.Store(v)
+}
+
+// Mod128 reports the session's active modulus race-free. Safe to call
+// from any goroutine, unlike the cfg field it mirrors.
+func (s *Session) Mod128() bool { return s.mod128Bit.Load() }
 
 // nextT1 returns the T1 duration to set on the next reset. Mirrors
 // ax25_calculate_t1 in net/ax25/ax25_subr.c:220-258. The kernel
@@ -261,6 +311,26 @@ func (s *Session) signalTimer(bit uint32) {
 // when the session is stable.
 func (s *Session) State() State { return s.state }
 
+// Outstanding reports how many I-frames are queued for transmission or
+// still awaiting acknowledgement: the unacked window [V(A), V(S)) plus
+// the frames txBuf will be cut into at the negotiated paclen. Safe to
+// call from any goroutine. The value is refreshed after every event the
+// session processes, so it trails the session goroutine by at most one
+// event rather than by a stats tick.
+func (s *Session) Outstanding() int { return int(s.outstandingBit.Load()) }
+
+// syncOutstanding recomputes the atomic from session-goroutine state.
+// Called from handle() so every path that moves V(S)/V(A) or touches
+// txBuf is covered by one call site.
+func (s *Session) syncOutstanding() {
+	mod := uint8(s.modulus())
+	n := int((s.v.VS - s.v.VA + mod) % mod)
+	if queued := len(s.txBuf); queued > 0 {
+		n += (queued + s.cfg.Paclen - 1) / s.cfg.Paclen
+	}
+	s.outstandingBit.Store(int32(n))
+}
+
 // Run blocks until ctx is cancelled or EventShutdown is processed.
 // Manager invokes Run in a goroutine. Each iteration drains pending
 // timer bits before reading the channel so timer events never starve
@@ -302,6 +372,10 @@ func (s *Session) Run(ctx context.Context) {
 // handle dispatches by current state. Returns false when the session
 // should exit.
 func (s *Session) handle(ctx context.Context, ev Event) bool {
+	// Every state mutation this session makes happens below, on this
+	// goroutine, so one deferred refresh keeps Outstanding() current for
+	// external readers without auditing each V(S)/V(A)/txBuf site.
+	defer s.syncOutstanding()
 	// EventHeartbeat runs the housekeeping tick across all states; it
 	// is not state-dispatched. The tick re-arms itself unconditionally
 	// (see heartbeatTick).
@@ -313,19 +387,28 @@ func (s *Session) handle(ctx context.Context, ev Event) bool {
 		s.statsTick()
 		return true
 	}
+	var cont bool
 	switch s.state {
 	case StateDisconnected:
-		return s.onDisconnected(ctx, ev)
+		cont = s.onDisconnected(ctx, ev)
 	case StateAwaitingConnection:
-		return s.onAwaitingConnection(ctx, ev)
+		cont = s.onAwaitingConnection(ctx, ev)
 	case StateConnected:
-		return s.onConnected(ctx, ev)
+		cont = s.onConnected(ctx, ev)
 	case StateTimerRecovery:
-		return s.onTimerRecovery(ctx, ev)
+		cont = s.onTimerRecovery(ctx, ev)
 	case StateAwaitingRelease:
-		return s.onAwaitingRelease(ctx, ev)
+		cont = s.onAwaitingRelease(ctx, ev)
+	default:
+		return false
 	}
-	return false
+	// A transition into terminal DISCONNECTED ends the session's life;
+	// exit the run loop so cleanup() runs and the manager removes the
+	// session from its triple table.
+	if s.terminated {
+		return false
+	}
+	return cont
 }
 
 func (s *Session) cleanup() {
@@ -334,7 +417,17 @@ func (s *Session) cleanup() {
 	s.t3.stop()
 	s.hb.stop()
 	s.tStats.stop()
-	s.emit(OutEvent{Kind: OutStateChange, State: StateDisconnected})
+	// setState already emitted StateDisconnected (and set terminated) when
+	// the state machine reached it on its own -- emitting again here would
+	// send the observer a second 'd' notification and, worse, race a
+	// client that reconnected in between into having its brand-new session
+	// deleted by this stale one's second cleanup. Only Run() exits that
+	// bypass setState (ctx cancellation, EventShutdown) still need this as
+	// their sole notification.
+	if !s.terminated {
+		s.terminated = true
+		s.emit(OutEvent{Kind: OutStateChange, State: StateDisconnected})
+	}
 }
 
 func (s *Session) emit(ev OutEvent) {
@@ -358,6 +451,11 @@ func (s *Session) setState(ns State) {
 	s.emit(OutEvent{Kind: OutLinkStats, Stats: s.Snapshot()})
 	if ns == StateConnected {
 		s.tStats.reset()
+	}
+	if ns == StateDisconnected {
+		// Terminal transition: the link has fully torn down. Flag the run
+		// loop to exit so the manager frees this triple (graywolf #456).
+		s.terminated = true
 	}
 }
 

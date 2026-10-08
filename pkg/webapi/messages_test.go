@@ -37,6 +37,7 @@ type fakeMessagesSvc struct {
 	markReadFn         func(ctx context.Context, id uint64) error
 	markUnreadFn       func(ctx context.Context, id uint64) error
 	reloadTacticalFn   func(ctx context.Context) error
+	reloadBlockedFn    func(ctx context.Context) error
 	reloadPrefsFn      func(ctx context.Context) error
 	hub                *messages.EventHub
 }
@@ -83,6 +84,12 @@ func (f *fakeMessagesSvc) ReloadTacticalCallsigns(ctx context.Context) error {
 	}
 	return nil
 }
+func (f *fakeMessagesSvc) ReloadBlockedCallsigns(ctx context.Context) error {
+	if f.reloadBlockedFn != nil {
+		return f.reloadBlockedFn(ctx)
+	}
+	return nil
+}
 func (f *fakeMessagesSvc) ReloadPreferences(ctx context.Context) error {
 	if f.reloadPrefsFn != nil {
 		return f.reloadPrefsFn(ctx)
@@ -113,7 +120,6 @@ func newMessagesTestServer(t *testing.T, svc MessagesService) (*Server, *http.Se
 		Port:       14580,
 		TxChannel:  1,
 		RfChannel:  1,
-		MaxMsgHops: 2,
 		GateRfToIs: true,
 	}); err != nil {
 		t.Fatal(err)
@@ -298,6 +304,68 @@ func TestSendMessage_202(t *testing.T) {
 	got := <-sentCh
 	if got.To != "W1ABC" || got.Text != "hi" {
 		t.Errorf("unexpected send req: %+v", got)
+	}
+}
+
+func TestSendMessage_ChannelOverridePassedThrough(t *testing.T) {
+	sentCh := make(chan messages.SendMessageRequest, 1)
+	svc := &fakeMessagesSvc{
+		sendFn: func(ctx context.Context, req messages.SendMessageRequest) (*configstore.Message, error) {
+			sentCh <- req
+			return &configstore.Message{
+				ID: 7, Direction: "out", OurCall: req.OurCall, FromCall: req.OurCall,
+				ToCall: req.To, Text: req.Text, ThreadKind: messages.ThreadKindDM,
+				ThreadKey: req.To, MsgID: "002", CreatedAt: time.Now(),
+				AckState: messages.AckStateNone, Channel: req.Channel,
+			}, nil
+		},
+	}
+	_, mux, _ := newMessagesTestServer(t, svc)
+
+	// Channel 4 does not exist in this fixture; ModeForChannel treats a
+	// missing row as APRS (non-packet) so it passes validation and flows
+	// through to the service request unchanged.
+	body := `{"to":"W1ABC","text":"hi","channel":4}`
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got := <-sentCh
+	if got.Channel != 4 {
+		t.Errorf("svcReq.Channel = %d, want 4", got.Channel)
+	}
+}
+
+func TestSendMessage_RejectsPacketModeChannel(t *testing.T) {
+	srv, mux, _ := newMessagesTestServer(t, &fakeMessagesSvc{})
+	ctx := context.Background()
+	dev := &configstore.AudioDevice{
+		Name: "test", Direction: "input", SourceType: "flac",
+		SourcePath: "/tmp/x.flac", SampleRate: 44100, Channels: 1, Format: "s16le",
+	}
+	if err := srv.store.CreateAudioDevice(ctx, dev); err != nil {
+		t.Fatalf("CreateAudioDevice: %v", err)
+	}
+	ch := &configstore.Channel{
+		Name: "p", InputDeviceID: configstore.U32Ptr(dev.ID),
+		ModemType: "afsk", BitRate: 1200, MarkFreq: 1200, SpaceFreq: 2200,
+		Profile: "A", NumSlicers: 1, FixBits: "none",
+		Mode: configstore.ChannelModePacket,
+	}
+	if err := srv.store.CreateChannel(ctx, ch); err != nil {
+		t.Fatalf("create packet channel: %v", err)
+	}
+
+	body := fmt.Sprintf(`{"to":"W1ABC","text":"hi","channel":%d}`, ch.ID)
+	req := httptest.NewRequest(http.MethodPost, "/api/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400 for packet-mode channel", rec.Code, rec.Body.String())
 	}
 }
 
@@ -544,7 +612,7 @@ func TestSendMessage_InviteEndToEndPersistsRow(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	if err := store.UpsertIGateConfig(ctx, &configstore.IGateConfig{
 		Server: "rotate.aprs2.net", Port: 14580,
-		TxChannel: 1, RfChannel: 1, MaxMsgHops: 2, GateRfToIs: true,
+		TxChannel: 1, RfChannel: 1, GateRfToIs: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -925,6 +993,87 @@ func TestPutPreferences_RoundTrip(t *testing.T) {
 	case <-reloaded:
 	case <-time.After(time.Second):
 		t.Error("ReloadPreferences was not called")
+	}
+}
+
+// --- Conversation prefs --------------------------------------------------
+
+func TestGetConversationPrefs_DefaultsWhenUnset(t *testing.T) {
+	_, mux, _ := newMessagesTestServer(t, &fakeMessagesSvc{})
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/conversations/dm/W5XYZ/prefs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got dto.ConversationPrefsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.SendPath != "" || !got.WaitForAck {
+		t.Fatalf("unset conversation should inherit defaults, got %+v", got)
+	}
+}
+
+func TestPutConversationPrefs_RoundTripAndReset(t *testing.T) {
+	_, mux, _ := newMessagesTestServer(t, &fakeMessagesSvc{})
+
+	// Set an override: RF only + no resend (no-ACK contact).
+	body := `{"send_path":"rf_only","wait_for_ack":false}`
+	req := httptest.NewRequest(http.MethodPut, "/api/messages/conversations/dm/w5xyz/prefs", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got dto.ConversationPrefsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.SendPath != "rf_only" || got.WaitForAck || got.ThreadKey != "W5XYZ" {
+		t.Fatalf("PUT round-trip mismatch (key should be uppercased): %+v", got)
+	}
+
+	// GET reflects the stored override.
+	req = httptest.NewRequest(http.MethodGet, "/api/messages/conversations/dm/W5XYZ/prefs", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.SendPath != "rf_only" || got.WaitForAck {
+		t.Fatalf("GET after PUT mismatch: %+v", got)
+	}
+
+	// Reset to defaults clears the row; GET returns inherited defaults.
+	body = `{"send_path":"","wait_for_ack":true}`
+	req = httptest.NewRequest(http.MethodPut, "/api/messages/conversations/dm/W5XYZ/prefs", strings.NewReader(body))
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reset PUT expected 200, got %d", rec.Code)
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.SendPath != "" || !got.WaitForAck {
+		t.Fatalf("reset should return defaults, got %+v", got)
+	}
+}
+
+func TestPutConversationPrefs_Validation(t *testing.T) {
+	_, mux, _ := newMessagesTestServer(t, &fakeMessagesSvc{})
+	// Bad send_path.
+	req := httptest.NewRequest(http.MethodPut, "/api/messages/conversations/dm/W5XYZ/prefs",
+		strings.NewReader(`{"send_path":"nope","wait_for_ack":true}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad send_path: expected 400, got %d", rec.Code)
+	}
+	// Bad kind.
+	req = httptest.NewRequest(http.MethodPut, "/api/messages/conversations/bogus/W5XYZ/prefs",
+		strings.NewReader(`{"send_path":"","wait_for_ack":true}`))
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad kind: expected 400, got %d", rec.Code)
 	}
 }
 

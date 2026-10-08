@@ -13,6 +13,7 @@
   import { channelsStore, start as startChannelsStore, invalidate as refreshChannels, getChannel as lookupChannel } from '../lib/stores/channels.svelte.js';
   import { txPredicate, TX_REASON_FALLBACK } from '../lib/channelBacking.js';
   import { isStationCallsignMissing } from '../lib/callsign.js';
+  import { CUSTOM_IGATE_SERVER, IGATE_SERVER_OPTIONS, igateServerSelection, nextIgateServerState } from '../lib/igateServer.js';
 
   let activeTab = $state('config');
 
@@ -24,9 +25,21 @@
     enabled: true, server: 'rotate.aprs2.net', port: '14580',
     server_filter: '', tx_channel: 0,
     simulation_mode: false, gate_rf_to_is: true, gate_is_to_rf: false,
-    rf_channel: 0, max_msg_hops: 2, software_name: 'graywolf', software_version: '0.1',
+    rf_channel: 0, is_tx_via: '', software_name: 'graywolf', software_version: '0.1',
   });
   let loading = $state(false);
+  let serverSelection = $state('rotate.aprs2.net');
+  let customServer = $state('');
+
+  function handleServerSelection(next) {
+    const state = nextIgateServerState(
+      { selection: serverSelection, server: form.server, customServer },
+      next
+    );
+    serverSelection = state.selection;
+    form.server = state.server;
+    customServer = state.customServer;
+  }
 
   // Last-persisted config body. The master Enable toggle auto-saves
   // against this snapshot (see autoSaveEnabled) so flipping it never
@@ -34,6 +47,7 @@
   // refreshed after every successful save.
   let savedConfig = $state(/** @type {null | object} */ (null));
   let enableSaving = $state(false);
+  let gateIsToRfSaving = $state(false);
 
   // Station callsign (read-only on this page). Loaded alongside the
   // iGate config; failure is non-fatal — we treat a failed load as
@@ -69,7 +83,7 @@
     return { reason: cap?.reason || TX_REASON_FALLBACK };
   });
   let txBlockAllowsSave = $derived(form.enabled === false);
-  let saveBlocked = $derived(!!txBlock && !txBlockAllowsSave);
+  let saveBlocked = $derived((!!txBlock && !txBlockAllowsSave) || !!isTxViaError);
   const TX_CALLOUT_ID = 'igate-tx-callout';
   let calloutEl = $state(null);
 
@@ -95,6 +109,23 @@
       ? 'The `|` character is not valid APRS-IS filter syntax. Separate clauses with spaces.'
       : ''
   );
+
+  // Client mirror of ax25.ParseVia (pkg/ax25/address.go). The IS→RF
+  // via-path is a comma-separated list of AX.25 addresses; empty means
+  // direct. Surface the same error the server would return so the
+  // operator sees it before Save. Keep the rules in sync with ParseVia.
+  function validateIsTxVia(v) {
+    const elems = (v ?? '').split(',').map((e) => e.trim()).filter((e) => e !== '');
+    if (elems.length > 8) return 'Too many digipeaters (max 8).';
+    for (const e of elems) {
+      if (e.endsWith('*')) return `"${e}" must not include the "*" repeated marker.`;
+      const m = /^([A-Za-z0-9]{1,6})(?:-([0-9]{1,2}))?$/.exec(e);
+      if (!m) return `"${e}" is not a valid callsign-SSID.`;
+      if (m[2] !== undefined && Number(m[2]) > 15) return `"${e}" has an SSID above 15.`;
+    }
+    return '';
+  }
+  let isTxViaError = $derived(validateIsTxVia(form.is_tx_via));
 
   // Filters state
   let filters = $state([]);
@@ -125,7 +156,25 @@
     { value: 'prefix', label: 'Prefix' },
     { value: 'message_dest', label: 'Message Dest' },
     { value: 'object', label: 'Object' },
+    { value: 'packet_type', label: 'Packet Type' },
   ];
+
+  // Packet-type categories for the Pattern <select> shown when the rule
+  // type is `packet_type`. Values mirror the aprs.is `t/...` filter
+  // classes and MUST stay in sync with packetTypeCategories in
+  // pkg/igate/filters/filters.go and packetTypeCategoryKeys in
+  // pkg/webapi/dto/igate.go.
+  const packetTypeOptions = [
+    { value: 'message', label: 'Message' },
+    { value: 'position', label: 'Position' },
+    { value: 'weather', label: 'Weather' },
+    { value: 'object', label: 'Object' },
+    { value: 'item', label: 'Item' },
+    { value: 'telemetry', label: 'Telemetry' },
+    { value: 'status', label: 'Status' },
+    { value: 'query', label: 'Query' },
+  ];
+  const packetTypeValues = packetTypeOptions.map((o) => o.value);
 
   const actionOptions = [
     { value: 'allow', label: 'Allow' },
@@ -149,6 +198,8 @@
       // the wildcard form is what this phase is introducing, and a
       // literal like "WX-001" would imply objects are exact-match only.
       case 'object':       return 'WX-*';
+      // packet_type uses a <select>, not a free-text input, so no
+      // placeholder is shown.
       default:             return '';
     }
   }
@@ -164,12 +215,21 @@
                '`*` is not supported here and will be rejected on save.';
       case 'message_dest':
         return 'Matches the addressee of a message packet. Exact match by ' +
-               'default, or use a trailing `*` as a prefix wildcard ' +
-               '(e.g. NW5W-* matches any SSID of NW5W). See warning above.';
+               'default, a trailing `*` as a prefix wildcard (e.g. NW5W-* ' +
+               'matches any SSID of NW5W), or a bare `*` for any addressee. ' +
+               'All are still bounded by the heard-direct check — a message ' +
+               'only goes out if its addressee was heard directly on RF in ' +
+               'the last 30 minutes.';
       case 'object':
         return 'Matches the object or item name. Exact match by default, or use ' +
                'a trailing `*` as a prefix wildcard (e.g. WX-* matches all WX- ' +
                'objects). See warning above.';
+      case 'packet_type':
+        return 'Matches the APRS packet type (mapped to the aprs.is t/… filter ' +
+               'classes). Use an Allow rule of type Message for messages-only ' +
+               'IS→RF gating. Non-message types are still bounded by the ' +
+               'hardcoded gate — they only transmit when sourced from your ' +
+               'own station SSID.';
       default:
         return '';
     }
@@ -189,8 +249,26 @@
 
   function validatePattern(type, pattern) {
     const trimmed = (pattern ?? '').trim();
-    if (trimmed === '' || trimmed === '*') {
-      return 'Pattern must not be empty or a bare wildcard.';
+    if (trimmed === '') {
+      return 'Pattern must not be empty.';
+    }
+    // packet_type: the pattern is a fixed category key, not a wildcard
+    // string. Validate membership (the <select> already constrains input,
+    // but keep parity with dto.validateIGateRfFilterPattern). Return
+    // early — the wildcard rules below don't apply to a category key.
+    if (type === 'packet_type') {
+      return packetTypeValues.includes(trimmed.toLowerCase())
+        ? ''
+        : 'Select a packet type.';
+    }
+    // A bare `*` ("any addressee") is only meaningful for message_dest,
+    // where the hardcoded heard-direct check bounds delivery to stations
+    // heard on RF, so it cannot flood. Rejected for every other type.
+    if (trimmed === '*') {
+      if (type !== 'message_dest') {
+        return 'A bare `*` wildcard is only supported for Message Dest.';
+      }
+      return '';
     }
     if (trimmed.includes('*') && (type === 'callsign' || type === 'prefix')) {
       return '`*` wildcard is only supported for Message Dest and Object types.';
@@ -213,6 +291,27 @@
     return validatePattern(filterForm.type, filterForm.pattern);
   });
 
+  // Normalize the Pattern when the rule type flips into or out of
+  // packet_type. packet_type edits a fixed category via a <select>, so a
+  // leftover free-text pattern (e.g. "W5") would leave the select on a
+  // stale value; seed a valid category instead. Flipping back to a
+  // text type clears the seeded category so the input starts empty. The
+  // prevType guard ensures this fires only on an actual type change, not
+  // on every pattern keystroke.
+  let prevType = filterForm.type;
+  $effect(() => {
+    const t = filterForm.type;
+    if (t === prevType) return;
+    const wasPacket = prevType === 'packet_type';
+    prevType = t;
+    if (t === 'packet_type') {
+      if (!packetTypeValues.includes(filterForm.pattern)) filterForm.pattern = 'message';
+    } else if (wasPacket) {
+      filterForm.pattern = '';
+      patternTouched = false;
+    }
+  });
+
   // ------------------------------------------------------------------
   // Broad-pattern heuristic — the user is about to gate a large slice of
   // APRS-IS traffic to RF. Require an explicit confirmation so they
@@ -231,7 +330,11 @@
     if (form.type === 'prefix') {
       return p.length > 0 && p.length <= BROAD_PATTERN_MAX_STATIC_CHARS;
     }
-    if (form.type === 'message_dest' || form.type === 'object') {
+    // message_dest is intentionally excluded: a broad addressee rule
+    // (including a bare `*`) can't flood — tier-1's heard-direct check
+    // bounds IS->RF message delivery to stations physically heard on RF.
+    // Only `object` (non-message) rules keep the broad-pattern warning.
+    if (form.type === 'object') {
       if (!p.endsWith('*')) return false;
       const staticPrefix = p.slice(0, -1);
       return staticPrefix.length > 0 && staticPrefix.length <= BROAD_PATTERN_MAX_STATIC_CHARS;
@@ -281,10 +384,12 @@
           gate_rf_to_is: data.gate_rf_to_is ?? true,
           gate_is_to_rf: data.gate_is_to_rf ?? false,
           rf_channel: data.rf_channel,
-          max_msg_hops: data.max_msg_hops,
+          is_tx_via: data.is_tx_via ?? '',
           software_name: data.software_name,
           software_version: data.software_version,
         };
+        serverSelection = igateServerSelection(form.server);
+        customServer = serverSelection === CUSTOM_IGATE_SERVER ? form.server : '';
         savedConfig = buildBody();
         filters = await api.get('/igate/filters') || [];
       })(),
@@ -312,6 +417,10 @@
       toasts.error(serverFilterError);
       return false;
     }
+    if (isTxViaError) {
+      toasts.error(isTxViaError);
+      return false;
+    }
     return true;
   }
 
@@ -331,7 +440,7 @@
       gate_rf_to_is: form.gate_rf_to_is,
       gate_is_to_rf: form.gate_is_to_rf,
       rf_channel: form.rf_channel,
-      max_msg_hops: form.max_msg_hops,
+      is_tx_via: form.is_tx_via.trim(),
       software_name: form.software_name,
       software_version: form.software_version,
     };
@@ -405,6 +514,28 @@
       toasts.error(err.message || 'Failed to update iGate');
     } finally {
       enableSaving = false;
+    }
+  }
+
+  // Master IS→RF gating toggle auto-save. Like autoSaveEnabled, this
+  // persists only the gate_is_to_rf bit merged onto the last-saved
+  // snapshot, so it never commits unsaved edits to the other fields.
+  // gate_is_to_rf is the real IS→RF on/off switch: with it off the TX
+  // governor is never wired and no packet reaches RF, regardless of the
+  // rule table.
+  async function autoSaveGateIsToRf(next) {
+    if (!savedConfig || next === savedConfig.gate_is_to_rf || gateIsToRfSaving) return;
+    gateIsToRfSaving = true;
+    try {
+      const body = { ...savedConfig, gate_is_to_rf: next };
+      await api.put('/igate/config', body);
+      savedConfig = body;
+      toasts.success(next ? 'IS→RF gating enabled' : 'IS→RF gating disabled');
+    } catch (err) {
+      form.gate_is_to_rf = savedConfig.gate_is_to_rf;
+      toasts.error(err.message || 'Failed to update IS→RF gating');
+    } finally {
+      gateIsToRfSaving = false;
     }
   }
 
@@ -608,8 +739,18 @@
       />
       <div style="margin-top: 16px;">
         <FormField label="APRS-IS Server" id="ig-server">
-          <Input id="ig-server" bind:value={form.server} placeholder="rotate.aprs2.net" />
+          <Select
+            id="ig-server"
+            value={serverSelection}
+            options={IGATE_SERVER_OPTIONS}
+            onValueChange={handleServerSelection}
+          />
         </FormField>
+        {#if serverSelection === CUSTOM_IGATE_SERVER}
+          <FormField label="Custom APRS-IS Server" id="ig-server-custom">
+            <Input id="ig-server-custom" bind:value={form.server} placeholder="rotate.aprs2.net" />
+          </FormField>
+        {/if}
         <FormField label="Port" id="ig-port">
           <Input id="ig-port" bind:value={form.port} type="number" placeholder="14580" />
         </FormField>
@@ -625,6 +766,11 @@
               allowNone
               noneLabel="None (RX only)"
             />
+          {/snippet}
+        </FormField>
+        <FormField label="IS→RF Digipeater Path" id="ig-istxvia" error={isTxViaError} hint="Digipeater path applied to Internet-to-RF packets (like Direwolf's IGTXVIA), e.g. WIDE1-1,WIDE2-1. Leave empty to send direct — only stations in direct RF range hear the packet. Use a path only if your recipients need a digipeater to reach them.">
+          {#snippet children(describedBy)}
+            <Input id="ig-istxvia" bind:value={form.is_tx_via} placeholder="Direct (no path)" aria-describedby={describedBy} />
           {/snippet}
         </FormField>
         {#if txBlock}
@@ -662,8 +808,9 @@
   <p class="tab-doc">
     Two independent controls: the <strong>server filter</strong> tells the APRS-IS
     server which packets to send you, and the <strong>APRS-IS → RF gating rules</strong>
-    decide which of those packets get re-transmitted on RF. Every packet the server
-    sends you appears on the live map regardless of the gating rules.
+    decide which of those packets get re-transmitted on RF. Nothing is transmitted
+    unless <strong>IS→RF gating</strong> is switched on below. Every packet the
+    server sends you appears on the live map regardless of the gating rules.
   </p>
   <Box>
     <form onsubmit={handleSave}>
@@ -692,16 +839,32 @@
   <section class="gating-section" aria-labelledby="gating-heading">
     <h3 id="gating-heading" class="section-heading">APRS-IS &rarr; RF Gating</h3>
 
+    <div class="gate-master-toggle">
+      <Toggle
+        bind:checked={form.gate_is_to_rf}
+        label="Enable IS→RF gating"
+        onCheckedChange={autoSaveGateIsToRf}
+      />
+      <p class="field-note">
+        Master switch for internet-to-RF transmission. When off, no APRS-IS
+        packet is ever re-transmitted on RF, regardless of the rules below.
+      </p>
+    </div>
+
     <div class="rf-danger-panel" role="note">
       <div class="rf-danger-icon" aria-hidden="true">
         <Icon name="alert-circle" size="md" />
       </div>
       <div class="rf-danger-body">
         <strong>This panel transmits packets on the air.</strong>
-        Broad patterns — short prefixes like <code>K</code> or <code>W5</code>, or
-        broad wildcards like <code>B*</code> — can flood your local APRS frequency
-        with gated traffic. Use the most specific rule you can, pair it with a
-        tight server filter above, and test in simulation mode first.
+        Broad <em>callsign</em> or <em>prefix</em> rules — short ones like
+        <code>K</code> or <code>W5</code>, or wildcards like <code>B*</code> —
+        echo arbitrary internet traffic onto RF and can flood your local
+        frequency. <em>Message destination</em> rules are bounded by the
+        heard-direct check below, so even a bare <code>*</code> only reaches
+        stations you actually heard; other packet types are not bounded. Use
+        the most specific rule you can, pair it with a tight server filter
+        above, and test in simulation mode first.
       </div>
     </div>
 
@@ -709,8 +872,12 @@
       <div class="rules-subheader-text">
         <h4 class="rules-title">Rules</h4>
         <p class="rules-subtitle">
-          First matching rule wins; if none match, the packet is not transmitted.
-          These rules only affect RF transmission — they do not hide stations from the map.
+          Two automatic checks run first and aren't editable: directed messages
+          only reach an addressee heard <strong>directly</strong> on RF in the last
+          30 minutes, and non-message traffic only goes out if it's from one of
+          your own other SSIDs. First matching rule below wins; if none match, the
+          packet is not transmitted. These rules only affect RF transmission —
+          they do not hide stations from the map.
         </p>
       </div>
       <div class="rules-subheader-actions">
@@ -751,13 +918,22 @@
       error={patternError}
     >
       {#snippet children(describedBy)}
-        <Input
-          id="flt-pattern"
-          bind:value={filterForm.pattern}
-          placeholder={placeholderFor(filterForm.type)}
-          aria-describedby={describedBy}
-          oninput={() => { patternTouched = true; }}
-        />
+        {#if filterForm.type === 'packet_type'}
+          <Select
+            id="flt-pattern"
+            bind:value={filterForm.pattern}
+            options={packetTypeOptions}
+            aria-describedby={describedBy}
+          />
+        {:else}
+          <Input
+            id="flt-pattern"
+            bind:value={filterForm.pattern}
+            placeholder={placeholderFor(filterForm.type)}
+            aria-describedby={describedBy}
+            oninput={() => { patternTouched = true; }}
+          />
+        {/if}
       {/snippet}
     </FormField>
     <FormField label="Action" id="flt-action">

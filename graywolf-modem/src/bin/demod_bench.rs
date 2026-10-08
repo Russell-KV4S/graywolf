@@ -124,8 +124,8 @@ fn read_wav(path: &str) -> io::Result<AudioData> {
             if bits_per_sample == 16 {
                 let mut sample_buf = vec![0u8; chunk_size as usize];
                 reader.read_exact(&mut sample_buf)?;
-                for chunk in sample_buf.chunks_exact(2) {
-                    let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+                for chunk in sample_buf.as_chunks::<2>().0 {
+                    let s = i16::from_le_bytes(*chunk);
                     data_samples.push(s);
                 }
             } else if bits_per_sample == 8 {
@@ -159,8 +159,10 @@ fn read_raw_pcm(path: &str, sample_rate: u32) -> io::Result<AudioData> {
     file.read_to_end(&mut data)?;
 
     let samples: Vec<i16> = data
-        .chunks_exact(2)
-        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| i16::from_le_bytes(*chunk))
         .collect();
 
     Ok(AudioData {

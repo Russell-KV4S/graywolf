@@ -32,6 +32,7 @@
   import About from './routes/About.svelte';
   import Preferences from './routes/Preferences.svelte';
   import MapsSettings from './routes/MapsSettings.svelte';
+  import StorageSettings from './routes/StorageSettings.svelte';
   import MessagesSettings from './routes/MessagesSettings.svelte';
   import Messages from './routes/Messages.svelte';
   import Terminal from './routes/Terminal.svelte';
@@ -63,6 +64,7 @@
     '/system-logs': SystemLogs,
     '/preferences': Preferences,
     '/preferences/maps': MapsSettings,
+    '/preferences/storage': StorageSettings,
     '/preferences/messages': MessagesSettings,
     '/about': About,
   };
@@ -224,12 +226,12 @@
   @media (max-width: 768px) {
     .main-content {
       margin-left: 0;
-      margin-top: calc(56px + env(safe-area-inset-top));
+      margin-top: calc(56px + var(--safe-area-top));
       padding: 16px;
     }
     .main-content.full-bleed {
-      height: calc(100vh - 56px - env(safe-area-inset-top));
-      height: calc(100dvh - 56px - env(safe-area-inset-top));
+      height: calc(100vh - 56px - var(--safe-area-top));
+      height: calc(100dvh - 56px - var(--safe-area-top));
     }
   }
 

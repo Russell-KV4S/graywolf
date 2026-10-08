@@ -426,3 +426,144 @@ func TestManagerThreadsOnClientTxAcceptedWithIfaceID(t *testing.T) {
 		}
 	}
 }
+
+// TestManagerInstallsOnClientChangeWithIfaceAndName asserts that
+// Manager.Start installs the ManagerConfig-level OnClientChange hook on
+// servers whose ServerConfig leaves it nil, and that the installed
+// closure carries that interface's own ID and display name.
+//
+// Regression coverage for graywolf#548. OnClientChange used to be
+// caller-supplied per Start call, set only by the kissComponent boot
+// literal in pkg/app/wiring.go. notifyKissManager's tcp arm built its own
+// ServerConfig without it, so every hot reload replaced the running
+// server with one that had no reporter and graywolf_kiss_clients_active
+// read 0 until the next restart. Making it manager-owned means neither
+// dispatch site can omit it.
+func TestManagerInstallsOnClientChangeWithIfaceAndName(t *testing.T) {
+	type seen struct {
+		ifaceID uint32
+		name    string
+		active  int
+	}
+	gotCh := make(chan seen, 8)
+
+	mgr := NewManager(ManagerConfig{
+		Sink:   newFakeSink(),
+		Logger: silentLogger(),
+		OnClientChange: func(ifaceID uint32, name string, active int) {
+			gotCh <- seen{ifaceID: ifaceID, name: name, active: active}
+		},
+	})
+
+	starts := []struct {
+		id   uint32
+		name string
+	}{
+		{id: 11, name: "tnc-alpha"},
+		{id: 22, name: "tnc-bravo"},
+	}
+	addrs := make(map[uint32]string)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, s := range starts {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close()
+		addrs[s.id] = addr
+		// Deliberately no OnClientChange here: the manager must supply it.
+		mgr.Start(ctx, s.id, ServerConfig{
+			Name:       s.name,
+			ListenAddr: addr,
+			ChannelMap: map[uint8]uint32{0: 1},
+			Logger:     silentLogger(),
+			Mode:       ModeModem,
+		})
+	}
+	defer mgr.StopAll()
+
+	conns := make([]net.Conn, 0, len(starts))
+	for _, s := range starts {
+		conns = append(conns, dialWhenReady(t, addrs[s.id], 3*time.Second))
+	}
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+
+	// Each interface must report its own ID and name with one client on.
+	want := map[uint32]string{11: "tnc-alpha", 22: "tnc-bravo"}
+	deadline := time.After(3 * time.Second)
+	for len(want) > 0 {
+		select {
+		case got := <-gotCh:
+			name, ok := want[got.ifaceID]
+			if !ok {
+				continue // a later count for an interface already seen
+			}
+			if got.name != name {
+				t.Fatalf("ifaceID=%d: name=%q, want %q", got.ifaceID, got.name, name)
+			}
+			if got.active != 1 {
+				continue // wait for the connect, not a teardown 0
+			}
+			delete(want, got.ifaceID)
+		case <-deadline:
+			t.Fatalf("OnClientChange never fired for: %v "+
+				"(Manager.Start did not install the ManagerConfig hook)", want)
+		}
+	}
+}
+
+// TestManagerOnClientChangePerStartWins asserts the manager-level hook
+// defers to an explicit per-start ServerConfig.OnClientChange, matching
+// how every sibling hook behaves. Direct callers and existing tests that
+// set the field keep working unchanged.
+func TestManagerOnClientChangePerStartWins(t *testing.T) {
+	var mgrHook atomic.Int32
+	perStart := make(chan int, 4)
+
+	mgr := NewManager(ManagerConfig{
+		Sink:           newFakeSink(),
+		Logger:         silentLogger(),
+		OnClientChange: func(uint32, string, int) { mgrHook.Add(1) },
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.Start(ctx, 1, ServerConfig{
+		Name:           "explicit",
+		ListenAddr:     addr,
+		ChannelMap:     map[uint8]uint32{0: 1},
+		Logger:         silentLogger(),
+		Mode:           ModeModem,
+		OnClientChange: func(active int) { perStart <- active },
+	})
+	defer mgr.StopAll()
+
+	conn := dialWhenReady(t, addr, 3*time.Second)
+	defer conn.Close()
+
+	select {
+	case got := <-perStart:
+		if got != 1 {
+			t.Fatalf("per-start hook active=%d, want 1", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("per-start OnClientChange never fired")
+	}
+	if n := mgrHook.Load(); n != 0 {
+		t.Errorf("manager hook fired %d times; it must not override an "+
+			"explicit per-start OnClientChange", n)
+	}
+}

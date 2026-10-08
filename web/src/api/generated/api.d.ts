@@ -487,6 +487,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/channels/{id}/enabled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Enable or disable a channel */
+        put: operations["setChannelEnabled"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/channels/{id}/ptt": {
         parameters: {
             query?: never;
@@ -1072,6 +1089,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/messages/blocklist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List blocked call signs */
+        get: operations["listBlockedCallsigns"];
+        put?: never;
+        /** Block a call sign */
+        post: operations["createBlockedCallsign"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/messages/blocklist/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update a blocked call sign */
+        put: operations["updateBlockedCallsign"];
+        post?: never;
+        /** Unblock a call sign */
+        delete: operations["deleteBlockedCallsign"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/messages/config": {
         parameters: {
             query?: never;
@@ -1100,6 +1153,24 @@ export interface paths {
         /** List conversations */
         get: operations["listConversations"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/messages/conversations/{kind}/{key}/prefs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get conversation preferences */
+        get: operations["getConversationPrefs"];
+        /** Update conversation preferences */
+        put: operations["putConversationPrefs"];
         post?: never;
         delete?: never;
         options?: never;
@@ -1492,6 +1563,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ptt/check-device": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check a PTT device path */
+        post: operations["checkPttDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/ptt/gpio-chips/{chip}/lines": {
         parameters: {
             query?: never;
@@ -1791,6 +1879,29 @@ export interface paths {
         };
         /** System status dashboard */
         get: operations["getStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/storage/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Report on-disk storage usage
+         * @description Returns the byte size of each location Graywolf writes to
+         *     (offline map tiles, position history, config/app data) plus
+         *     the total. Advisory only; never mutates state and always
+         *     returns 200 (missing paths report 0).
+         */
+        get: operations["getStorageUsage"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2434,6 +2545,19 @@ export interface components {
             /** @description "sent" */
             status?: string;
         };
+        "dto.BlockedCallsignRequest": {
+            callsign?: string;
+            enabled?: boolean;
+            note?: string;
+        };
+        "dto.BlockedCallsignResponse": {
+            callsign?: string;
+            created_at?: string;
+            enabled?: boolean;
+            id?: number;
+            note?: string;
+            updated_at?: string;
+        };
         "dto.BlocklistEntryRequest": {
             enabled?: boolean;
             pattern?: string;
@@ -2491,6 +2615,9 @@ export interface components {
             summary?: string;
             tx?: components["schemas"]["dto.TxCapability"];
         };
+        "dto.ChannelEnabledRequest": {
+            enabled?: boolean;
+        };
         "dto.ChannelKissTncEntry": {
             allow_tx_from_governor?: boolean;
             interface_id?: number;
@@ -2519,6 +2646,16 @@ export interface components {
         "dto.ChannelRequest": {
             bit_rate?: number;
             decoder_offset?: number;
+            /**
+             * @description Enabled gates whether graywolf brings the channel up. A pointer so
+             *     an omitted field means "leave at the default" (true) rather than
+             *     "disable": older clients and partial callers that never send the
+             *     key keep their channels running. ToModel substitutes true when nil.
+             *     A channel PUT is a full-resource replace, so an editor that echoes
+             *     the row's current enabled value preserves a disabled state across
+             *     unrelated field edits.
+             */
+            enabled?: boolean;
             fix_bits?: string;
             fx25_encode?: boolean;
             il2p_encode?: boolean;
@@ -2539,6 +2676,16 @@ export interface components {
             backing?: components["schemas"]["dto.ChannelBacking"];
             bit_rate?: number;
             decoder_offset?: number;
+            /**
+             * @description Enabled gates whether graywolf brings the channel up. A pointer so
+             *     an omitted field means "leave at the default" (true) rather than
+             *     "disable": older clients and partial callers that never send the
+             *     key keep their channels running. ToModel substitutes true when nil.
+             *     A channel PUT is a full-resource replace, so an editor that echoes
+             *     the row's current enabled value preserves a disabled state across
+             *     unrelated field edits.
+             */
+            enabled?: boolean;
             fix_bits?: string;
             fx25_encode?: boolean;
             id?: number;
@@ -2556,6 +2703,34 @@ export interface components {
             profile?: string;
             ptt?: components["schemas"]["dto.ChannelPtt"];
             space_freq?: number;
+        };
+        "dto.CheckDeviceRequest": {
+            device_path?: string;
+        };
+        "dto.CheckDeviceResponse": {
+            char_device?: boolean;
+            exists?: boolean;
+            message?: string;
+        };
+        "dto.ConversationPrefsRequest": {
+            /**
+             * @description SendPath overrides transport for this conversation. Empty ('')
+             *     means "inherit the global fallback policy"; otherwise one of
+             *     rf_only | is_only | both.
+             */
+            send_path?: string;
+            /**
+             * @description WaitForAck, when false, sends DMs to this contact once and skips
+             *     the retry ladder (no re-sends) — for handhelds that never ACK.
+             *     Defaults true.
+             */
+            wait_for_ack?: boolean;
+        };
+        "dto.ConversationPrefsResponse": {
+            send_path?: string;
+            thread_key?: string;
+            thread_kind?: string;
+            wait_for_ack?: boolean;
         };
         "dto.ConversationSummary": {
             alias?: string;
@@ -2628,6 +2803,12 @@ export interface components {
         };
         "dto.GPSRequest": {
             baud_rate?: number;
+            /** @description metres above MSL; 0 = unspecified */
+            fixed_alt?: number;
+            /** @description decimal degrees, north positive (source=fixed) */
+            fixed_lat?: number;
+            /** @description decimal degrees, east positive (source=fixed) */
+            fixed_lon?: number;
             gpsd_host?: string;
             gpsd_port?: number;
             serial_port?: string;
@@ -2636,6 +2817,12 @@ export interface components {
         "dto.GPSResponse": {
             baud_rate?: number;
             enabled?: boolean;
+            /** @description metres above MSL; 0 = unspecified */
+            fixed_alt?: number;
+            /** @description decimal degrees, north positive (source=fixed) */
+            fixed_lat?: number;
+            /** @description decimal degrees, east positive (source=fixed) */
+            fixed_lon?: number;
             gpsd_host?: string;
             gpsd_port?: number;
             id?: number;
@@ -2654,7 +2841,7 @@ export interface components {
             enabled?: boolean;
             gate_is_to_rf?: boolean;
             gate_rf_to_is?: boolean;
-            max_msg_hops?: number;
+            is_tx_via?: string;
             port?: number;
             rf_channel?: number;
             server?: string;
@@ -2669,7 +2856,7 @@ export interface components {
             gate_is_to_rf?: boolean;
             gate_rf_to_is?: boolean;
             id?: number;
-            max_msg_hops?: number;
+            is_tx_via?: string;
             port?: number;
             rf_channel?: number;
             server?: string;
@@ -2700,6 +2887,14 @@ export interface components {
             enabled?: boolean;
         };
         "dto.KissRequest": {
+            /**
+             * @description AllowConnectedMode opts a KISS interface in to passing non-UI
+             *     (connected-mode) AX.25 frames through to the radio instead of
+             *     dropping them, so connected-mode packet apps (Pat/Winlink via the
+             *     kernel AX.25 stack + kissattach) can use graywolf as a raw KISS
+             *     modem. Default false; the far end owns the LAPB session state.
+             */
+            allow_connected_mode?: boolean;
             /**
              * @description AllowTxFromGovernor opts this TNC-mode interface in to receive
              *     frames from the TX governor (beacon / digipeater / iGate /
@@ -2761,6 +2956,7 @@ export interface components {
             type?: string;
         };
         "dto.KissResponse": {
+            allow_connected_mode?: boolean;
             allow_tx_from_governor?: boolean;
             backoff_seconds?: number;
             baud_rate?: number;
@@ -3222,6 +3418,29 @@ export interface components {
             callsign?: string;
             disabled?: string[];
         };
+        "dto.StorageUsageLocation": {
+            /**
+             * @description Bytes is the total size in bytes. 0 when the path does not exist
+             *     yet (e.g. no offline maps downloaded, history logging disabled).
+             */
+            bytes?: number;
+            /**
+             * @description Key is a stable identifier for the location: "maps", "history",
+             *     or "config". Clients key colors/labels off this, not off Label.
+             */
+            key?: string;
+            /** @description Label is the human-readable name shown in the UI. */
+            label?: string;
+            /**
+             * @description Path is the absolute path on the server host. Informational —
+             *     shown to operators so they know where to look / back up.
+             */
+            path?: string;
+        };
+        "dto.StorageUsageResponse": {
+            locations?: components["schemas"]["dto.StorageUsageLocation"][];
+            total_bytes?: number;
+        };
         "dto.TacticalCallsignRequest": {
             alias?: string;
             callsign?: string;
@@ -3550,7 +3769,7 @@ export interface components {
             symbol_code?: string;
             /** @description SymbolTable is the APRS symbol table character ("/" primary, "\\" alternate, or an overlay char). */
             symbol_table?: string;
-            /** @description Via is the callsign of the last digipeater in the most recent packet's H-bit path; empty for direct packets. */
+            /** @description Via is how the most recent packet reached us: "rf" (heard on radio) or "is" (received from APRS-IS). */
             via?: string;
             /** @description Weather is optional weather telemetry; present only when include=weather is requested and the station reports weather. */
             weather?: components["schemas"]["webapi.WeatherDTO"];
@@ -3584,7 +3803,7 @@ export interface components {
             speed_kt?: number;
             /** @description Timestamp is the UTC RFC3339 time the position was received. */
             timestamp?: string;
-            /** @description Via is the callsign of the last digipeater (H-bit) that forwarded this position packet; empty for direct. */
+            /** @description Via is how this position packet reached us: "rf" (heard on radio) or "is" (received from APRS-IS). */
             via?: string;
         };
         "webapi.StatusChannel": {
@@ -3805,6 +4024,12 @@ export interface components {
         "dto.TxTimingRequest": {
             content: {
                 "application/json": components["schemas"]["dto.TxTimingRequest"];
+            };
+        };
+        /** @description Blocklist entry */
+        "dto.BlockedCallsignRequest": {
+            content: {
+                "application/json": components["schemas"]["dto.BlockedCallsignRequest"];
             };
         };
         /** @description Action definition */
@@ -5828,6 +6053,61 @@ export interface operations {
                 };
                 content: {
                     "*/*": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    setChannelEnabled: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Channel id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        /** @description Enabled flag */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["dto.ChannelEnabledRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.ChannelResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
                 };
             };
         };
@@ -7874,6 +8154,189 @@ export interface operations {
             };
         };
     };
+    listBlockedCallsigns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.BlockedCallsignResponse"][];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    createBlockedCallsign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["dto.BlockedCallsignRequest"];
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.BlockedCallsignResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    updateBlockedCallsign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Blocklist entry id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: components["requestBodies"]["dto.BlockedCallsignRequest"];
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.BlockedCallsignResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    deleteBlockedCallsign: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Blocklist entry id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No Content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "*/*": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
     getMessagesConfig: {
         parameters: {
             query?: never;
@@ -7987,6 +8450,97 @@ export interface operations {
             };
             /** @description Service Unavailable */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    getConversationPrefs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description thread kind (dm|tactical) */
+                kind: string;
+                /** @description peer callsign or tactical label */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.ConversationPrefsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
+    putConversationPrefs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description thread kind (dm|tactical) */
+                kind: string;
+                /** @description peer callsign or tactical label */
+                key: string;
+            };
+            cookie?: never;
+        };
+        /** @description Preferences */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["dto.ConversationPrefsRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.ConversationPrefsResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9345,6 +9899,40 @@ export interface operations {
             };
         };
     };
+    checkPttDevice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Device path to inspect */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["dto.CheckDeviceRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.CheckDeviceResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["webtypes.ErrorResponse"];
+                };
+            };
+        };
+    };
     listGpioLines: {
         parameters: {
             query?: never;
@@ -10212,6 +10800,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["webapi.StatusDTO"];
+                };
+            };
+        };
+    };
+    getStorageUsage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["dto.StorageUsageResponse"];
                 };
             };
         };

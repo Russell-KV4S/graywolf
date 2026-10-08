@@ -270,9 +270,21 @@ func (s *Server) notifyKissManager(ki configstore.KissInterface) {
 		s.kissManager.Stop(ki.ID)
 		return
 	}
+	// A KISS interface with Channel==0 implicitly binds to channel 1 (the
+	// same default used for the device open below), so resolve the
+	// effective channel first and gate the disabled check on it -- a
+	// legacy Channel==0 row must go inert when channel 1 is disabled.
 	ch := ki.Channel
 	if ch == 0 {
 		ch = 1
+	}
+	// A KISS interface bound to a disabled channel stays down so the
+	// channel is fully inert — the device is released (graywolf#517).
+	// Fail open (treat as enabled) if the channel row can't be read so a
+	// transient store error never silently kills a running interface.
+	if c, err := s.store.GetChannel(context.Background(), ch); err == nil && c != nil && !c.Enabled {
+		s.kissManager.Stop(ki.ID)
+		return
 	}
 	mode := kiss.Mode(ki.Mode)
 	if mode == "" {
@@ -296,6 +308,7 @@ func (s *Server) notifyKissManager(ki configstore.KissInterface) {
 			TncIngressRateHz:    ki.TncIngressRateHz,
 			TncIngressBurst:     ki.TncIngressBurst,
 			AllowTxFromGovernor: ki.AllowTxFromGovernor,
+			AllowConnectedMode:  ki.AllowConnectedMode,
 			GateTxToIs:          ki.GateTxToIs,
 			OnReload:            s.notifyTxBackendReload,
 		})
@@ -314,6 +327,8 @@ func (s *Server) notifyKissManager(ki configstore.KissInterface) {
 			TncIngressRateHz:    ki.TncIngressRateHz,
 			TncIngressBurst:     ki.TncIngressBurst,
 			AllowTxFromGovernor: ki.AllowTxFromGovernor,
+			AllowConnectedMode:  ki.AllowConnectedMode,
+			GateTxToIs:          ki.GateTxToIs,
 		})
 	case configstore.KissTypeSerial:
 		if ki.Device == "" || ki.BaudRate == 0 {
@@ -332,6 +347,7 @@ func (s *Server) notifyKissManager(ki configstore.KissInterface) {
 			TncIngressRateHz:    ki.TncIngressRateHz,
 			TncIngressBurst:     ki.TncIngressBurst,
 			AllowTxFromGovernor: ki.AllowTxFromGovernor,
+			AllowConnectedMode:  ki.AllowConnectedMode,
 			GateTxToIs:          ki.GateTxToIs,
 			OnReload:            s.notifyTxBackendReload,
 			OpenFunc:            s.kissSerialOpenFunc,
@@ -357,6 +373,7 @@ func (s *Server) notifyKissManager(ki configstore.KissInterface) {
 			TncIngressRateHz:    ki.TncIngressRateHz,
 			TncIngressBurst:     ki.TncIngressBurst,
 			AllowTxFromGovernor: ki.AllowTxFromGovernor,
+			AllowConnectedMode:  ki.AllowConnectedMode,
 			GateTxToIs:          ki.GateTxToIs,
 			OnReload:            s.notifyTxBackendReload,
 			OpenFunc:            s.kissSerialOpenFunc,
@@ -381,6 +398,7 @@ func (s *Server) notifyKissManager(ki configstore.KissInterface) {
 			TncIngressRateHz:    ki.TncIngressRateHz,
 			TncIngressBurst:     ki.TncIngressBurst,
 			AllowTxFromGovernor: ki.AllowTxFromGovernor,
+			AllowConnectedMode:  ki.AllowConnectedMode,
 			GateTxToIs:          ki.GateTxToIs,
 			OnReload:            s.notifyTxBackendReload,
 			OpenFunc:            s.kissSerialOpenFunc,

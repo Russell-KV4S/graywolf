@@ -33,6 +33,8 @@ func (s *Server) registerMessages(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/messages", s.listMessages)
 	mux.HandleFunc("POST /api/messages", s.sendMessage)
 	mux.HandleFunc("GET /api/messages/conversations", s.listConversations)
+	mux.HandleFunc("GET /api/messages/conversations/{kind}/{key}/prefs", s.getConversationPrefs)
+	mux.HandleFunc("PUT /api/messages/conversations/{kind}/{key}/prefs", s.putConversationPrefs)
 	mux.HandleFunc("GET /api/messages/events", s.streamMessageEvents)
 	mux.HandleFunc("GET /api/messages/preferences", s.getMessagePreferences)
 	mux.HandleFunc("PUT /api/messages/preferences", s.putMessagePreferences)
@@ -155,6 +157,12 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		f.Limit = n
 	}
+	// A cursor-less read of a specific thread is the chat window opening a
+	// conversation: it wants the newest slice, not the forward
+	// updated_at page (which drops the latest sends/receives off the end
+	// once a thread gets busy -- GH #521). With a cursor, this is the
+	// forward delta-sync feed and keeps the keyset ordering.
+	f.Newest = f.ThreadKey != "" && f.Cursor == ""
 	rows, cursor, err := store.List(r.Context(), f)
 	if err != nil {
 		s.internalError(w, r, "list messages", err)
@@ -270,10 +278,30 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "cannot send a message to our own callsign")
 		return
 	}
+	// Per-send channel override from the compose dialog's Advanced
+	// section. Nil (or 0) defers to the operator's configured default TX
+	// channel; non-zero is persisted on the row so retries reuse it.
+	// Reject a packet-mode override up front — the same guard putMessagesConfig
+	// applies to the global tx_channel — so an operator gets a clear 400
+	// instead of a message that silently fails RF or falls back to IS.
+	if req.Channel != nil && *req.Channel != 0 {
+		mode, err := s.store.ModeForChannel(r.Context(), *req.Channel)
+		if err != nil {
+			s.internalError(w, r, "mode-for-channel lookup", err)
+			return
+		}
+		if mode == configstore.ChannelModePacket {
+			badRequest(w, "channel is packet-mode; choose an aprs or aprs+packet channel")
+			return
+		}
+	}
 	svcReq := messages.SendMessageRequest{
 		To:      to,
 		Text:    req.Text,
 		OurCall: ourCall,
+	}
+	if req.Channel != nil {
+		svcReq.Channel = *req.Channel
 	}
 	if isInvite {
 		svcReq.Kind = messages.MessageKindInvite
@@ -755,6 +783,114 @@ func (s *Server) putMessagePreferences(w http.ResponseWriter, r *http.Request) {
 	}
 	s.signalMessagesReload()
 	writeJSON(w, http.StatusOK, dto.MessagePreferencesFromModel(model))
+}
+
+// --- Conversation prefs (per-thread overrides) ---------------------------
+
+// parseThreadKind validates the {kind} path segment against the two
+// legal thread kinds, returning the normalized value.
+func parseThreadKind(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case messages.ThreadKindDM:
+		return messages.ThreadKindDM, true
+	case messages.ThreadKindTactical:
+		return messages.ThreadKindTactical, true
+	default:
+		return "", false
+	}
+}
+
+// getConversationPrefs returns the per-thread override row, or the
+// inherited defaults when no row exists.
+//
+// @Summary  Get conversation preferences
+// @Tags     messages
+// @ID       getConversationPrefs
+// @Produce  json
+// @Param    kind path     string true "thread kind (dm|tactical)"
+// @Param    key  path     string true "peer callsign or tactical label"
+// @Success  200  {object} dto.ConversationPrefsResponse
+// @Failure  400  {object} webtypes.ErrorResponse
+// @Failure  500  {object} webtypes.ErrorResponse
+// @Security CookieAuth
+// @Router   /messages/conversations/{kind}/{key}/prefs [get]
+func (s *Server) getConversationPrefs(w http.ResponseWriter, r *http.Request) {
+	kind, ok := parseThreadKind(r.PathValue("kind"))
+	if !ok {
+		badRequest(w, "kind must be dm or tactical")
+		return
+	}
+	key := strings.ToUpper(strings.TrimSpace(r.PathValue("key")))
+	if key == "" {
+		badRequest(w, "key is required")
+		return
+	}
+	prefs, err := s.store.GetConversationPrefs(r.Context(), kind, key)
+	if err != nil {
+		s.internalError(w, r, "get conversation prefs", err)
+		return
+	}
+	if prefs == nil {
+		writeJSON(w, http.StatusOK, dto.ConversationPrefsDefaults(kind, key))
+		return
+	}
+	writeJSON(w, http.StatusOK, dto.ConversationPrefsFromModel(*prefs))
+}
+
+// putConversationPrefs upserts the per-thread override. Sending the
+// default state (inherit + wait_for_ack true) clears any stored row so
+// the overrides table holds only customized conversations.
+//
+// @Summary  Update conversation preferences
+// @Tags     messages
+// @ID       putConversationPrefs
+// @Accept   json
+// @Produce  json
+// @Param    kind path     string true "thread kind (dm|tactical)"
+// @Param    key  path     string true "peer callsign or tactical label"
+// @Param    body body     dto.ConversationPrefsRequest true "Preferences"
+// @Success  200  {object} dto.ConversationPrefsResponse
+// @Failure  400  {object} webtypes.ErrorResponse
+// @Failure  500  {object} webtypes.ErrorResponse
+// @Security CookieAuth
+// @Router   /messages/conversations/{kind}/{key}/prefs [put]
+func (s *Server) putConversationPrefs(w http.ResponseWriter, r *http.Request) {
+	kind, ok := parseThreadKind(r.PathValue("kind"))
+	if !ok {
+		badRequest(w, "kind must be dm or tactical")
+		return
+	}
+	key := strings.ToUpper(strings.TrimSpace(r.PathValue("key")))
+	if key == "" {
+		badRequest(w, "key is required")
+		return
+	}
+	req, err := decodeJSON[dto.ConversationPrefsRequest](r)
+	if err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		badRequest(w, err.Error())
+		return
+	}
+	model := req.ToModel(kind, key)
+	if err := s.store.UpsertConversationPrefs(r.Context(), &model); err != nil {
+		s.internalError(w, r, "upsert conversation prefs", err)
+		return
+	}
+	// Read back so the response reflects the sparse-table delete (a
+	// reset-to-defaults PUT returns the inherited defaults, not a row).
+	prefs, err := s.store.GetConversationPrefs(r.Context(), kind, key)
+	if err != nil {
+		s.internalError(w, r, "reload conversation prefs", err)
+		return
+	}
+	if prefs == nil {
+		writeJSON(w, http.StatusOK, dto.ConversationPrefsDefaults(kind, key))
+		return
+	}
+	writeJSON(w, http.StatusOK, dto.ConversationPrefsFromModel(*prefs))
 }
 
 // --- Tactical callsigns --------------------------------------------------

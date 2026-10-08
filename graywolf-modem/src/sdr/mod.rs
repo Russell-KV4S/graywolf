@@ -110,8 +110,8 @@ fn recv_loop(
 fn decode_s16le(data: &[u8]) -> Vec<i16> {
     let n = data.len() / 2;
     let mut out = Vec::with_capacity(n);
-    for pair in data[..n * 2].chunks_exact(2) {
-        out.push(i16::from_le_bytes([pair[0], pair[1]]));
+    for pair in data[..n * 2].as_chunks::<2>().0 {
+        out.push(i16::from_le_bytes(*pair));
     }
     out
 }
@@ -119,8 +119,8 @@ fn decode_s16le(data: &[u8]) -> Vec<i16> {
 fn decode_f32le(data: &[u8]) -> Vec<i16> {
     let n = data.len() / 4;
     let mut out = Vec::with_capacity(n);
-    for quad in data[..n * 4].chunks_exact(4) {
-        let f = f32::from_le_bytes([quad[0], quad[1], quad[2], quad[3]]);
+    for quad in data[..n * 4].as_chunks::<4>().0 {
+        let f = f32::from_le_bytes(*quad);
         out.push((f.clamp(-1.0, 1.0) * 32767.0) as i16);
     }
     out

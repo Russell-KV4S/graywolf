@@ -29,6 +29,7 @@ const (
 	OpCreateChannel       = "createChannel"
 	OpGetChannel          = "getChannel"
 	OpUpdateChannel       = "updateChannel"
+	OpSetChannelEnabled   = "setChannelEnabled"
 	OpDeleteChannel       = "deleteChannel"
 	OpGetChannelStats     = "getChannelStats"
 	OpGetChannelReferrers = "getChannelReferrers"
@@ -247,6 +248,8 @@ const (
 	OpMarkMessageUnread       = "markMessageUnread"
 	OpResendMessage           = "resendMessage"
 	OpListConversations       = "listConversations"
+	OpGetConversationPrefs    = "getConversationPrefs"
+	OpPutConversationPrefs    = "putConversationPrefs"
 	OpStreamMessageEvents     = "streamMessageEvents"
 	OpGetMessagePreferences   = "getMessagePreferences"
 	OpPutMessagePreferences   = "putMessagePreferences"
@@ -272,6 +275,7 @@ const (
 	OpListPttDevices     = "listPttDevices"
 	OpGetPttCapabilities = "getPttCapabilities"
 	OpTestRigctld        = "testRigctld"
+	OpCheckPttDevice     = "checkPttDevice"
 	OpListGpioLines      = "listGpioLines"
 	OpGetPttConfig       = "getPttConfig"
 	OpUpdatePttConfig    = "updatePttConfig"
@@ -327,6 +331,12 @@ const (
 	OpRegisterMapsToken = "registerMapsToken"
 )
 
+// Storage usage — /api/storage/usage. Read-only, cross-platform report
+// of on-disk space used by offline maps, position history, and config.
+const (
+	OpGetStorageUsage = "getStorageUsage"
+)
+
 // AX.25 saved + recent connection profiles — /api/ax25/profiles. Pinned
 // rows persist; recent (unpinned) rows are upserted on each CONNECTED
 // transition and trimmed to the last 20.
@@ -363,6 +373,11 @@ const (
 const (
 	OpGetMessagesConfig = "getMessagesConfig"
 	OpPutMessagesConfig = "putMessagesConfig"
+
+	OpListBlockedCallsigns  = "listBlockedCallsigns"
+	OpCreateBlockedCallsign = "createBlockedCallsign"
+	OpUpdateBlockedCallsign = "updateBlockedCallsign"
+	OpDeleteBlockedCallsign = "deleteBlockedCallsign"
 )
 
 // Maps offline downloads — /api/maps/downloads (Plan 2). Per-state

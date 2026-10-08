@@ -102,6 +102,16 @@ type Filter struct {
 	// When non-empty, results are ordered by (UpdatedAt, ID) ascending
 	// strictly greater than the cursor.
 	Cursor string
+	// Newest, when true and Cursor is empty, flips List into "tail
+	// window" mode: it returns the most recent Limit rows by insertion
+	// order (id DESC) instead of the forward updated_at page. This is
+	// what a thread-detail view (the chat window) wants — the latest
+	// slice of a conversation, regardless of how much older-row churn
+	// (ack/retry updated_at bumps) has happened. Ignored when Cursor is
+	// set, because cursor paging is always the forward updated_at keyset.
+	// See the List doc comment for why id DESC and not an updated_at or
+	// created_at order.
+	Newest bool
 	// UnreadOnly limits to rows with Unread=true.
 	UnreadOnly bool
 	// Limit caps the result set. Values <= 0 apply the package
@@ -219,14 +229,64 @@ func (s *Store) GetByID(ctx context.Context, id uint64) (*configstore.Message, e
 	return &m, nil
 }
 
-// List returns a page of messages matching the filter. The returned
-// cursor points at the last row in the page and can be fed back into a
-// subsequent List call to page forward deterministically.
+// GetConversationPrefs returns the per-thread override row for
+// (kind, key), or (nil, nil) when the conversation inherits defaults.
+// Callers normalize key to uppercase. See configstore.ConversationPrefs.
+func (s *Store) GetConversationPrefs(ctx context.Context, kind, key string) (*configstore.ConversationPrefs, error) {
+	var c configstore.ConversationPrefs
+	err := s.db.WithContext(ctx).
+		Where("thread_kind = ? AND thread_key = ?", kind, key).
+		First(&c).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// List has two modes.
 //
-// Ordering: (UpdatedAt ASC, ID ASC). UpdatedAt is populated by GORM on
-// every Create/Save and also advances when the row is touched by ack
-// correlation or retry bookkeeping, so a polling client seeing an
+// Tail-window mode (Filter.Newest, no cursor) returns the most recent
+// Limit rows by insertion order (id DESC) and an empty cursor. This is
+// the "open a conversation" read used by the chat window: it wants the
+// newest slice of a thread, full stop. It deliberately does NOT order by
+// updated_at — on a busy two-way thread outbound rows have their
+// updated_at bumped repeatedly by sent/retry/ack bookkeeping, so an
+// updated_at-ordered window drifts away from "the latest messages" and,
+// at the default page size, silently drops the newest sends and receives
+// off the end (GH #521, the recurrence after the #527 keyset fix). id is
+// autoincrement, so id DESC is exactly "the N most recently inserted
+// messages" — monotonic, unique, and immune to the glebarez text-sort
+// hazard that rules out ordering by a created_at/updated_at text column
+// directly (".9Z" sorts after ".90000001Z"). The caller re-sorts the
+// returned rows chronologically for display.
+//
+// Forward-cursor mode (everything else) returns a page and a cursor that
+// points at the last row and can be fed back into a subsequent List call
+// to page forward deterministically. It is the delta-sync feed.
+//
+// Ordering: (whole-second UpdatedAt ASC, ID ASC). UpdatedAt is populated
+// by GORM on every Create/Save and also advances when the row is touched
+// by ack correlation or retry bookkeeping, so a polling client seeing an
 // updated row after the initial sync will find it past its cursor.
+//
+// The ORDER BY key MUST match the cursor predicate below exactly, or
+// keyset pagination silently strands rows. The cursor stores UpdatedAt at
+// whole-second resolution (strftime('%s', ...)), so the ORDER BY must
+// truncate to the same resolution — otherwise a row that sorts after the
+// cursor tip at sub-second precision but carries a lower id (e.g. an older
+// message whose updated_at was just bumped by an ack into the same second
+// as a newer, higher-id insert) falls on the wrong side of the id
+// tiebreak and is never returned again. On a busy two-way thread that
+// collision is common, and the effect is messages that stop appearing in
+// the chat window (GH #521). Comparing the raw text column at full
+// precision is not an option: GORM stores time as trailing-zero-trimmed
+// RFC3339Nano, whose lexicographic order does not match chronological
+// order (".9Z" sorts after ".90000001Z"). Second resolution keeps the
+// keyset key unique (id breaks ties) and monotonic, which is what
+// forward pagination requires.
 func (s *Store) List(ctx context.Context, f Filter) ([]configstore.Message, string, error) {
 	limit := f.Limit
 	if limit <= 0 {
@@ -258,6 +318,19 @@ func (s *Store) List(ctx context.Context, f Filter) ([]configstore.Message, stri
 	if f.UnreadOnly {
 		q = q.Where("unread = ?", true)
 	}
+	// Tail-window mode: newest Limit rows by insertion order. No cursor
+	// is returned — the tail row of an id-DESC page is the OLDEST in the
+	// window, so a forward updated_at cursor built from it would be
+	// meaningless, and the caller (chat window) does not page.
+	if f.Newest && f.Cursor == "" {
+		q = q.Order("id DESC").Limit(limit)
+		var out []configstore.Message
+		if err := q.Find(&out).Error; err != nil {
+			return nil, "", err
+		}
+		return out, "", nil
+	}
+
 	if f.Cursor != "" {
 		c, err := decodeCursor(f.Cursor)
 		if err != nil {
@@ -269,7 +342,10 @@ func (s *Store) List(ctx context.Context, f Filter) ([]configstore.Message, stri
 			c.UpdatedAtNanos, c.UpdatedAtNanos, c.ID,
 		)
 	}
-	q = q.Order("updated_at ASC").Order("id ASC").Limit(limit)
+	// Truncate to whole seconds so this matches the cursor predicate's
+	// strftime('%s', ...) resolution exactly (see the doc comment).
+	q = q.Order("CAST(strftime('%s', updated_at) AS INTEGER) ASC").
+		Order("id ASC").Limit(limit)
 
 	var out []configstore.Message
 	if err := q.Find(&out).Error; err != nil {

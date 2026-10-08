@@ -7,7 +7,6 @@ import (
 	"github.com/chrissnell/graywolf/pkg/app/ingress"
 	"github.com/chrissnell/graywolf/pkg/aprs"
 	"github.com/chrissnell/graywolf/pkg/ax25"
-	"github.com/chrissnell/graywolf/pkg/ax25conn"
 	pb "github.com/chrissnell/graywolf/pkg/ipcproto"
 	"github.com/chrissnell/graywolf/pkg/packetlog"
 	"github.com/chrissnell/graywolf/pkg/stationcache"
@@ -135,6 +134,13 @@ func (a *App) dispatchRxFrame(ctx context.Context, item rxFanoutItem, aprsSubmit
 		alevel = audioLevelFromFrame(rf)
 	}
 
+	// Raw KISS clients (e.g. Xastir) do their own decoding and want every
+	// frame, including ones graywolf itself fails to decode — so this must
+	// run before the decode early-return below, not after it.
+	if srv := a.currentAgwServer(); srv != nil {
+		srv.BroadcastRawKISS(rf.Channel, rf.Data)
+	}
+
 	f, err := ax25.Decode(rf.Data)
 	if err != nil {
 		a.plog.Record(packetlog.Entry{
@@ -170,7 +176,7 @@ func (a *App) dispatchRxFrame(ctx context.Context, item rxFanoutItem, aprsSubmit
 
 	if f.IsUI() {
 		if srv := a.currentAgwServer(); srv != nil {
-			srv.BroadcastMonitoredUI(uint8(rf.Channel), f)
+			srv.BroadcastMonitoredUI(rf.Channel, f)
 		}
 		a.digi.Handle(ctx, rf.Channel, f, src)
 		if pkt, err := aprs.Parse(f); err == nil && pkt != nil {
@@ -196,14 +202,21 @@ func (a *App) dispatchRxFrame(ctx context.Context, item rxFanoutItem, aprsSubmit
 			if entries := stationcache.ExtractEntry(pkt, logSource, "RX", rf.Channel); len(entries) > 0 {
 				a.stationCache.Update(entries)
 			}
+			// Heatmap: count this physical RF reception exactly once, here at
+			// the sole off-air ingest edge — not in the station cache write
+			// path, which also runs for the iGate RF->IS re-gate and the
+			// startup roster reload (neither a fresh reception).
+			if ev, ok := stationcache.BuildRxEvent(pkt); ok {
+				a.stationCache.RecordRxEvent(ev)
+			}
 		}
 	} else if a.ax25Mgr != nil {
-		// Connected-mode dispatch: any non-UI frame that decodes goes to
-		// the LAPB manager. Mismatch on (channel, local, peer) is silent —
-		// the manager has no session for it.
-		if cmFrame, err := ax25conn.Decode(rf.Data, false); err == nil {
-			a.ax25Mgr.Dispatch(rf.Channel, cmFrame)
-		}
+		// Connected-mode dispatch: any non-UI frame goes to the LAPB
+		// manager, which decodes it with the owning session's negotiated
+		// modulus (mod-8 vs mod-128) and drops it if no session matches
+		// (channel, local, peer). Decoding here with a fixed modulus would
+		// corrupt mod-128 sessions' N(S)/N(R) — see graywolf #456.
+		a.ax25Mgr.DispatchRaw(rf.Channel, rf.Data)
 	}
 	a.plog.Record(e)
 }

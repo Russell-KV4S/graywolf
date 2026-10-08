@@ -5,7 +5,9 @@
 // .via-rf-hops, .path-link) are defined :global() in LiveMapV2.svelte.
 
 import { esc, timeAgo, fmtLat, fmtLon, viaCls, viaText, formatWeatherRows } from './popup-helpers.js';
+import { rfReachableDespiteNonRfLatest } from './rf-only-core.js';
 import { unitsState } from '../settings/units-store.svelte.js';
+import { formatSpeed, formatAltitude } from '../settings/units.js';
 
 // renderStationPopupHTML(station, { hasStation }) -> HTML string
 //
@@ -43,12 +45,30 @@ export function renderStationPopupHTML(s, { hasStation = null } = {}) {
   html += `<div class="stn-coords">${fmtLat(pos.lat)} ${fmtLon(pos.lon)}</div>`;
 
   const meta = [];
-  if (pos.speed_kt > 0) meta.push(`${Math.round(pos.speed_kt * 1.15078)}mph`);
+  if (pos.speed_kt > 0) meta.push(formatSpeed(pos.speed_kt));
   if (pos.course != null) meta.push(`${pos.course}°`);
-  if (pos.has_alt) meta.push(`alt ${Math.round(pos.alt_m * 3.28084)} ft`);
+  if (pos.has_alt) meta.push(`alt ${formatAltitude(pos.alt_m)}`);
   if (meta.length) html += `<div class="stn-meta">${meta.join(' · ')}</div>`;
 
   html += `<div class="stn-via ${viaCls(s)}">${viaText(s)}</div>`;
+
+  // RF-reachability note. The badge and via line above reflect the *latest*
+  // packet (station-level fields, overwritten unconditionally by every
+  // arrival), but the marker is plotted at positions[0], whose reception the
+  // server pins to the most RF-reachable copy of that fix (stationcache
+  // rfRank). When the latest packet arrived via APRS-IS (or Internet-to-RF
+  // gated) yet the plotted fix was heard on RF, the station still -- correctly
+  // -- qualifies for the "RF Only" filter. Surface that here so the "APRS-IS" via
+  // doesn't read as a filter bug (graywolf #482, the second report of this
+  // divergence after #394).
+  if (rfReachableDespiteNonRfLatest(s)) {
+    const heard = pos.hops > 0
+      ? `via ${pos.hops} hop${pos.hops > 1 ? 's' : ''}`
+      : 'direct';
+    html +=
+      `<div class="stn-rf-reachable" title="This station's plotted position was heard on RF (radio), so it stays visible under the RF Only filter even though its most recent packet did not arrive over RF (APRS-IS or Internet-to-RF gated).">` +
+      `RF-reachable &middot; plotted fix heard on RF (${heard})</div>`;
+  }
 
   if (s.hops > 0 && s.path && s.path.length) {
     const pathHtml = s.path

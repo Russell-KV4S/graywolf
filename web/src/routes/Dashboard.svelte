@@ -77,6 +77,12 @@
       onChange: (v) => logPrefsState.setShowNonPrintable(v),
       title: 'Show non-printable bytes as <0x7f> hex tokens',
     },
+    {
+      label: 'Newest first',
+      checked: logPrefsState.newestFirst,
+      onChange: (v) => logPrefsState.setNewestFirst(v),
+      title: 'Show the most recent packets at the top',
+    },
   ]);
 
   onMount(() => {
@@ -343,6 +349,7 @@
       autoscroll={logPrefsState.autoScroll}
       {toolbarToggles}
       showNonPrintable={logPrefsState.showNonPrintable}
+      newestFirst={logPrefsState.newestFirst}
       showHeader
       mobileBreakpoint="768px"
     />

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/chrissnell/graywolf/pkg/ax25"
 	"github.com/chrissnell/graywolf/pkg/configstore"
 )
 
@@ -28,7 +29,6 @@ import (
 const (
 	DefaultIGateServer          = "rotate.aprs2.net"
 	DefaultIGatePort            = 14580
-	DefaultIGateMaxMsgHops      = 2
 	DefaultIGateSoftwareName    = "graywolf"
 	DefaultIGateSoftwareVersion = "0.1"
 )
@@ -48,7 +48,7 @@ type IGateConfigRequest struct {
 	GateRfToIs      bool   `json:"gate_rf_to_is"`
 	GateIsToRf      bool   `json:"gate_is_to_rf"`
 	RfChannel       uint32 `json:"rf_channel"`
-	MaxMsgHops      uint32 `json:"max_msg_hops"`
+	IsTxVia         string `json:"is_tx_via"`
 	SoftwareName    string `json:"software_name"`
 	SoftwareVersion string `json:"software_version"`
 	TxChannel       uint32 `json:"tx_channel"`
@@ -69,6 +69,21 @@ func (r IGateConfigRequest) Validate() error {
 	return nil
 }
 
+// ValidateIsTxVia checks the is_tx_via digipeater via-path applied to
+// IS->RF third-party frames (Direwolf IGTXVIA equivalent). Empty means
+// "direct" (no path). It is separate from Validate because the handler
+// runs Validate only when server_filter changed (an idempotent
+// pass-through for a legacy `|` value); is_tx_via has no legacy-invalid
+// data to grandfather in, so it is validated unconditionally on every
+// save — rejecting a malformed path at save time instead of letting the
+// iGate silently drop every downlink.
+func (r IGateConfigRequest) ValidateIsTxVia() error {
+	if _, err := ax25.ParseVia(r.IsTxVia); err != nil {
+		return fmt.Errorf("is_tx_via: %w", err)
+	}
+	return nil
+}
+
 func (r IGateConfigRequest) ToModel() configstore.IGateConfig {
 	return configstore.IGateConfig{
 		Enabled:         r.Enabled,
@@ -79,7 +94,7 @@ func (r IGateConfigRequest) ToModel() configstore.IGateConfig {
 		GateRfToIs:      r.GateRfToIs,
 		GateIsToRf:      r.GateIsToRf,
 		RfChannel:       r.RfChannel,
-		MaxMsgHops:      r.MaxMsgHops,
+		IsTxVia:         r.IsTxVia,
 		SoftwareName:    r.SoftwareName,
 		SoftwareVersion: r.SoftwareVersion,
 		TxChannel:       r.TxChannel,
@@ -100,10 +115,6 @@ func IGateConfigFromModel(m configstore.IGateConfig) IGateConfigResponse {
 	if port == 0 {
 		port = DefaultIGatePort
 	}
-	maxMsgHops := m.MaxMsgHops
-	if maxMsgHops == 0 {
-		maxMsgHops = DefaultIGateMaxMsgHops
-	}
 	softwareName := m.SoftwareName
 	if softwareName == "" {
 		softwareName = DefaultIGateSoftwareName
@@ -123,7 +134,7 @@ func IGateConfigFromModel(m configstore.IGateConfig) IGateConfigResponse {
 			GateRfToIs:      m.GateRfToIs,
 			GateIsToRf:      m.GateIsToRf,
 			RfChannel:       m.RfChannel,
-			MaxMsgHops:      maxMsgHops,
+			IsTxVia:         m.IsTxVia,
 			SoftwareName:    softwareName,
 			SoftwareVersion: softwareVersion,
 			TxChannel:       m.TxChannel,
@@ -156,13 +167,16 @@ func (r IGateRfFilterRequest) Validate() error {
 }
 
 // validateIGateRfFilterPattern enforces the wildcard-safety rules shared
-// by POST and PUT on /api/igate/filters. The three rules derive directly
-// from the engine semantics in pkg/igate/filters: `*` is only meaningful
-// as a trailing suffix on TypeMessageDest / TypeObject patterns, a
-// pattern that trims to "" or "*" never matches at the engine level
-// (flooding guard), and `*` in a TypeCallsign / TypePrefix pattern would
-// silently never match. Rejecting these at save time keeps the UI and
-// the engine from disagreeing about what a rule "means".
+// by POST and PUT on /api/igate/filters. The rules derive directly from
+// the engine semantics in pkg/igate/filters: `*` is only meaningful as a
+// trailing suffix on TypeMessageDest / TypeObject patterns; a pattern
+// that trims to "" never matches (flooding guard); a bare "*" is a
+// flooding footgun / no-op for every type EXCEPT TypeMessageDest, where
+// it means "any addressee" and is safe (tier-1's heard-direct check
+// bounds delivery — see matches() in the engine); and `*` in a
+// TypeCallsign / TypePrefix pattern would silently never match.
+// Rejecting these at save time keeps the UI and the engine from
+// disagreeing about what a rule "means".
 //
 // Whitespace semantics: only leading/trailing whitespace is trimmed for
 // the empty/bare-wildcard check (matching matchPattern in the engine,
@@ -177,8 +191,32 @@ func (r IGateRfFilterRequest) Validate() error {
 // staticcheck ST1005. Keep the rule set and check order in sync.
 func validateIGateRfFilterPattern(ruleType, pattern string) error {
 	trimmed := strings.TrimSpace(pattern)
-	if trimmed == "" || trimmed == "*" {
-		return fmt.Errorf("pattern must not be empty or a bare wildcard")
+	if trimmed == "" {
+		return fmt.Errorf("pattern must not be empty")
+	}
+	// packet_type: the pattern is a fixed category key (mapped to the
+	// aprs.is `t/...` classes), not a wildcard string. Validate membership
+	// so the UI and engine agree on what a rule means — an unknown
+	// category silently never matches in the engine. Return early: the
+	// wildcard rules below do not apply to a category key.
+	if ruleType == filtersTypePacketType {
+		if !isPacketTypeCategory(trimmed) {
+			return fmt.Errorf("packet_type pattern must be one of: %s", strings.Join(packetTypeCategoryKeys, ", "))
+		}
+		return nil
+	}
+	// A bare `*` means "any value". It is only permitted for
+	// message_dest, where it means "any addressee": the iGate's tier-1
+	// heard-direct check already bounds IS->RF directed-message delivery
+	// to stations physically heard on RF, so a broad addressee rule
+	// cannot flood the frequency. For every other type a bare `*` is a
+	// flooding footgun (source-side) or a silent no-op, so keep the
+	// guard. See matches()/matchPattern in pkg/igate/filters.
+	if trimmed == "*" {
+		if ruleType != filtersTypeMessageDest {
+			return fmt.Errorf("a bare `*` wildcard is only supported for message_dest")
+		}
+		return nil
 	}
 	// Callsign / Prefix: `*` has no wildcard meaning in the engine for
 	// these types, so a literal `*` would silently never match real
@@ -205,9 +243,29 @@ func validateIGateRfFilterPattern(ruleType, pattern string) error {
 // handler build. The values must stay in sync with
 // pkg/igate/filters/filters.go:17.
 const (
-	filtersTypeCallsign = "callsign"
-	filtersTypePrefix   = "prefix"
+	filtersTypeCallsign    = "callsign"
+	filtersTypePrefix      = "prefix"
+	filtersTypeMessageDest = "message_dest"
+	filtersTypePacketType  = "packet_type"
 )
+
+// packetTypeCategoryKeys mirrors the keys of packetTypeCategories in
+// pkg/igate/filters. Duplicated here (as plain strings) rather than
+// imported so the DTO layer doesn't pull the filter engine (and its aprs
+// dependency) into every handler build — matching the filtersType*
+// mirroring above. Keep in sync with pkg/igate/filters/filters.go.
+var packetTypeCategoryKeys = []string{
+	"message", "position", "weather", "object", "item", "telemetry", "status", "query",
+}
+
+func isPacketTypeCategory(s string) bool {
+	for _, k := range packetTypeCategoryKeys {
+		if strings.EqualFold(strings.TrimSpace(s), k) {
+			return true
+		}
+	}
+	return false
+}
 
 func (r IGateRfFilterRequest) ToModel() configstore.IGateRfFilter {
 	return configstore.IGateRfFilter{

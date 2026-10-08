@@ -31,8 +31,10 @@ func TestIGateConfigFromModel_EmptyModelSeedsDefaults(t *testing.T) {
 	if got.TxChannel != 0 {
 		t.Errorf("TxChannel = %d, want 0 (no default)", got.TxChannel)
 	}
-	if got.MaxMsgHops != DefaultIGateMaxMsgHops {
-		t.Errorf("MaxMsgHops = %d, want %d", got.MaxMsgHops, DefaultIGateMaxMsgHops)
+	// is_tx_via has no default: empty means "direct" (no path), which is
+	// the safe, behavior-preserving zero value.
+	if got.IsTxVia != "" {
+		t.Errorf("IsTxVia = %q, want empty (direct)", got.IsTxVia)
 	}
 	if got.SoftwareName != DefaultIGateSoftwareName {
 		t.Errorf("SoftwareName = %q, want %q", got.SoftwareName, DefaultIGateSoftwareName)
@@ -47,6 +49,39 @@ func TestIGateConfigFromModel_EmptyModelSeedsDefaults(t *testing.T) {
 	// in StationConfig and the passcode is computed internally.
 	if got.Enabled {
 		t.Error("Enabled should stay zero-valued (false)")
+	}
+}
+
+// TestIGateConfigRequestValidateIsTxVia guards the DTO-layer syntax
+// check on the IS→RF digipeater via-path (issue #489). Empty is direct;
+// a comma-separated list of valid AX.25 addresses is accepted; anything
+// else is rejected so the running iGate never persists a path that would
+// make it drop every downlink.
+func TestIGateConfigRequestValidateIsTxVia(t *testing.T) {
+	tests := []struct {
+		name    string
+		via     string
+		wantErr bool
+	}{
+		{"empty_is_direct", "", false},
+		{"single_wide", "WIDE1-1", false},
+		{"two_hops", "WIDE1-1,WIDE2-1", false},
+		{"whitespace_padded", " WIDE1-1 , WIDE2-1 ", false},
+		{"repeated_marker_rejected", "WIDE1-1*", true},
+		{"bad_ssid_rejected", "WIDE1-99", true},
+		{"bad_call_rejected", "!!!", true},
+		{"too_many_hops_rejected", "A,B,C,D,E,F,G,H,I", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := IGateConfigRequest{IsTxVia: tc.via}.ValidateIsTxVia()
+			if tc.wantErr && err == nil {
+				t.Fatalf("ValidateIsTxVia(%q) = nil, want error", tc.via)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ValidateIsTxVia(%q) = %v, want nil", tc.via, err)
+			}
+		})
 	}
 }
 
@@ -90,7 +125,8 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 	const (
 		errMissingType  = "type is required"
 		errMissingPat   = "pattern is required"
-		errBareWildcard = "pattern must not be empty or a bare wildcard"
+		errEmptyPat     = "pattern must not be empty"
+		errBareStarType = "a bare `*` wildcard is only supported for message_dest"
 		errWildcardType = "`*` wildcard is only supported for message_dest and object types"
 		errTrailingOnly = "`*` is only supported as a trailing wildcard"
 	)
@@ -130,6 +166,16 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "NW5W-*"},
 		},
 		{
+			// A bare `*` ("any addressee") is allowed only for
+			// message_dest: tier-1's heard-direct check bounds delivery.
+			name: "accept_message_dest_bare_star",
+			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "*"},
+		},
+		{
+			name: "accept_message_dest_padded_bare_star",
+			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "  *  "},
+		},
+		{
 			name: "accept_object_exact",
 			req:  IGateRfFilterRequest{Type: "object", Pattern: "WX-001"},
 		},
@@ -142,21 +188,28 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 			req:  IGateRfFilterRequest{Type: "message_dest", Pattern: "  NW5W-*  "},
 		},
 
-		// --- bare-wildcard / empty-after-trim (flooding guard) -----------
+		// --- empty-after-trim (flooding guard) ---------------------------
 		{
 			name:    "reject_whitespace_only_pattern",
 			req:     IGateRfFilterRequest{Type: "message_dest", Pattern: "   "},
-			wantErr: errBareWildcard,
+			wantErr: errEmptyPat,
 		},
+
+		// --- bare `*` on non-message_dest types (flooding guard) ---------
 		{
-			name:    "reject_bare_star",
-			req:     IGateRfFilterRequest{Type: "message_dest", Pattern: "*"},
-			wantErr: errBareWildcard,
-		},
-		{
-			name:    "reject_padded_bare_star",
+			name:    "reject_object_bare_star",
 			req:     IGateRfFilterRequest{Type: "object", Pattern: " * "},
-			wantErr: errBareWildcard,
+			wantErr: errBareStarType,
+		},
+		{
+			name:    "reject_callsign_bare_star",
+			req:     IGateRfFilterRequest{Type: "callsign", Pattern: "*"},
+			wantErr: errBareStarType,
+		},
+		{
+			name:    "reject_prefix_bare_star",
+			req:     IGateRfFilterRequest{Type: "prefix", Pattern: "*"},
+			wantErr: errBareStarType,
 		},
 
 		// --- wildcard in wrong type --------------------------------------
@@ -197,6 +250,30 @@ func TestIGateRfFilterRequestValidate(t *testing.T) {
 			req:     IGateRfFilterRequest{Type: "object", Pattern: "WX* X"},
 			wantErr: errTrailingOnly,
 		},
+
+		// --- packet_type: fixed category, not a wildcard string ----------
+		{
+			name: "accept_packet_type_message",
+			req:  IGateRfFilterRequest{Type: "packet_type", Pattern: "message"},
+		},
+		{
+			name: "accept_packet_type_position",
+			req:  IGateRfFilterRequest{Type: "packet_type", Pattern: "position"},
+		},
+		{
+			name: "accept_packet_type_case_insensitive_padded",
+			req:  IGateRfFilterRequest{Type: "packet_type", Pattern: "  Weather  "},
+		},
+		{
+			name:    "reject_packet_type_unknown_category",
+			req:     IGateRfFilterRequest{Type: "packet_type", Pattern: "bogus"},
+			wantErr: "packet_type pattern must be one of: message, position, weather, object, item, telemetry, status, query",
+		},
+		{
+			name:    "reject_packet_type_wildcard",
+			req:     IGateRfFilterRequest{Type: "packet_type", Pattern: "message*"},
+			wantErr: "packet_type pattern must be one of: message, position, weather, object, item, telemetry, status, query",
+		},
 	}
 
 	for _, tc := range tests {
@@ -227,7 +304,7 @@ func TestIGateConfigFromModel_UserValuesWin(t *testing.T) {
 		Port:            14581,
 		ServerFilter:    "r/35/-106/100",
 		RfChannel:       3,
-		MaxMsgHops:      4,
+		IsTxVia:         "WIDE1-1,WIDE2-1",
 		SoftwareName:    "custom",
 		SoftwareVersion: "9.9",
 		TxChannel:       2,
@@ -245,6 +322,9 @@ func TestIGateConfigFromModel_UserValuesWin(t *testing.T) {
 	}
 	if got.RfChannel != 3 {
 		t.Errorf("RfChannel = %d, want 3", got.RfChannel)
+	}
+	if got.IsTxVia != "WIDE1-1,WIDE2-1" {
+		t.Errorf("IsTxVia = %q, want WIDE1-1,WIDE2-1", got.IsTxVia)
 	}
 	if got.SoftwareVersion != "9.9" {
 		t.Errorf("SoftwareVersion = %q, want 9.9", got.SoftwareVersion)

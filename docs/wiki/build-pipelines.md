@@ -20,6 +20,7 @@ Release pipeline definition: [`../../.goreleaser.yml`](../../.goreleaser.yml).
 | Proto codegen (Rust) | `prost-build` in [`../../graywolf-modem/build.rs`](../../graywolf-modem/build.rs) | `proto/graywolf.proto`, `VERSION` | `OUT_DIR/graywolf.rs` (build-tree only; included via `src/ipc/proto.rs`) | Every `cargo build` (cargo `rerun-if-changed`) |
 | Swagger spec | `make docs` (`swag init` + `tagify`) | swag annotations in `pkg/webapi`, `pkg/modembridge`, `pkg/webauth` | `pkg/webapi/docs/gen/swagger.{json,yaml}` (committed) | `make bump-*`; CI guard `docs-check` |
 | Handbook OpenAPI sibling | `make docs-api-html` | `gen/swagger.{json,yaml}` | copies them to `docs/handbook/openapi.{json,yaml}` | Manual; see "two copies" note below |
+| Published handbook (chrissnell.com/software/graywolf/) | `make handbook-sync` (rsync to a locally mounted NFS share) or `make handbook-sync-ssh` (rsync over SSH, `HANDBOOK_SSH_DEST`) | `docs/handbook/` as committed (static HTML, no build step) | maintainer's Synology static-site share | Manual, maintainer-only (private LAN host); not part of CI or `make bump-*`, so the live site lags `main` until someone syncs |
 | In-app release notes | hand-edited [`../../pkg/releasenotes/notes.yaml`](../../pkg/releasenotes/notes.yaml) | n/a | embedded in Go binary via `go:embed` | Hand-authored; bump targets refuse without an entry for the new version (see project [`../../CLAUDE.md`](../../CLAUDE.md)) |
 | Release commit + tag | `make bump-point` / `make bump-minor` / `make bump-beta` | All of the above | git commit + `git tag vX.Y.Z` + push | Manual |
 | Goreleaser archives | `.goreleaser.yml` `archives:` | Go binary (built per OS/arch by goreleaser) + `rust-bin/<os>_<arch>/graywolf-modem*` (pre-built outside goreleaser, supplied as `extra_files`) | Tarball / zip in goreleaser dist | Tag push (`release.yml`) |
@@ -40,6 +41,34 @@ Release pipeline definition: [`../../.goreleaser.yml`](../../.goreleaser.yml).
 The pre-commit hook in [`../../.githooks/`](../../.githooks/) (wired via
 `make install-hooks`) runs the same `docs-check` / `api-client-check`
 guards locally.
+
+## Rust modem uses the pure-Rust HID backend (no system libhidapi/libudev)
+
+The CM108 HID PTT path depends on `hidapi`, but
+[`../../graywolf-modem/Cargo.toml`](../../graywolf-modem/Cargo.toml) pins it
+with `default-features = false, features = ["linux-native-basic-udev"]` on
+non-Android targets. That selects hidapi's **pure-Rust hidraw backend** plus
+the pure-Rust `basic-udev` enumeration crate:
+
+- **No system `libhidapi`** is compiled or linked on Linux -- the C backend
+  (which emits `hid_init` / `hid_enumerate` / `hid_free_enumeration` and needs
+  `-lhidapi` at link time) is never selected. `cargo tree -e features -i hidapi`
+  should show only the `linux-native-basic-udev` feature.
+- **No `libudev`** build/runtime dependency (device discovery walks
+  `/sys/class/hidraw/` directly). Deliberately avoid the plain `linux-native`
+  feature -- it pulls the libudev-FFI `udev` crate and re-triggers the cross-rs
+  armv6 link failure.
+- macOS (IOKit) and Windows (SetupAPI) backends are `cfg(target_os = ...)`
+  gated and unaffected.
+
+Historical context: GH [#512](https://github.com/chrissnell/graywolf/issues/512)
+reported `undefined symbol: hid_enumerate` building on CachyOS/Arch. That was an
+**old release (0.10.1)** that predated this backend selection and linked the C
+backend without system libhidapi present. The pure-Rust backend landed in
+`cbfa1c4b` (first shipped in v0.13.13); any release from v0.13.13 on links no
+C hidapi and needs no `hidapi` system package. To verify a fresh build:
+`readelf -d target/release/graywolf-modem | grep -i hidapi` prints nothing and
+`nm -D` shows no undefined `hid_*` symbols.
 
 ## Two 32-bit ARM builds share one dpkg arch
 

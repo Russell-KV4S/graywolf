@@ -195,6 +195,29 @@ type migration struct {
 //	    legacy column. Required by the per-beacon format selector
 //	    and uncompressed-only position ambiguity. See
 //	    docs/superpowers/plans/2026-05-29-beacon-position-format-and-ambiguity.md.
+//	27 — igate_is_tx_via: replace the inert i_gate_configs.max_msg_hops
+//	    WIDE-hop count with the is_tx_via literal via-path string
+//	    (Direwolf-style IGTXVIA). AutoMigrate adds is_tx_via (empty
+//	    default) from the Go struct; this migration drops the dead
+//	    max_msg_hops column. No backfill: IS->RF always transmitted with
+//	    an empty path before the fix, so an empty is_tx_via preserves
+//	    behavior exactly. Post-AutoMigrate, guarded by columnExists
+//	    (issue #489).
+//	28 — igate_gate_is_to_rf_backfill: GateIsToRf became the real IS->RF
+//	    master switch (the TX governor is now wired on it, not on the old
+//	    implicit "has >=1 enabled rule"). Sets gate_is_to_rf=true on the
+//	    singleton iff an enabled RF filter exists, so operators who had
+//	    IS->RF active keep it on upgrade instead of silently losing it.
+//	    Post-AutoMigrate; no-op on fresh DBs (issue #496).
+//	29 — channels_enabled: add the channels.enabled column (default 1)
+//	    so a channel can be disabled without deleting it. Backfills
+//	    enabled=1 on every existing row so upgrades keep all channels
+//	    running. SQLite's ALTER TABLE ADD COLUMN with a constant DEFAULT 1
+//	    already returns 1 for pre-existing rows; the explicit UPDATE is
+//	    belt-and-suspenders so every row carries a written value regardless
+//	    of how the column was created. Post-AutoMigrate; the ALTER is
+//	    skipped when AutoMigrate already added the column (columnExists
+//	    guard). See graywolf#517.
 var schemaMigrations = []migration{
 	{version: 1, name: "beacon_compress_default", phase: postAutoMigrate, run: migrateBeaconCompressDefault},
 	{version: 2, name: "channel_device_fields", phase: preAutoMigrate, run: migrateChannelDeviceFields},
@@ -221,6 +244,10 @@ var schemaMigrations = []migration{
 	{version: 23, name: "beacon_position_format", phase: postAutoMigrate, run: migrateBeaconPositionFormat},
 	{version: 24, name: "kiss_gate_tx_to_is", phase: postAutoMigrate, run: migrateKissGateTxToIs},
 	{version: 25, name: "beacon_send_path", phase: postAutoMigrate, run: migrateBeaconSendPath},
+	{version: 26, name: "kiss_allow_connected_mode", phase: postAutoMigrate, run: migrateKissAllowConnectedMode},
+	{version: 27, name: "igate_is_tx_via", phase: postAutoMigrate, run: migrateIGateIsTxVia},
+	{version: 28, name: "igate_gate_is_to_rf_backfill", phase: postAutoMigrate, run: migrateIGateGateIsToRfBackfill},
+	{version: 29, name: "channels_enabled", phase: postAutoMigrate, run: migrateChannelsEnabled},
 }
 
 // runMigrations applies every pending migration in the given phase,

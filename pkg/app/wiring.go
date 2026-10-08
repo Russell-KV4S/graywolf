@@ -526,6 +526,14 @@ func (a *App) wireServicesInner(ctx context.Context) error {
 		// dispatcher's per-instance instance label already mixes
 		// into the same series when the queues are fanned out.
 		OnTxQueueDrop: a.metrics.ObserveKissClientTxDrop,
+		// Active-client gauge for server-listen interfaces. Manager-owned
+		// on purpose: both dispatch sites (kissComponent boot and
+		// notifyKissManager hot-reload) build their own ServerConfig
+		// literal, and the hot-reload one used to omit this, leaving the
+		// gauge reading 0 forever after any config save (graywolf#548).
+		OnClientChange: func(_ uint32, name string, n int) {
+			a.metrics.SetKissClients(name, n)
+		},
 		OnClientStateChange: func(ifaceID uint32, name string, st kiss.InterfaceStatus) {
 			connected := st.State == kiss.StateConnected
 			a.metrics.SetKissClientConnected(ifaceID, name, connected)
@@ -835,6 +843,19 @@ func (a *App) wireIGate(ctx context.Context) error {
 // log and let the caller treat the iGate as unavailable. Used by both
 // wireIGate at startup and reloadIgate when the operator toggles the
 // iGate on at runtime.
+// igateTxSink resolves the TX governor to wire into the iGate.
+// IGateConfig.GateIsToRf is the master IS->RF switch: when it is off the
+// iGate gets no governor and can never transmit to RF, regardless of the
+// gating rule table (which still default-denies on top of this). Both the
+// boot-time build and the runtime reload path go through here so the
+// on/off condition can't drift between them. See invariant #15.
+func igateTxSink(gateIsToRf bool, gov txgovernor.TxSink) txgovernor.TxSink {
+	if gateIsToRf {
+		return gov
+	}
+	return nil
+}
+
 func (a *App) buildIgateInstance(ctx context.Context, igCfg *configstore.IGateConfig) (*igate.Igate, string, error) {
 	stationCall, err := a.store.ResolveStationCallsign(ctx)
 	if err != nil {
@@ -862,10 +883,7 @@ func (a *App) buildIgateInstance(ctx context.Context, igCfg *configstore.IGateCo
 	}
 
 	serverAddr := fmt.Sprintf("%s:%d", igCfg.Server, igCfg.Port)
-	var igGov txgovernor.TxSink
-	if len(rules) > 0 {
-		igGov = a.gov
-	}
+	igGov := igateTxSink(igCfg.GateIsToRf, a.gov)
 
 	txCh := a.resolveTxChannel(ctx, igCfg.TxChannel)
 
@@ -882,6 +900,7 @@ func (a *App) buildIgateInstance(ctx context.Context, igCfg *configstore.IGateCo
 		SoftwareVersion: igCfg.SoftwareVersion,
 		Rules:           rules,
 		TxChannel:       txCh,
+		IsTxVia:         igCfg.IsTxVia,
 		Governor:        igGov,
 		SimulationMode:  igCfg.SimulationMode,
 		Logger:          a.logger,
@@ -959,7 +978,7 @@ func (a *App) onIGateIsRxPacket(pkt *aprs.DecodedAPRSPacket, line string) {
 	}
 	a.plog.Record(packetlog.Entry{
 		Channel:   uint32(pkt.Channel),
-		Direction: packetlog.DirRX,
+		Direction: packetlog.DirIS,
 		Source:    "igate-is",
 		Raw:       pkt.Raw,
 		Display:   line,
@@ -1207,6 +1226,7 @@ func (a *App) buildAgwServer(agwCfg *configstore.AgwConfig) *agw.Server {
 		PortCallsigns: calls,
 		PortToChannel: map[uint8]uint32{0: 1},
 		Sink:          a.gov,
+		AX25Manager:   a.ax25Mgr,
 		Logger:        a.logger,
 		OnClientChange: func(n int) {
 			a.metrics.SetAgwClients(n)
@@ -1351,7 +1371,9 @@ func (a *App) wireHTTP(ctx context.Context) error {
 		KissCtx:            ctx,
 		KissSerialOpenFunc: a.kissSerialOpenFunc(),
 		Logger:             a.logger,
+		ConfigDBPath:       a.cfg.DBPath,
 		HistoryDBPath:      a.cfg.HistoryDBPath,
+		TileCacheDir:       a.cfg.TileCacheDir,
 		Version:            a.cfg.Version,
 		Commit:             a.cfg.GitCommit,
 		MapsCache:          mapsCache,
@@ -1506,6 +1528,7 @@ func (a *App) wireHTTP(ctx context.Context) error {
 	// (srv, mux, deps...). Keep this block consistent.
 	webapi.RegisterPackets(apiSrv, apiMux, a.plog, a.stationPos)
 	webapi.RegisterStations(apiSrv, apiMux, a.stationCache)
+	webapi.RegisterHeatmap(apiSrv, apiMux, a.stationCache)
 	webapi.RegisterPosition(apiSrv, apiMux, a.stationPos)
 	// /api/system-logs reads the slog ring buffer. a.cfg.LogBuffer is a
 	// concrete *logbuffer.DB that may be nil; assign through a typed
@@ -1924,13 +1947,22 @@ func (a *App) kissComponent() namedComponent {
 		name: "kiss",
 		start: func(ctx context.Context) error {
 			kissIfaces, _ := a.store.ListKissInterfaces(ctx)
+			// A KISS interface bound to a disabled channel stays down so
+			// the channel is fully inert — no device opened (graywolf#517).
+			disabled := a.disabledChannelSet(ctx)
 			for _, ki := range kissIfaces {
 				if !ki.Enabled {
 					continue
 				}
 				ch := ki.Channel
 				if ch == 0 {
+					// Channel==0 implicitly binds to channel 1 (same default
+					// used for the device open below); gate the disabled
+					// check on the effective channel, not the raw 0.
 					ch = 1
+				}
+				if disabled[ch] {
+					continue
 				}
 				name := ki.Name
 				mode := kiss.Mode(ki.Mode)
@@ -1954,6 +1986,7 @@ func (a *App) kissComponent() namedComponent {
 						TncIngressRateHz:    ki.TncIngressRateHz,
 						TncIngressBurst:     ki.TncIngressBurst,
 						AllowTxFromGovernor: ki.AllowTxFromGovernor,
+						AllowConnectedMode:  ki.AllowConnectedMode,
 						GateTxToIs:          ki.GateTxToIs,
 						OnReload:            a.notifyTxBackendReload,
 					})
@@ -1978,6 +2011,7 @@ func (a *App) kissComponent() namedComponent {
 						TncIngressRateHz:    ki.TncIngressRateHz,
 						TncIngressBurst:     ki.TncIngressBurst,
 						AllowTxFromGovernor: ki.AllowTxFromGovernor,
+						AllowConnectedMode:  ki.AllowConnectedMode,
 						GateTxToIs:          ki.GateTxToIs,
 						OnReload:            a.notifyTxBackendReload,
 						OpenFunc:            a.kissSerialOpenFunc(),
@@ -2002,6 +2036,7 @@ func (a *App) kissComponent() namedComponent {
 						TncIngressRateHz:    ki.TncIngressRateHz,
 						TncIngressBurst:     ki.TncIngressBurst,
 						AllowTxFromGovernor: ki.AllowTxFromGovernor,
+						AllowConnectedMode:  ki.AllowConnectedMode,
 						GateTxToIs:          ki.GateTxToIs,
 						OnReload:            a.notifyTxBackendReload,
 						OpenFunc:            a.kissSerialOpenFunc(),
@@ -2027,6 +2062,7 @@ func (a *App) kissComponent() namedComponent {
 						TncIngressRateHz:    ki.TncIngressRateHz,
 						TncIngressBurst:     ki.TncIngressBurst,
 						AllowTxFromGovernor: ki.AllowTxFromGovernor,
+						AllowConnectedMode:  ki.AllowConnectedMode,
 						GateTxToIs:          ki.GateTxToIs,
 						OnReload:            a.notifyTxBackendReload,
 						OpenFunc:            a.kissSerialOpenFunc(),
@@ -2045,10 +2081,8 @@ func (a *App) kissComponent() namedComponent {
 					TncIngressRateHz:    ki.TncIngressRateHz,
 					TncIngressBurst:     ki.TncIngressBurst,
 					AllowTxFromGovernor: ki.AllowTxFromGovernor,
+					AllowConnectedMode:  ki.AllowConnectedMode,
 					GateTxToIs:          ki.GateTxToIs,
-					OnClientChange: func(n int) {
-						a.metrics.SetKissClients(name, n)
-					},
 				})
 			}
 			// Nudge the TX dispatcher to rebuild its snapshot now that
@@ -2141,9 +2175,17 @@ func (a *App) buildTxBackendSnapshot() *txbackend.Snapshot {
 	// returns an error (surfaced as outcome=err) if no IPC session is
 	// live. Registering the backend regardless keeps the snapshot a
 	// pure config projection: health is a separate runtime concern.
+	// Disabled channels are fully inert (graywolf#517): exclude them from
+	// every governor egress projection so outbound routing never selects
+	// them, and treat any KISS interface bound to a disabled channel as
+	// off. disabled is the set of disabled channel IDs.
+	disabled := a.disabledChannelSet(ctx)
 	var modemChannels []uint32
 	if chs, err := a.store.ListChannels(ctx); err == nil {
 		for _, c := range chs {
+			if !c.Enabled {
+				continue
+			}
 			if c.InputDeviceID != nil {
 				modemChannels = append(modemChannels, c.ID)
 			}
@@ -2173,6 +2215,9 @@ func (a *App) buildTxBackendSnapshot() *txbackend.Snapshot {
 			if ki.Channel == 0 {
 				continue
 			}
+			if disabled[ki.Channel] {
+				continue
+			}
 			q := a.kissMgr.InstanceQueueFor(ki.ID)
 			if q == nil {
 				// Interface configured but not started yet, or Mode flip
@@ -2187,16 +2232,82 @@ func (a *App) buildTxBackendSnapshot() *txbackend.Snapshot {
 	return txbackend.BuildSnapshot(modem, modemChannels, kissBackends)
 }
 
+// kissTxChannelSet returns the set of channel IDs that have a KISS-TNC
+// governor backend, mirroring buildTxBackendSnapshot's config-level
+// eligibility (enabled, Mode==tnc, AllowTxFromGovernor, Channel != 0).
+// Unlike the snapshot builder it does NOT require the interface's queue
+// to be live — like the modem side of resolveTxChannel it is a pure
+// config projection, so a KISS channel resolves correctly even before
+// the kiss manager has started the instance (startup ordering) or after
+// a config reload. Queue liveness is a submit-time health concern.
+func (a *App) kissTxChannelSet(ctx context.Context) map[uint32]bool {
+	ifaces, err := a.store.ListKissInterfaces(ctx)
+	if err != nil {
+		return nil
+	}
+	// A disabled channel is inert (graywolf#517): a KISS interface bound
+	// to it is not a valid egress target even if the interface itself is
+	// enabled. Kept in lockstep with buildTxBackendSnapshot per
+	// invariant 16c.
+	disabled := a.disabledChannelSet(ctx)
+	var set map[uint32]bool
+	for _, ki := range ifaces {
+		if !ki.Enabled || ki.Mode != configstore.KissModeTnc || !ki.AllowTxFromGovernor || ki.Channel == 0 {
+			continue
+		}
+		if disabled[ki.Channel] {
+			continue
+		}
+		if set == nil {
+			set = make(map[uint32]bool)
+		}
+		set[ki.Channel] = true
+	}
+	return set
+}
+
+// disabledChannelSet returns the set of channel IDs whose Enabled flag
+// is false. A disabled channel is fully inert (graywolf#517) and must be
+// excluded from every governor egress projection. Returns nil when no
+// channel is disabled (the common case) so callers can use a plain map
+// index without allocating.
+func (a *App) disabledChannelSet(ctx context.Context) map[uint32]bool {
+	chs, err := a.store.ListChannels(ctx)
+	if err != nil {
+		return nil
+	}
+	var set map[uint32]bool
+	for _, c := range chs {
+		if c.Enabled {
+			continue
+		}
+		if set == nil {
+			set = make(map[uint32]bool)
+		}
+		set[c.ID] = true
+	}
+	return set
+}
+
 // resolveTxChannel picks a usable TX channel for igate / messages
-// traffic. Returns the configured channel when it has a modem input
-// device bound (i.e. buildTxBackendSnapshot will register a modem
-// backend for it). Otherwise falls back to the lowest channel ID with
-// a modem input device, then to the lowest channel ID overall, then 0.
+// traffic. Returns the configured channel when it has a governor TX
+// backend — either a modem input device (buildTxBackendSnapshot
+// registers a ModemBackend) or a KISS-TNC interface with
+// AllowTxFromGovernor (a KissTncBackend). Otherwise falls back to the
+// lowest channel ID with a modem input device, then to any KISS-TNC TX
+// channel, then to the lowest channel ID overall, then 0.
+//
+// Honoring a configured KISS-TNC channel is the fix for graywolf#503:
+// a KISS-TNC channel has no InputDeviceID, so the earlier
+// modem-only resolver silently overrode the operator's KISS channel to
+// the internal APRS modem channel whenever both were configured, and
+// messages routed to KISS were logged but egressed on the wrong (modem)
+// interface.
 //
 // Logs a warning when a non-zero configured value is overridden so an
 // operator can correlate stale TxChannel references against the on-box
 // logs without having to read the DB. Also logs a distinct warning
-// when no channel has a modem backend at all — the returned ID will
+// when no channel has any TX backend at all — the returned ID will
 // fail at submit time but is the least-bad option, and the dedicated
 // log line is the operator's diagnostic for that case.
 //
@@ -2204,12 +2315,32 @@ func (a *App) buildTxBackendSnapshot() *txbackend.Snapshot {
 // reloadIgate / Service.ReloadConfig on iGate-config saves so a
 // runtime channel renumbering propagates without a service restart.
 func (a *App) resolveTxChannel(ctx context.Context, configured uint32) uint32 {
+	kissTx := a.kissTxChannelSet(ctx)
+
+	// A configured KISS-TNC channel is a legitimate egress target even
+	// though it has no modem input device. Honor it before any modem
+	// fallback so a mixed modem+KISS config does not override it.
+	if configured != 0 && kissTx[configured] {
+		return configured
+	}
+
 	chs, err := a.store.ListChannels(ctx)
 	if err != nil || len(chs) == 0 {
 		return configured
 	}
+	// A disabled channel is fully inert (graywolf#517): the modem never
+	// opens its device, so it has no TX backend and must not be selected
+	// as an egress target. Skip disabled rows in the modem scan and in
+	// the lowest-channel fallback.
 	var firstWithModem uint32
+	var lowestEnabled uint32
 	for _, c := range chs {
+		if !c.Enabled {
+			continue
+		}
+		if lowestEnabled == 0 {
+			lowestEnabled = c.ID
+		}
 		if c.InputDeviceID == nil {
 			continue
 		}
@@ -2221,8 +2352,23 @@ func (a *App) resolveTxChannel(ctx context.Context, configured uint32) uint32 {
 		}
 	}
 	if firstWithModem == 0 {
-		fallback := chs[0].ID
-		a.logger.Warn("tx channel fallback: no channel has a modem backend; tx will fail at submit",
+		// No modem channel. Prefer a KISS-TNC egress channel (it has a
+		// real backend) over an arbitrary channel row that has none.
+		if kissFallback := lowestKey(kissTx); kissFallback != 0 {
+			if configured != 0 && configured != kissFallback {
+				a.logger.Warn("tx channel fallback: configured channel has no tx backend",
+					"configured", configured, "using", kissFallback)
+			}
+			return kissFallback
+		}
+		// Least-bad: the lowest enabled channel, or the lowest row overall
+		// when every channel is disabled. Either way tx fails at submit
+		// (no backend), which the warning flags for the operator.
+		fallback := lowestEnabled
+		if fallback == 0 {
+			fallback = chs[0].ID
+		}
+		a.logger.Warn("tx channel fallback: no channel has a tx backend; tx will fail at submit",
 			"configured", configured, "using", fallback)
 		return fallback
 	}
@@ -2231,6 +2377,17 @@ func (a *App) resolveTxChannel(ctx context.Context, configured uint32) uint32 {
 			"configured", configured, "using", firstWithModem)
 	}
 	return firstWithModem
+}
+
+// lowestKey returns the smallest key in set, or 0 when the set is empty.
+func lowestKey(set map[uint32]bool) uint32 {
+	var lowest uint32
+	for k := range set {
+		if lowest == 0 || k < lowest {
+			lowest = k
+		}
+	}
+	return lowest
 }
 
 func (a *App) digipeaterComponent() namedComponent {
@@ -2793,8 +2950,9 @@ func (a *App) reloadIgate(ctx context.Context) {
 		return
 	}
 
-	// enabled → enabled (TX channel + filter / rules push-through).
+	// enabled → enabled (TX channel + via-path + filter / rules push-through).
 	cur.SetTxChannel(a.resolveTxChannel(ctx, igCfg.TxChannel))
+	cur.SetIsTxVia(igCfg.IsTxVia)
 	rfFilters, _ := a.store.ListIGateRfFilters(ctx)
 	rules := make([]filters.Rule, 0, len(rfFilters))
 	for _, f := range rfFilters {
@@ -2810,10 +2968,7 @@ func (a *App) reloadIgate(ctx context.Context) {
 		})
 	}
 
-	var gov txgovernor.TxSink
-	if len(rules) > 0 {
-		gov = a.gov
-	}
+	gov := igateTxSink(igCfg.GateIsToRf, a.gov)
 
 	composed, err := buildIgateFilter(ctx, a.store)
 	if err != nil {
@@ -2913,6 +3068,9 @@ func (a *App) messagesComponent() namedComponent {
 							}
 							if err := a.msgSvc.ReloadTacticalCallsigns(ctx); err != nil {
 								a.logger.Warn("messages reload tactical callsigns", "err", err)
+							}
+							if err := a.msgSvc.ReloadBlockedCallsigns(ctx); err != nil {
+								a.logger.Warn("messages reload blocked callsigns", "err", err)
 							}
 							if err := a.msgSvc.ReloadPreferences(ctx); err != nil {
 								a.logger.Warn("messages reload preferences", "err", err)

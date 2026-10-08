@@ -46,8 +46,8 @@ fn read_loop(
             Ok(n) => {
                 let n = n & !1; // drop trailing half-sample on odd read
                 let mut chunk: Vec<i16> = Vec::with_capacity(n / 2);
-                for pair in buf[..n].chunks_exact(2) {
-                    chunk.push(i16::from_le_bytes([pair[0], pair[1]]));
+                for pair in buf[..n].as_chunks::<2>().0 {
+                    chunk.push(i16::from_le_bytes(*pair));
                 }
                 if sink.send(chunk).is_err() {
                     return;

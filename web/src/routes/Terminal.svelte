@@ -12,6 +12,11 @@
   const FATAL_ERROR_CODES = new Set([
     'link-establish-timeout',
     'peer-rejected',
+    // The channel could not transmit at all (no TNC/KISS or modem
+    // backend, or the wrong channel was picked). Surface it up front so
+    // the operator sees the real cause instead of waiting out N2
+    // retries for the misleading "no response to SABM" (graywolf #456).
+    'tx-failed',
   ]);
 
   import TabBar from '../components/terminal/TabBar.svelte';
@@ -96,6 +101,7 @@
       return 'Link did not come up';
     }
     if (code === 'peer-rejected') return 'Peer refused the connection';
+    if (code === 'tx-failed') return 'Could not transmit';
     return 'Session error';
   }
 
@@ -105,9 +111,18 @@
   }
 
   function handleKey(e) {
-    // Ctrl-] (or Cmd-]) opens the command bar from anywhere on the
-    // route.
-    if ((e.ctrlKey || e.metaKey) && e.key === ']') {
+    // Ctrl-] (or Cmd-]) opens the command bar. This window-level handler
+    // is the FALLBACK for when focus is outside the terminal canvas; when
+    // the canvas has focus, xterm swallows the keydown (stopPropagation on
+    // the GS control code) and it never reaches here, so the primary path
+    // is TerminalViewport's attachCustomKeyEventHandler (graywolf #456).
+    // Match on e.code (layout-stable physical key) as well as e.key: on
+    // Safari/macOS holding Ctrl makes e.key report the GS control character
+    // (U+001D) or an empty string instead of ']'.
+    if (
+      (e.ctrlKey || e.metaKey) &&
+      (e.key === ']' || e.code === 'BracketRight')
+    ) {
       e.preventDefault();
       commandBarOpen = true;
       return;
@@ -227,7 +242,7 @@
             </Button>
           </div>
           <MacroToolbar session={activeSession} onEdit={() => (macroEditorOpen = true)} />
-          <TerminalViewport session={activeSession} />
+          <TerminalViewport session={activeSession} onMenuChord={() => (commandBarOpen = true)} />
           <StatusBar session={activeSession} />
         </div>
       {/key}

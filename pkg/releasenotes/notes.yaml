@@ -7,6 +7,157 @@
 # route the body references via [text](link) markdown; renderer only
 # accepts internal #/... routes.
 
+- version: "0.14.14"
+  date: "2026-10-01"
+  style: info
+  schema_version: 1
+  link: "#/gps"
+  title: "Fixed GPS location, AGWPE connected mode, regional APRS-IS servers, Mic-E fixes"
+  body: |
+    Home stations without a GPS receiver can enter a fixed latitude,
+    longitude, and altitude on the [GPS page](#/gps). Graywolf uses it
+    everywhere it would use a satellite fix: distance and bearing to stations
+    you hear, position beacons, and the station list.
+
+    AGWPE clients can make connected-mode sessions. Programs like Paracon,
+    AGWTerm, and EasyTerm can now connect through graywolf to BBSes and
+    other connected packet systems. Xastir and other programs that ask for
+    raw packet data over AGWPE now get it.
+
+    The iGate page offers a dropdown with the regional APRS-IS servers
+    for North America, South America, Europe and Africa, Asia, and
+    Oceania. The default rotate.aprs2.net shows up as Worldwide. You can
+    still choose Custom and pick whatever server you want.
+
+    A new Storage page under Preferences shows how much disk space offline
+    map tiles, position history, and configuration are using, and where
+    they live.
+
+    Messages now use the same Inconsolata font as the rest of graywolf.
+
+    Fixes: valid Mic-E position packets from some radios were being thrown
+    away and never gated to APRS-IS, and now decode normally; the packet
+    inspector no longer flags valid Mic-E packets as broken; packets heard
+    from APRS-IS no longer show up in the packet log as if they were heard
+    on RF; AGWPE clients now see monitored packets on the port you actually
+    configured instead of one port higher; a KISS TCP server keeps
+    forwarding client transmissions to APRS-IS and keeps accepting
+    connections after you save KISS settings; busy chat threads no longer
+    drop the newest messages; map popups follow your metric units setting;
+    and the live map's heatmap opacity slider and radar animation work
+    properly again.
+
+- version: "0.14.13"
+  date: "2026-08-24"
+  style: info
+  schema_version: 1
+  link: "#/channels"
+  title: "Channel on/off switch, Send Beacon from Messages, and igate/message fixes"
+  body: |
+    You can turn individual channels on and off now. A switch on the
+    Channels page disables a channel without deleting its configuration,
+    so you can park a radio or a KISS TNC and bring it back later without
+    setting it up again.
+
+    The Messages view has a Send Beacon button. You can send your position
+    beacon right from where you read and write messages instead of
+    switching pages.
+
+    Packet log views can sort newest-first. A toggle flips the order so
+    the latest packets stay at the top.
+
+    You can type a PTT device path by hand. If your PTT device does not
+    show up in the picker, enter its path directly instead of being stuck.
+
+    The map draws a station's beacon trail when you hover over it and
+    there is no signal path to show, so you still get a sense of where it
+    has been.
+
+    iGating from the internet out to RF is more precise. You can filter
+    which packet types get gated, and you can now gate messages to any
+    station you have heard directly on RF, not just ones in a fixed list.
+
+    Fixes: messages to and from Kenwood TH-D75 radios no longer break on a
+    stray carriage return in the message ID, so acks match up correctly; a
+    station running SSID -0 is treated the same as its bare call sign when
+    routing direct messages; outbound traffic no longer gets forced onto
+    the modem channel when it should go out a KISS TNC; and busy message
+    threads no longer strand older messages when you page through them.
+
+- version: "0.14.12"
+  date: "2026-07-23"
+  style: info
+  schema_version: 1
+  link: "#/igate"
+  title: "Configurable IS-to-RF digipeater path, terminal fixes, and message fixes"
+  body: |
+    You can set the digipeater path that igated messages carry when they
+    go from the internet out to RF. A new "IS->RF Digipeater Path" field
+    on the iGate page stamps a via-path like WIDE1-1 on those frames;
+    leave it empty to keep sending them direct, which matches how it
+    worked before.
+
+    The connected-mode terminal works with more packet BBSes. Sessions
+    that negotiate the larger mod-128 window no longer stall right after
+    connecting, so frames keep flowing for the whole session instead of
+    stopping after the handshake. The Ctrl-] command bar also opens
+    reliably while the terminal has focus.
+
+    Messages you igate out to RF reach Kenwood radios again. A malformed
+    path on outbound third-party frames was making radios like the TH-D75
+    silently drop igated messages without showing or acking them. The
+    path is built correctly now and those messages come through.
+
+    Direct messages meant for another station that shares your base call
+    sign but uses a different SSID are no longer treated as your own. If
+    you run as K0TFU-1, a message addressed to K0TFU-7 is no longer
+    grabbed, filed, and auto-acked by your station, so the sender stops
+    getting a false delivery confirmation for a message you never
+    received.
+
+- version: "0.14.11"
+  date: "2026-07-17"
+  style: info
+  schema_version: 1
+  link: "#/map"
+  title: "Live GPS blue dot, message blocklist, per-message TX channel, and map fixes"
+  body: |
+    The map now tracks your live position. The blue dot follows your GPS
+    in real time instead of sitting where you first loaded the page.
+
+    You can block messages from specific call signs now. Add a call sign
+    to the blocklist and its messages stop showing up in your
+    conversations.
+
+    You can pick the transmit channel for a single message right from the
+    new-message dialog, without changing your default channel.
+
+    APRS-IS-only stations now appear on your local map, and a new
+    direct-RX heatmap layer shows where you're hearing stations directly
+    off the air. The station popup also explains when a station is
+    reachable directly by RF.
+
+    Connected-mode AX.25 can be exposed through KISS with the new
+    "allow_connected_mode" setting, so a hardware TNC or an external app
+    can drive it.
+
+    The AX.25 terminal is more reliable: connect failures, stale
+    sessions, and the Ctrl-] menu are all fixed. Each conversation also
+    gets its own send path with a resend control.
+
+    The live map recovers on its own if the browser drops its graphics
+    context, instead of going blank until you reload.
+
+    Smaller fixes: the Digirig Lite tone PTT no longer shows greyed out
+    on Android; SignaLink USB users are no longer steered toward serial
+    PTT; the packet log keeps object and item name spacing aligned; the
+    conversation routing menu no longer leaks state between threads; the
+    Android top nav bar no longer hides behind the system status bar; a
+    password set during first-time setup now uses the same 8-character
+    minimum as the login screen, so a short one can't lock you out; and
+    when your beacon call sign isn't set it shows in red and links
+    straight to the settings page to fix it.
+
 - version: "0.14.10"
   date: "2026-06-30"
   style: info
