@@ -17,11 +17,14 @@ import com.nw5w.graywolf.platformproto.GpsFix
 import com.nw5w.graywolf.platformproto.GpsSource
 import com.nw5w.graywolf.platformproto.SatInfo
 import com.nw5w.graywolf.platformsvc.PlatformServer
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
 /**
@@ -49,7 +52,7 @@ class GpsAdapter(
     @Volatile private var started: Boolean = false
 
     // Android Location.altitude is WGS84 ellipsoid height, not "meters above
-    // sea level". In Germany that can be roughly 40-50 m higher than NN/MSL.
+    // sea level". It can differ from MSL by tens of metres depending on location.
     // Android 14+ provides the platform AltitudeConverter; run it off the main
     // thread because its first geoid-model load may take several seconds.
     // Serial execution also prevents an older fix from overtaking a newer one.
@@ -57,6 +60,7 @@ class GpsAdapter(
     private val altitudeScope = CoroutineScope(
         SupervisorJob() + Dispatchers.IO.limitedParallelism(1)
     )
+    private val altitudeFailureLogged = AtomicBoolean(false)
 
     private val locationListener = LocationListener { loc -> onLocation(loc) }
 
@@ -101,6 +105,7 @@ class GpsAdapter(
             return
         }
         try {
+            altitudeFailureLogged.set(false)
             locationManager.requestLocationUpdates(
                 LocationManager.GPS_PROVIDER,
                 10_000L, 0f, locationListener
@@ -128,22 +133,20 @@ class GpsAdapter(
     }
 
     fun stop() {
-        if (!started) {
-            altitudeScope.cancel()
-            return
-        }
+        if (!started) return
         started = false
         try { locationManager.removeUpdates(locationListener) } catch (_: Throwable) {}
         try { locationManager.unregisterGnssStatusCallback(gnssStatusCallback) } catch (_: Throwable) {}
-        altitudeScope.cancel()
+        altitudeScope.coroutineContext.cancelChildren()
     }
 
     /** Visible for testing. Prefers orthometric (MSL/NN) altitude when present. */
-    internal fun toGpsFix(loc: Location, satCount: Int): GpsFix {
+    internal fun toGpsFix(loc: Location, satCount: Int, includeAltitude: Boolean = true): GpsFix {
         val hasMslAlt = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
             loc.hasMslAltitude()
-        val hasAlt = hasMslAlt || loc.hasAltitude()
+        val hasAlt = includeAltitude && (hasMslAlt || loc.hasAltitude())
         val altitudeM = when {
+            !hasAlt -> 0.0
             hasMslAlt -> loc.mslAltitudeMeters
             loc.hasAltitude() -> loc.altitude
             else -> 0.0
@@ -168,27 +171,37 @@ class GpsAdapter(
     private fun onLocation(loc: Location) {
         val satCount = lastSatCount
 
-        // Android 14+ providers may already populate MSL altitude. If they do,
-        // use it immediately. On Android 14+ otherwise convert the WGS84
-        // ellipsoid altitude with the platform geoid model on a worker thread.
+        // Keep all Android 14+ fixes on the serial worker, including those
+        // with provider-supplied MSL altitude, so none overtake a conversion.
         // Older Android releases have no built-in geoid converter, so keep the
         // raw ellipsoid altitude there rather than shipping a large private model.
         val canConvertMsl = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
-        val alreadyHasMsl = canConvertMsl && loc.hasMslAltitude()
-        if (!loc.hasAltitude() || alreadyHasMsl || !canConvertMsl) {
+        if (!canConvertMsl) {
             server.broadcastGpsFix(toGpsFix(loc, satCount))
             return
         }
 
         val converted = Location(loc)
         altitudeScope.launch {
-            try {
-                Api34AltitudeConverter.addMslAltitude(ctx, converted)
-            } catch (t: Throwable) {
-                Log.w(TAG, "MSL altitude conversion failed; using WGS84 ellipsoid altitude", t)
+            if (!converted.hasMslAltitude() && converted.hasAltitude()) {
+                try {
+                    Api34AltitudeConverter.addMslAltitude(ctx, converted)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (e: Exception) {
+                    ensureActive()
+                    if (altitudeFailureLogged.compareAndSet(false, true)) {
+                        Log.w(TAG, "MSL altitude conversion failed; omitting altitude for unconverted fixes", e)
+                    }
+                }
             }
+            ensureActive()
             if (started) {
-                server.broadcastGpsFix(toGpsFix(converted, satCount))
+                // Android 14+ reports only MSL altitude. If conversion fails,
+                // keep the position but omit altitude instead of mixing MSL
+                // and ellipsoid heights within a session.
+                server.broadcastGpsFix(toGpsFix(converted, satCount,
+                    includeAltitude = converted.hasMslAltitude()))
             }
         }
     }
