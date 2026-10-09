@@ -1871,7 +1871,7 @@ pattern, with rollback on a failed request, rather than reintroducing
 the poll-only lag.
 
 Source: [`../../web/src/lib/messagesStore.svelte.js`](../../web/src/lib/messagesStore.svelte.js)
-(`decrementUnread`, `incrementUnread`),
+(`adjustUnread`),
 [`../../web/src/components/messages/MessageThread.svelte`](../../web/src/components/messages/MessageThread.svelte)
 (`flushBatch`),
 [`../../web/src/lib/bulletinsStore.svelte.js`](../../web/src/lib/bulletinsStore.svelte.js)
