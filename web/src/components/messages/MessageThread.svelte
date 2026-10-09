@@ -33,6 +33,7 @@
   import { dayHeader, dayKey } from './time.js';
   import { collapseDuplicateEchoes } from '../../lib/duplicate-echo-core.js';
   import { messages as store } from '../../lib/messagesStore.svelte.js';
+  import { countByThread } from '../../lib/unread-batch-core.js';
   import {
     listMessages, markRead, markUnread, resendMessage,
   } from '../../api/messages.js';
@@ -242,14 +243,10 @@
   // --- IntersectionObserver: mark inbound messages as read on dwell.
   /** @type {Map<number, number>} */
   const dwellStart = new Map();
-  // id -> {kind, key} captured from the message row itself at the moment
-  // it's scheduled for read, NOT from an outer `thread` prop — this
-  // component instance persists across thread switches, so anything
-  // derived from an outer variable could be stale by the time the 2s
-  // batch below flushes.
-  // `row` is the underlying `msgs` row, kept so its `unread` flag can be
-  // restored if markRead fails.
-  /** @type {Map<number, {kind: string, key: string, row: any}>} */
+  // id -> {kind, key, msg} taken from the message row itself, not from
+  // the `thread` prop: this component persists across thread switches, so
+  // the prop may already point at another thread when the batch flushes.
+  /** @type {Map<number, {kind: string, key: string, msg: any}>} */
   const batchedIds = new Map();
   let batchTimer = null;
 
@@ -259,27 +256,16 @@
     batchTimer = null;
     if (entries.length === 0) return;
 
-    // Optimistically decrement the affected thread(s) now so the
-    // sidebar/top-bar unread dot updates immediately instead of waiting
-    // on the next 30s conversations rollup.
-    const byThread = new Map();
-    for (const [, t] of entries) {
-      const tid = store.threadIdFor(t.kind, t.key);
-      byThread.set(tid, (byThread.get(tid) || 0) + 1);
-    }
-    for (const [tid, n] of byThread) store.decrementUnread(tid, n);
+    // Update the unread count now rather than on the next 30s rollup;
+    // roll back any message whose markRead fails. The row's `unread`
+    // flag was cleared when it was batched, so restore it on failure.
+    const threadIdFor = (kind, key) => store.threadIdFor(kind, key);
+    for (const [tid, n] of countByThread(entries, threadIdFor)) store.adjustUnread(tid, -n);
 
     Promise.allSettled(entries.map(([id]) => markRead(id))).then((results) => {
-      const rollback = new Map();
-      results.forEach((r, i) => {
-        if (r.status === 'rejected') {
-          const t = entries[i][1];
-          if (t.row) t.row.unread = true;
-          const tid = store.threadIdFor(t.kind, t.key);
-          rollback.set(tid, (rollback.get(tid) || 0) + 1);
-        }
-      });
-      for (const [tid, n] of rollback) store.incrementUnread(tid, n);
+      const failed = entries.filter((_, i) => results[i].status === 'rejected');
+      for (const [, t] of failed) if (t.msg) t.msg.unread = true;
+      for (const [tid, n] of countByThread(failed, threadIdFor)) store.adjustUnread(tid, n);
     });
   }
 
@@ -319,7 +305,7 @@
             // and lower the count a second time.
             for (const id of ids) {
               const row = msgs.find((r) => r.id === id);
-              batchedIds.set(id, { kind: m.thread_kind, key: m.thread_key, row });
+              batchedIds.set(id, { kind: m.thread_kind, key: m.thread_key, msg: row });
               if (row) row.unread = false;
             }
             dwellStart.delete(m.id);

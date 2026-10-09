@@ -2379,3 +2379,38 @@ frame. Regression guards: `TestDecodeSharedDelimiter`, `TestDecodeTrailingFendOn
 [`../../pkg/kiss/framing_test.go`](../../pkg/kiss/framing_test.go).
 
 Source: [`../../pkg/kiss/framing.go`](../../pkg/kiss/framing.go) (`Decoder.synced`, `Decoder.Next`).
+
+### 70. Message unread counts update optimistically on mark-read, not only via the rollup poll
+
+`MessageThread.svelte`'s `flushBatch` calls `store.adjustUnread(threadId, -n)`
+for every thread in the batch *before* the `markRead` requests resolve,
+and rolls back (`adjustUnread(threadId, +n)`) any message whose request
+fails. The 30s `refreshConversations()` poll in `messagesTransport.js`
+is reconciliation for drift, not the primary signal path. Each batched
+message carries its own `thread_kind`/`thread_key`, because the
+component is not remounted on a thread switch and a batch can straddle
+two threads.
+
+A message's `unread` flag is cleared the moment it is batched (and
+restored if its `markRead` fails). `msgs` is loaded once per thread
+visit, so without that, scrolling a read message out of view and back,
+or a tab switch that runs `rebuildIO()`, would batch it again and lower
+the count a second time.
+
+Each `MessageBubble` hands its element back on unmount
+(`registerRef(el, false)`) so `MessageThread` can unobserve it and drop
+it from `bubbleByEl`; otherwise every thread switch leaves the old
+thread's detached bubbles in the map and re-observed on each
+`rebuildIO()`.
+
+*Why:* `messages.Service.MarkRead` is plain REST and publishes no event,
+so an unread badge that waits on the poll lags up to 30s behind what the
+operator already read. Any future unread surface should follow the same pattern:
+optimistic update, rollback on failure.
+
+Source: [`../../web/src/components/messages/MessageThread.svelte`](../../web/src/components/messages/MessageThread.svelte)
+(`flushBatch`, `observe`/`unobserve`),
+[`../../web/src/components/messages/MessageBubble.svelte`](../../web/src/components/messages/MessageBubble.svelte),
+[`../../web/src/lib/messagesStore.svelte.js`](../../web/src/lib/messagesStore.svelte.js)
+(`adjustUnread`),
+[`../../web/src/lib/unread-batch-core.js`](../../web/src/lib/unread-batch-core.js).

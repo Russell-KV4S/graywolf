@@ -162,9 +162,8 @@
     const el = bubbleEl;
     if (!el) return;
     registerRef?.(el, true);
-    // Capture `el` in the closure rather than re-reading `bubbleEl` at
-    // cleanup time — the parent's unobserve() needs the exact element
-    // it was given at mount to find it in its el->msg map.
+    // Pass the same element back on unmount so the parent can
+    // unobserve it and drop it from its element->message map.
     return () => registerRef?.(el, false);
   });
 
