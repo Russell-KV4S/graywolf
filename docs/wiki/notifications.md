@@ -38,7 +38,7 @@ counters optimistically at the point of the state change. See
 
 | Concern | Where |
 |---|---|
-| Messages optimistic decrement/rollback | `web/src/lib/messagesStore.svelte.js` (`decrementUnread`, `incrementUnread`) |
+| Messages optimistic decrement/rollback | `web/src/lib/messagesStore.svelte.js` (`adjustUnread`, negative delta to decrement, positive to roll back) |
 | Messages dwell-to-read batching | `web/src/components/messages/MessageThread.svelte` `flushBatch` — decrements per-thread immediately, rolls back on a rejected `markRead` |
 | `activeThreadId` cleanup on route leave | `web/src/routes/Messages.svelte` `onMount` cleanup — without this, leaving `/messages` for another route left `activeThreadId` stale, which would permanently suppress popups for that thread (see `shouldNotifyMessage` below) |
 | Bulletins shared store | `web/src/lib/bulletinsStore.svelte.js` — single source of truth for inbound bulletins + unread count, replacing Sidebar's old independent poll |

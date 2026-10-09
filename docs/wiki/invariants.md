@@ -1843,7 +1843,7 @@ Source: [`../../pkg/app/rxfanout.go`](../../pkg/app/rxfanout.go)
 `messagesStore.svelte.js`'s `unreadTotal` and `bulletinsStore.svelte.js`'s
 `unreadTotal` must be decremented at the exact point a mark-read (or
 mark-all-read) action succeeds locally — `MessageThread.svelte`'s
-`flushBatch` calls `store.decrementUnread(threadId, n)` before the
+`flushBatch` calls `store.adjustUnread(threadId, -n)` before the
 `markRead` POST even resolves, and `Bulletins.svelte`'s `handleMarkRead`/
 `handleMarkAllRead` call `bulletinsStore.markRead`/`markAllRead`
 synchronously. The periodic rollup poll
