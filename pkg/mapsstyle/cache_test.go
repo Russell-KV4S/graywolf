@@ -1,7 +1,9 @@
 package mapsstyle
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestCleanRelPath(t *testing.T) {
@@ -255,5 +258,84 @@ func TestCache_Get_RewritesStyleJSON(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `"sprite":"/api/maps/style/americana/sprites/sprite"`) {
 		t.Fatalf("sprite not rewritten: %s", body)
+	}
+}
+
+// captureLogger returns a logger writing text records into buf.
+func captureLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+func TestCache_Get_UpstreamFailureIsLoggedAndThrottled(t *testing.T) {
+	var buf bytes.Buffer
+	c := New(Config{BaseURL: "http://127.0.0.1:1", CacheDir: t.TempDir(), Logger: captureLogger(&buf)})
+	clock := time.Unix(1_700_000_000, 0)
+	c.now = func() time.Time { return clock }
+
+	const msg = "upstream fetch failed and no cached copy"
+	get := func(rel string) {
+		t.Helper()
+		if _, _, err := c.Get(context.Background(), rel); err == nil {
+			t.Fatalf("Get(%q): expected error", rel)
+		}
+	}
+
+	get("americana-roboto/style.json")
+	if n := strings.Count(buf.String(), msg); n != 1 {
+		t.Fatalf("after first failure: %d log lines, want 1\n%s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), "rel=americana-roboto/style.json") {
+		t.Errorf("log line missing rel: %s", buf.String())
+	}
+
+	// Within the window: counted, not logged.
+	get("tiles.json")
+	get("americana/shields.json")
+	if n := strings.Count(buf.String(), msg); n != 1 {
+		t.Fatalf("within window: %d log lines, want 1\n%s", n, buf.String())
+	}
+
+	// After the window: logged again with the suppressed count.
+	clock = clock.Add(upstreamFailureLogInterval)
+	get("tiles.json")
+	if n := strings.Count(buf.String(), msg); n != 2 {
+		t.Fatalf("after window: %d log lines, want 2\n%s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), "suppressed=2") {
+		t.Errorf("second log line missing suppressed=2: %s", buf.String())
+	}
+}
+
+func TestCache_Get_CanceledContextNotLogged(t *testing.T) {
+	var buf bytes.Buffer
+	c := New(Config{BaseURL: "http://127.0.0.1:1", CacheDir: t.TempDir(), Logger: captureLogger(&buf)})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := c.Get(ctx, "tiles.json"); err == nil {
+		t.Fatalf("expected error")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("canceled request logged: %s", buf.String())
+	}
+}
+
+func TestCache_FetchUpstream_ErrorRedactsToken(t *testing.T) {
+	const tok = "s3cret-bearer-token"
+	var buf bytes.Buffer
+	c := New(Config{
+		BaseURL:       "http://127.0.0.1:1",
+		CacheDir:      t.TempDir(),
+		Logger:        captureLogger(&buf),
+		TokenProvider: func(context.Context) string { return tok },
+	})
+	_, _, err := c.Get(context.Background(), "tiles.json")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if strings.Contains(err.Error(), tok) {
+		t.Errorf("error leaks token: %v", err)
+	}
+	if strings.Contains(buf.String(), tok) {
+		t.Errorf("log leaks token: %s", buf.String())
 	}
 }

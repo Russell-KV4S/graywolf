@@ -14,6 +14,7 @@ package mapsstyle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -141,6 +142,14 @@ type Cache struct {
 	mu       sync.Mutex
 	inflight map[string]chan struct{}
 
+	// Upstream-failure log throttle (see logUpstreamFailure). An offline
+	// browser can miss dozens of distinct glyph ranges in one page load,
+	// so the throttle is global rather than per asset.
+	failMu         sync.Mutex
+	failLastLog    time.Time
+	failSuppressed int
+	now            func() time.Time
+
 	prewarmMaxRange int // highest Unicode block index probed (default 255)
 	prewarmStop404  int // bail per fontstack after N consecutive 404s (default 4)
 }
@@ -169,6 +178,7 @@ func New(cfg Config) *Cache {
 		inflight:        map[string]chan struct{}{},
 		prewarmMaxRange: 255,
 		prewarmStop404:  4,
+		now:             time.Now,
 	}
 	return cache
 }
@@ -237,6 +247,13 @@ func (c *Cache) fetchUpstream(ctx context.Context, rel string) ([]byte, string, 
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// *url.Error embeds the full request URL, which carries the
+		// bearer token as ?t=. Keep only the underlying cause so the
+		// token never reaches a log line.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return nil, "", fmt.Errorf("upstream %s: %w", rel, err)
 	}
 	defer resp.Body.Close()
@@ -300,9 +317,43 @@ func (c *Cache) Get(ctx context.Context, rel string) ([]byte, string, error) {
 	close(ch)
 
 	if err != nil {
+		c.logUpstreamFailure(cleaned, err)
 		return nil, "", err
 	}
 	return c.maybeRewrite(cleaned, body, ct)
+}
+
+// upstreamFailureLogInterval bounds how often a disk-miss + upstream
+// failure is logged. The first failure logs immediately; later ones
+// within the window are counted and reported on the next logged line.
+const upstreamFailureLogInterval = time.Minute
+
+// logUpstreamFailure records a Get that found nothing on disk and could
+// not reach upstream -- the case the HTTP handler turns into a 502 and
+// the browser shows as a missing basemap. Without this the operator's
+// logs stay clean while the map is broken (graywolf#637). A canceled
+// context means the browser went away, not that upstream is down.
+func (c *Cache) logUpstreamFailure(rel string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	c.failMu.Lock()
+	now := c.now()
+	if !c.failLastLog.IsZero() && now.Sub(c.failLastLog) < upstreamFailureLogInterval {
+		c.failSuppressed++
+		c.failMu.Unlock()
+		return
+	}
+	suppressed := c.failSuppressed
+	c.failLastLog = now
+	c.failSuppressed = 0
+	c.failMu.Unlock()
+
+	attrs := []any{"rel", rel, "err", err}
+	if suppressed > 0 {
+		attrs = append(attrs, "suppressed", suppressed)
+	}
+	c.logger.Warn("mapsstyle: upstream fetch failed and no cached copy", attrs...)
 }
 
 // maybeRewrite applies the URL rewriter to style.json responses and
