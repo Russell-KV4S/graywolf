@@ -421,3 +421,40 @@ func TestCache_Get_BinaryAssetsNotValidated(t *testing.T) {
 		t.Fatalf("binary asset altered: %v", body)
 	}
 }
+
+func TestCache_CheckWritable(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tiles", "style")
+	c := New(Config{CacheDir: dir})
+	if err := c.CheckWritable(); err != nil {
+		t.Fatalf("CheckWritable on fresh dir: %v", err)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("cache dir not created: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("probe file left behind: %v", entries)
+	}
+}
+
+func TestCache_CheckWritable_ReadOnlyDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	c := New(Config{CacheDir: dir})
+	err := c.CheckWritable()
+	if err == nil {
+		t.Fatalf("expected error for read-only dir")
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Errorf("error doesn't name the directory: %v", err)
+	}
+}

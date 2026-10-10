@@ -184,6 +184,28 @@ func New(cfg Config) *Cache {
 	return cache
 }
 
+// CheckWritable creates the cache directory if needed and confirms a
+// file can be written there. Called once at startup: an unwritable
+// style directory doesn't break the map while the host is online (every
+// request just re-fetches upstream), but nothing is ever cached, so the
+// map has no style once the host goes offline. Surfacing it at boot
+// names the path instead of leaving a stream of write-failure WARNs.
+func (c *Cache) CheckWritable() error {
+	if err := os.MkdirAll(c.cacheDir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", c.cacheDir, err)
+	}
+	f, err := os.CreateTemp(c.cacheDir, ".writecheck-*")
+	if err != nil {
+		return fmt.Errorf("write to %s: %w", c.cacheDir, err)
+	}
+	name := f.Name()
+	_ = f.Close()
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("remove probe file in %s: %w", c.cacheDir, err)
+	}
+	return nil
+}
+
 // readDisk returns the cached body + content-type for rel, or an error
 // if no cached copy exists.
 func (c *Cache) readDisk(rel string) ([]byte, string, error) {

@@ -268,6 +268,12 @@ Failure modes:
   it 502s rather than serving the bad copy. An upstream 200 whose
   `.json` body isn't valid JSON (captive portal) is rejected and never
   written to disk. Binary assets (PNG, PBF) aren't validated.
+- Unwritable style dir: startup calls `styleCache.CheckWritable()`
+  (`pkg/app/wiring.go`) and logs a WARN naming
+  `<TileCacheDir>/style` if it can't create the dir or write a probe
+  file. Not fatal: the map works online (every request re-fetches
+  upstream and logs `mapsstyle: write disk failed`), but nothing is
+  cached, so there's no style offline.
 - Online + stale cache: cache copies survive across restarts; refresh
   happens implicitly on the next map download via the prewarm hook,
   which re-fetches the eagerly-needed assets.
