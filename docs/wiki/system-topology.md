@@ -252,7 +252,7 @@ Failure modes:
 - Graywolf host can't reach upstream + no cache: 502 from the proxy.
   This also happens when the *browser* is online but the graywolf host
   isn't (DNS, firewall, Pi-hole). `Cache.Get` logs a WARN
-  (`mapsstyle: upstream fetch failed and no cached copy`), throttled
+  (`mapsstyle: upstream fetch failed and no usable cached copy`), throttled
   globally to one line per minute with a `suppressed` count; canceled
   browser requests aren't logged. The browser falls back to the OSM
   raster style with a toast (`web/src/lib/map/basemap-style.js`), and
@@ -262,6 +262,12 @@ Failure modes:
 - Online + no cache: first request hydrates upstream-to-disk in a few
   hundred ms, then renders normally. Concurrent first requests for the
   same asset are coalesced (one upstream call, all callers share).
+- Corrupt cache: a cached `.json` asset that isn't valid JSON is
+  treated as a miss (WARN `mapsstyle: cached copy is corrupt,
+  refetching`) and overwritten by the upstream copy; with upstream down
+  it 502s rather than serving the bad copy. An upstream 200 whose
+  `.json` body isn't valid JSON (captive portal) is rejected and never
+  written to disk. Binary assets (PNG, PBF) aren't validated.
 - Online + stale cache: cache copies survive across restarts; refresh
   happens implicitly on the next map download via the prewarm hook,
   which re-fetches the eagerly-needed assets.

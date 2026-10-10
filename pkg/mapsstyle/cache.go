@@ -14,6 +14,7 @@ package mapsstyle
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -268,10 +269,30 @@ func (c *Cache) fetchUpstream(ctx context.Context, rel string) ([]byte, string, 
 	return body, contentTypeFor(rel), nil
 }
 
+// validateAsset reports whether body is a usable copy of rel. Only JSON
+// assets (style.json, shields.json, sprite JSON, tiles.json) are
+// checked; a corrupt one would otherwise be served from disk forever,
+// since a disk hit never consults upstream. Binary assets (sprite PNGs,
+// glyph PBFs) pass through.
+func validateAsset(rel string, body []byte) error {
+	if !strings.HasSuffix(rel, ".json") {
+		return nil
+	}
+	if !json.Valid(body) {
+		return errors.New("not valid JSON")
+	}
+	return nil
+}
+
 // Get returns the body + content-type for rel. Tries disk first; on
 // miss, fetches upstream and writes to disk before returning. Returns
 // an error if the path is unsafe or both disk + upstream are
 // unavailable.
+//
+// A cached JSON asset that fails validation is treated as a miss and
+// refetched; the good upstream copy overwrites it. An upstream response
+// that fails validation (e.g. a captive portal's HTML page served with
+// 200) is returned as an error and never written to disk.
 //
 // Concurrent Gets for the same rel coalesce: the first caller fetches,
 // subsequent callers wait and re-read from disk.
@@ -282,7 +303,12 @@ func (c *Cache) Get(ctx context.Context, rel string) ([]byte, string, error) {
 	}
 	// Fast path: disk hit.
 	if body, ct, err := c.readDisk(cleaned); err == nil {
-		return c.maybeRewrite(cleaned, body, ct)
+		verr := validateAsset(cleaned, body)
+		if verr == nil {
+			return c.maybeRewrite(cleaned, body, ct)
+		}
+		c.logger.Warn("mapsstyle: cached copy is corrupt, refetching",
+			"rel", cleaned, "err", verr)
 	}
 
 	// Coalesce concurrent misses.
@@ -298,6 +324,10 @@ func (c *Cache) Get(ctx context.Context, rel string) ([]byte, string, error) {
 		if err != nil {
 			return nil, "", err
 		}
+		// The leader's fetch may have failed, leaving a corrupt copy.
+		if verr := validateAsset(cleaned, body); verr != nil {
+			return nil, "", fmt.Errorf("mapsstyle: cached %s: %w", cleaned, verr)
+		}
 		return c.maybeRewrite(cleaned, body, ct)
 	}
 	ch := make(chan struct{})
@@ -305,6 +335,11 @@ func (c *Cache) Get(ctx context.Context, rel string) ([]byte, string, error) {
 	c.mu.Unlock()
 
 	body, ct, err := c.fetchUpstream(ctx, cleaned)
+	if err == nil {
+		if verr := validateAsset(cleaned, body); verr != nil {
+			err = fmt.Errorf("upstream %s: invalid response: %w", cleaned, verr)
+		}
+	}
 	if err == nil {
 		if werr := c.writeDisk(cleaned, body); werr != nil {
 			c.logger.Warn("mapsstyle: write disk failed", "rel", cleaned, "err", werr)
@@ -353,7 +388,7 @@ func (c *Cache) logUpstreamFailure(rel string, err error) {
 	if suppressed > 0 {
 		attrs = append(attrs, "suppressed", suppressed)
 	}
-	c.logger.Warn("mapsstyle: upstream fetch failed and no cached copy", attrs...)
+	c.logger.Warn("mapsstyle: upstream fetch failed and no usable cached copy", attrs...)
 }
 
 // maybeRewrite applies the URL rewriter to style.json responses and
