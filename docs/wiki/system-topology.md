@@ -204,9 +204,10 @@ and `store.MigrateMapsDownloadSlugs` (DB row update); both idempotent.
 
 The `/tiles/{multi-segment}.pmtiles` route on the outer mux strips the
 prefix and `.pmtiles` suffix, sets the rest as the slug, and delegates
-to `webapi.Server.ServeTilesPMTiles`. Catalog membership is rechecked
-on every tile request; the cache is in-process so the cost is a map
-lookup.
+to `webapi.Server.ServeTilesPMTiles`. Tile serving checks slug
+*grammar* only (`validSlugGrammar`), not catalog membership, so a Worker
+outage never bricks an already-downloaded archive; catalog lookups
+(`resolveSlug`) are reserved for start/delete/status handlers.
 
 The offline-safe render-bounds source `GET /api/maps/local-bounds`
 returns, per completed slug, `{ bbox, maxZoom }` snapshotted into
