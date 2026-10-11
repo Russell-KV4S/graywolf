@@ -2,6 +2,7 @@ package beacon
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -243,6 +244,59 @@ func TestMicELongitudeBoundariesAndCarry(t *testing.T) {
 					t.Fatalf("decoded longitude = %.9f, want %.9f", pkt.Position.Longitude, sign*tc.wantLon)
 				}
 			})
+		}
+	}
+}
+
+// TestMicELongitudeRoundTripFullRange encodes longitudes across the whole
+// -180..180 range with the beacon encoder and decodes them with
+// aprs.Parse. Every one must decode, to within the half hundredth of a
+// minute the encoder rounds to. Random values hit every hundredths digit,
+// including 04, which encodes to SPACE (GH #652); the near-carry values
+// exercise the .99995 rounding across degree and range boundaries.
+func TestMicELongitudeRoundTripFullRange(t *testing.T) {
+	const maxLon = 179 + 59.99/60
+	const tol = 0.5/6000 + 1e-9
+	src, err := ax25.ParseAddress("N0CALL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := rand.New(rand.NewSource(652))
+	for i := 0; i < 20000; i++ {
+		lon := (r.Float64()*2 - 1) * 180
+		if i%7 == 0 {
+			d := float64(int(lon))
+			if lon < 0 {
+				lon = d - 0.99995 - r.Float64()*0.00005
+			} else {
+				lon = d + 0.99995 + r.Float64()*0.00005
+			}
+		}
+		dest := MicEDestination(42.9606, lon, 0)
+		info := []byte(MicEPositionInfo(42.9606, lon, 0, 0, 0, '/', '>', false, 0, ""))
+		dst, err := ax25.ParseAddress(dest)
+		if err != nil {
+			t.Fatalf("lon=%.7f: ParseAddress(%q): %v", lon, dest, err)
+		}
+		frame, err := ax25.NewUIFrame(src, dst, nil, info)
+		if err != nil {
+			t.Fatalf("lon=%.7f: NewUIFrame: %v", lon, err)
+		}
+		pkt, err := aprs.Parse(frame)
+		if err != nil {
+			t.Fatalf("lon=%.7f (info % x): aprs.Parse: %v", lon, info[1:4], err)
+		}
+		if pkt.Position == nil {
+			t.Fatalf("lon=%.7f: decoded position is nil", lon)
+		}
+		want := lon
+		if want > maxLon {
+			want = maxLon
+		} else if want < -maxLon {
+			want = -maxLon
+		}
+		if absf(pkt.Position.Longitude-want) > tol {
+			t.Fatalf("lon=%.7f: decoded %.7f, want within %.2g of %.7f", lon, pkt.Position.Longitude, tol, want)
 		}
 	}
 }
