@@ -239,7 +239,7 @@ test('analyzeFrame warns on unexpected control/PID bytes', () => {
 
 test('analyzeFrame recognizes all four Mic-E data identifiers', () => {
   for (const dti of [0x60, 0x27, 0x1c, 0x1d]) {
-    const r = analyzeFrame(frame('T7SUTV', 'NW5W', [dti, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73]));
+    const r = analyzeFrame(frame('T7SUTV', 'NW5W', [dti, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x2f]));
     assert.equal(r.isMicE, true);
     assert.deepEqual(r.issues, []);
   }

@@ -49,7 +49,7 @@ func parseMicE(pkt *DecodedAPRSPacket, info []byte, frame *ax25.Frame) error {
 	if frame == nil {
 		return errors.New("aprs: mic-e requires frame")
 	}
-	// info[0] is the Mic-E type byte ('`' current, '\'' old). The
+	// info[0] is the Mic-E type byte (` or 0x1c current, ' or 0x1d old). The
 	// actual payload — longitude, speed/course, symbol — starts at
 	// info[1].
 	// Minimum: type byte + 3 lon + 3 spd/crs + 1 sym code + 1 sym table = 9.
