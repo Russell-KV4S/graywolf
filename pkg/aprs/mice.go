@@ -42,7 +42,7 @@ var miceMessageLabels = [8]string{
 	"Returning", "In Service", "En Route", "Off Duty",
 }
 
-// parseMicE is invoked when the info field starts with '\'' or '`'.
+// parseMicE accepts current (` or 0x1c) and old (' or 0x1d) Mic-E identifiers.
 // The frame is required to pull the latitude from the destination
 // address; if it's nil (e.g. ParseInfo without a frame) we bail.
 func parseMicE(pkt *DecodedAPRSPacket, info []byte, frame *ax25.Frame) error {
