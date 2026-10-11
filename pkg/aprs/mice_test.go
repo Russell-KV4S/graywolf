@@ -2,6 +2,7 @@ package aprs
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/chrissnell/graywolf/pkg/ax25"
@@ -67,30 +68,34 @@ func TestParseMicEFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	srcAddr, _ := ax25.ParseAddress("W1AW")
-	// Info field: encode longitude 72.5 → deg=72 (+28=100=='d'), min=30
-	// (+28=58=':'), hund=0 (+28=28=0x1C). Speed=0, course=0. Symbol />.
-	info := []byte{
-		'`',
-		byte(72 + 28), byte(30 + 28), byte(0 + 28),
-		byte(0 + 28), byte(0 + 28), byte(0 + 28),
-		'>', '/',
-	}
-	f, err := ax25.NewUIFrame(srcAddr, destAddr, nil, info)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pkt, err := Parse(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pkt.Type != PacketMicE || pkt.MicE == nil {
-		t.Fatalf("type %q", pkt.Type)
-	}
-	if abs(pkt.MicE.Position.Latitude-35.5) > 0.01 {
-		t.Errorf("lat %v", pkt.MicE.Position.Latitude)
-	}
-	if abs(pkt.MicE.Position.Longitude+72.5) > 0.01 {
-		t.Errorf("lon %v", pkt.MicE.Position.Longitude)
+	for _, dti := range []byte{'`', '\'', 0x1c, 0x1d} {
+		t.Run(fmt.Sprintf("dti=0x%02x", dti), func(t *testing.T) {
+			// Info field: encode longitude 72.5 → deg=72 (+28=100=='d'), min=30
+			// (+28=58=':'), hund=0 (+28=28=0x1C). Speed=0, course=0. Symbol />.
+			info := []byte{
+				dti,
+				byte(72 + 28), byte(30 + 28), byte(0 + 28),
+				byte(0 + 28), byte(0 + 28), byte(0 + 28),
+				'>', '/',
+			}
+			f, err := ax25.NewUIFrame(srcAddr, destAddr, nil, info)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pkt, err := Parse(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pkt.Type != PacketMicE || pkt.MicE == nil {
+				t.Fatalf("type %q", pkt.Type)
+			}
+			if abs(pkt.MicE.Position.Latitude-35.5) > 0.01 {
+				t.Errorf("lat %v", pkt.MicE.Position.Latitude)
+			}
+			if abs(pkt.MicE.Position.Longitude+72.5) > 0.01 {
+				t.Errorf("lon %v", pkt.MicE.Position.Longitude)
+			}
+		})
 	}
 }
 

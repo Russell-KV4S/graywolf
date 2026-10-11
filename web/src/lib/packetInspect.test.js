@@ -239,11 +239,11 @@ test('analyzeFrame handles a frame that ends before its PID', () => {
   assert.ok(r.issues.some((i) => i.severity === 'warn' && /PID/.test(i.text)));
 });
 
-test('analyzeFrame does not treat legacy 0x1c/0x1d info bytes as Mic-E', () => {
-  // Matches the Go decoder, which only dispatches '`' and '\'' to Mic-E.
+test('analyzeFrame flags truncated legacy Mic-E info', () => {
   const f = frame('T7SUTV', 'NW5W', [0x1c, 0x21, 0x22]);
   const r = analyzeFrame(f);
-  assert.equal(r.isMicE, false);
+  assert.equal(r.isMicE, true);
+  assert.ok(r.issues.some((i) => /needs at least 9/.test(i.text)));
 });
 
 test('analyzeFrame warns on unexpected control/PID bytes', () => {
@@ -251,4 +251,12 @@ test('analyzeFrame warns on unexpected control/PID bytes', () => {
   const r = analyzeFrame(f);
   assert.ok(r.issues.some((i) => i.severity === 'warn' && /Control byte/.test(i.text)));
   assert.ok(r.issues.some((i) => i.severity === 'warn' && /PID/.test(i.text)));
+});
+
+test('analyzeFrame recognizes all four Mic-E data identifiers', () => {
+  for (const dti of [0x60, 0x27, 0x1c, 0x1d]) {
+    const r = analyzeFrame(frame('T7SUTV', 'NW5W', [dti, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x2f]));
+    assert.equal(r.isMicE, true);
+    assert.deepEqual(r.issues, []);
+  }
 });
