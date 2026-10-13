@@ -217,7 +217,7 @@ func TestMicELongitudeDegreeEncoding(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dest := MicEDestination(tc.lat, tc.lon, 0)
+			dest := MicEDestination(tc.lat, tc.lon, 0, MicEMessageOffDuty)
 			if dest != tc.wantDest {
 				t.Fatalf("MicEDestination() = %q, want %q", dest, tc.wantDest)
 			}
@@ -279,7 +279,7 @@ func TestMicELongitudeBoundariesAndCarry(t *testing.T) {
 		for _, sign := range []float64{1, -1} {
 			t.Run(fmt.Sprintf("lon=%+.5f", sign*tc.lon), func(t *testing.T) {
 				lon := sign * tc.lon
-				dest := MicEDestination(42.9606, lon, 0)
+				dest := MicEDestination(42.9606, lon, 0, MicEMessageOffDuty)
 				wantDest := "TRUW63"
 				if tc.offset {
 					wantDest = "TRUWV3"
@@ -345,7 +345,7 @@ func TestMicELongitudeRoundTripFullRange(t *testing.T) {
 				lon = d + 0.99995 + r.Float64()*0.00005
 			}
 		}
-		dest := MicEDestination(42.9606, lon, 0)
+		dest := MicEDestination(42.9606, lon, 0, MicEMessageOffDuty)
 		info := []byte(MicEPositionInfo(42.9606, lon, 0, 0, 0, '/', '>', false, 0, ""))
 		dst, err := ax25.ParseAddress(dest)
 		if err != nil {
