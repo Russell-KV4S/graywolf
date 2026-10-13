@@ -267,6 +267,7 @@ var schemaMigrations = []migration{
 	{version: 31, name: "igate_is_tx_via", phase: postAutoMigrate, run: migrateIGateIsTxVia},
 	{version: 32, name: "igate_gate_is_to_rf_backfill", phase: postAutoMigrate, run: migrateIGateGateIsToRfBackfill},
 	{version: 33, name: "channels_enabled", phase: postAutoMigrate, run: migrateChannelsEnabled},
+	{version: 34, name: "kiss_serial_tnc_default", phase: postAutoMigrate, run: migrateKissSerialTncDefault},
 }
 
 // runMigrations applies every pending migration in the given phase,
