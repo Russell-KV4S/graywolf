@@ -1517,6 +1517,12 @@ func (f *fakeBulletinSink) IngestBulletin(_ context.Context, pkt *aprs.DecodedAP
 	return nil
 }
 
+func (f *fakeBulletinSink) setErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
+}
+
 func (f *fakeBulletinSink) list() []ingestedBulletin {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1657,7 +1663,7 @@ func TestRouterBulletinSinkErrorDropsPacketGracefully(t *testing.T) {
 	defer cleanup()
 
 	// Make the sink return a transient error.
-	bs.err = errors.New("db write error")
+	bs.setErr(errors.New("db write error"))
 
 	pkt := makeMessagePacket(t, "W5X-1", "BLN0", "Net tonight", "", aprs.DirectionRF)
 	r.SendPacket(context.Background(), pkt)
@@ -1668,7 +1674,7 @@ func TestRouterBulletinSinkErrorDropsPacketGracefully(t *testing.T) {
 
 	// Verify the router continues to function after a sink error by routing
 	// a subsequent DM correctly.
-	bs.err = nil
+	bs.setErr(nil)
 	dmPkt := makeMessagePacket(t, "W5X-1", "N0CALL", "hello", "1", aprs.DirectionRF)
 	r.SendPacket(context.Background(), dmPkt)
 
