@@ -71,6 +71,12 @@ func main() {
 	cfg.Version = Version
 	cfg.GitCommit = GitCommit
 
+	if applied, err := configstore.ApplyPendingRestore(cfg.DBPath); err != nil {
+		slog.New(slog.NewTextHandler(os.Stderr, nil)).Warn("pending config restore failed before logger setup", "err", err)
+	} else if applied {
+		slog.New(slog.NewTextHandler(os.Stderr, nil)).Info("applied pending config restore", "path", cfg.DBPath)
+	}
+
 	innerLevel := slog.LevelInfo
 	if cfg.Debug {
 		innerLevel = slog.LevelDebug
@@ -85,9 +91,17 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := app.New(cfg, logger).Run(ctx); err != nil {
-		logger.Error("graywolf exited with error", "err", err)
-		os.Exit(1)
+	for {
+		err := app.New(cfg, logger).Run(ctx)
+		if errors.Is(err, app.ErrRestartRequested) {
+			logger.Info("restarting graywolf after database restore")
+			continue
+		}
+		if err != nil {
+			logger.Error("graywolf exited with error", "err", err)
+			os.Exit(1)
+		}
+		break
 	}
 }
 

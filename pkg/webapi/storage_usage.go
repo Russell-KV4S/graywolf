@@ -9,11 +9,11 @@ import (
 	"github.com/chrissnell/graywolf/pkg/webapi/dto"
 )
 
-// registerStorageUsage installs the read-only storage-usage route. The
-// figures it returns are the same on every platform, so the web UI can
-// render one "Storage usage" card everywhere without platform branching.
+// registerStorageUsage installs the storage-usage and backup/restore routes.
 func (s *Server) registerStorageUsage(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/storage/usage", s.getStorageUsage)
+	mux.HandleFunc("GET /api/storage/backup", s.exportStorageBackup)
+	mux.HandleFunc("POST /api/storage/restore", s.restoreStorageBackup)
 }
 
 // @Summary  Report on-disk storage usage

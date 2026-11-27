@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -251,7 +252,15 @@ type App struct {
 	// after every successful reload pass so tests can wait for a
 	// specific reload to land without polling. Unset in production.
 	beaconReloadDone chan struct{}
+
+	// restartCh triggers an in-process stop + fresh Run when a pending
+	// database restore has been staged on disk.
+	restartCh chan struct{}
 }
+
+// ErrRestartRequested is returned by App.Run after tearing down every
+// component in response to RequestRestart (e.g., after staging a DB restore).
+var ErrRestartRequested = errors.New("app: restart requested")
 
 // New returns an App with the given config and logger. It does not
 // open any resources; call Run (or Start) to bring the app online.
@@ -259,7 +268,24 @@ func New(cfg Config, logger *slog.Logger) *App {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &App{cfg: cfg, logger: logger}
+	return &App{
+		cfg:       cfg,
+		logger:    logger,
+		restartCh: make(chan struct{}, 1),
+	}
+}
+
+// RequestRestart asks the running App to shut down cleanly and return
+// ErrRestartRequested so the host main loop can re-launch with freshly
+// restored database files. Non-blocking and safe to call multiple times.
+func (a *App) RequestRestart() {
+	if a.restartCh == nil {
+		return
+	}
+	select {
+	case a.restartCh <- struct{}{}:
+	default:
+	}
 }
 
 // Config returns the App's resolved Config. Exposed for tests and for
@@ -307,22 +333,40 @@ func (a *App) KissTncQueueOverflow(ifaceID uint32) uint64 {
 // QueryModemVersion in modem.go is the other, and for the same kind
 // of reason (it runs before the App context exists).
 func (a *App) Run(ctx context.Context) error {
-	if err := a.wireServices(ctx); err != nil {
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	if err := a.wireServices(runCtx); err != nil {
 		return fmt.Errorf("wire services: %w", err)
 	}
-	if err := a.Start(ctx); err != nil {
+	if err := a.Start(runCtx); err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), a.cfg.ShutdownTimeout)
 		defer cancel()
+		runCancel()
 		_ = a.Stop(shutdownCtx)
 		return err
 	}
 
-	<-ctx.Done()
-	a.logger.Info("shutdown signal received", "cause", context.Cause(ctx))
+	restarting := false
+	select {
+	case <-ctx.Done():
+		a.logger.Info("shutdown signal received", "cause", context.Cause(ctx))
+	case <-a.restartCh:
+		restarting = true
+		a.logger.Info("restart requested; shutting down components for reload")
+	}
+	runCancel()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), a.cfg.ShutdownTimeout)
 	defer cancel()
-	return a.Stop(shutdownCtx)
+	stopErr := a.Stop(shutdownCtx)
+	if restarting {
+		if stopErr != nil {
+			a.logger.Warn("shutdown errors during restart", "err", stopErr)
+		}
+		return ErrRestartRequested
+	}
+	return stopErr
 }
 
 // Start iterates startOrder and brings every component online, in

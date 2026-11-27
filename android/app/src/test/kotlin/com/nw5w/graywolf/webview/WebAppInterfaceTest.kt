@@ -36,11 +36,13 @@ class WebAppInterfaceTest {
         adapter: UsbPttAdapter = UsbPttAdapter,
         token: String = "tok",
         requestBtPermission: (String) -> Unit = {},
+        requestBackupSave: (Boolean, String, String) -> Unit = { _, _, _ -> },
     ) = WebAppInterface(
         tokenProvider = { token },
         webView = webView,
         adapter = adapter,
         requestBtPermission = requestBtPermission,
+        requestBackupSave = requestBackupSave,
     )
 
     // -----------------------------------------------------------------------
@@ -183,6 +185,25 @@ class WebAppInterfaceTest {
         iface(requestBtPermission = { captured += it })
             .requestBluetoothPermission("foo'); alert(1)")
         assertEquals(emptyList<String>(), captured)
+    }
+
+    // -----------------------------------------------------------------------
+    // saveBackup — delegates sanitized filename to requestBackupSave lambda
+    // -----------------------------------------------------------------------
+    @Test
+    fun `saveBackup with valid callbackId sanitizes filename and delegates`() {
+        val calls = mutableListOf<Triple<Boolean, String, String>>()
+        iface(requestBackupSave = { hist, name, cb -> calls += Triple(hist, name, cb) })
+            .saveBackup(true, "../evil/graywolf-backup.zip", "bk-1")
+        assertEquals(listOf(Triple(true, ".._evil_graywolf-backup.zip", "bk-1")), calls)
+    }
+
+    @Test
+    fun `saveBackup with malformed callbackId is rejected`() {
+        val calls = mutableListOf<Triple<Boolean, String, String>>()
+        iface(requestBackupSave = { hist, name, cb -> calls += Triple(hist, name, cb) })
+            .saveBackup(false, "graywolf-backup.zip", "bad');alert(1)")
+        assertEquals(emptyList<Triple<Boolean, String, String>>(), calls)
     }
 
     // -----------------------------------------------------------------------

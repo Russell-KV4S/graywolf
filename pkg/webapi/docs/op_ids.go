@@ -331,10 +331,12 @@ const (
 	OpRegisterMapsToken = "registerMapsToken"
 )
 
-// Storage usage — /api/storage/usage. Read-only, cross-platform report
-// of on-disk space used by offline maps, position history, and config.
+// Storage usage & backup/restore — /api/storage/*. Cross-platform
+// reporting plus hot snapshot export and validated staged restore.
 const (
-	OpGetStorageUsage = "getStorageUsage"
+	OpGetStorageUsage      = "getStorageUsage"
+	OpExportStorageBackup  = "exportStorageBackup"
+	OpRestoreStorageBackup = "restoreStorageBackup"
 )
 
 // AX.25 saved + recent connection profiles — /api/ax25/profiles. Pinned
