@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chrissnell/graywolf/pkg/app"
@@ -51,9 +52,12 @@ func main() {
 		logger.Warn("graywolf-android: no GRAYWOLF_DNS_SERVERS; outbound DNS will fail")
 	}
 
+	var readyOnce sync.Once
 	cfg.OnHTTPListenerReady = func() {
-		_, _ = os.Stdout.Write([]byte("\n"))
-		_ = os.Stdout.Sync()
+		readyOnce.Do(func() {
+			_, _ = os.Stdout.Write([]byte("\n"))
+			_ = os.Stdout.Sync()
+		})
 		logger.Info("graywolf-android: listener_ready")
 	}
 
@@ -76,19 +80,27 @@ func main() {
 		})
 	})
 
-	a := app.New(cfg, logger)
-
 	cli, err := platformConnect(ctx, logger, os.Getenv("GRAYWOLF_PLATFORM_SOCKET"))
 	if err != nil {
 		logger.Error("graywolf-android: platformsvc handshake failed", "err", err)
 		os.Exit(1)
 	}
 	defer cli.Close()
-	a.SetPlatformClient(cli)
 
-	if err := a.Run(ctx); err != nil {
-		logger.Error("graywolf-android: exited with error", "err", err)
-		os.Exit(1)
+	for {
+		a := app.New(cfg, logger)
+		a.SetPlatformClient(cli)
+
+		err := a.Run(ctx)
+		if errors.Is(err, app.ErrRestartRequested) {
+			logger.Info("graywolf-android: restarting after database restore")
+			continue
+		}
+		if err != nil {
+			logger.Error("graywolf-android: exited with error", "err", err)
+			os.Exit(1)
+		}
+		break
 	}
 }
 

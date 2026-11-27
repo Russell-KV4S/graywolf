@@ -23,3 +23,13 @@ type StorageUsageResponse struct {
 	Locations  []StorageUsageLocation `json:"locations"`
 	TotalBytes int64                  `json:"total_bytes"`
 }
+
+// StorageRestoreResponse summarizes a validated database restore
+// staged by POST /api/storage/restore.
+type StorageRestoreResponse struct {
+	Staged          bool   `json:"staged"`
+	Restarting      bool   `json:"restarting"`
+	ConfigRestored  bool   `json:"config_restored"`
+	HistoryRestored bool   `json:"history_restored"`
+	Message         string `json:"message"`
+}

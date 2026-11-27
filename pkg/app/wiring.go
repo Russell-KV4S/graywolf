@@ -101,6 +101,22 @@ func (a *App) wireServices(ctx context.Context) error {
 		}
 	}
 
+	// --- Pending database restores ------------------------------------
+	//
+	// Swap any validated `<db>.restore` files staged by POST
+	// /api/storage/restore before opening SQLite handles.
+	if applied, err := configstore.ApplyPendingRestore(a.cfg.DBPath); err != nil {
+		return fmt.Errorf("apply pending config restore: %w", err)
+	} else if applied {
+		a.logger.Info("applied pending config db restore", "path", a.cfg.DBPath)
+	}
+	if applied, err := configstore.ApplyPendingRestore(a.cfg.HistoryDBPath); err != nil {
+		a.logger.Warn("apply pending history restore failed; keeping existing history db",
+			"path", a.cfg.HistoryDBPath, "err", err)
+	} else if applied {
+		a.logger.Info("applied pending history db restore", "path", a.cfg.HistoryDBPath)
+	}
+
 	// --- Configstore ---------------------------------------------------
 	//
 	// Opened synchronously here (not inside the configstore component's
@@ -1488,6 +1504,7 @@ func (a *App) wireHTTP(ctx context.Context) error {
 	apiSrv.SetTxBackendReload(a.txBackendReload)
 	a.positionLogReload = make(chan struct{}, 1)
 	apiSrv.SetPositionLogReload(a.positionLogReload)
+	apiSrv.SetRestartFn(a.RequestRestart)
 
 	// --- Messages wiring on the API server ---------------------------
 	//

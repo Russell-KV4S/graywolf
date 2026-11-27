@@ -15,9 +15,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.util.Log
 import com.nw5w.graywolf.usb.UsbPttAdapter
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -27,7 +30,11 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.nw5w.graywolf.webview.WebAppInterface
 import com.nw5w.graywolf.webview.WebBridgeIds
+import org.json.JSONObject
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
     private lateinit var webView: WebView
@@ -38,6 +45,11 @@ class MainActivity : Activity() {
     // request. Cleared in onRequestPermissionsResult after we post the
     // window.__btResult dispatch back to the WebView.
     private var pendingBtPermCallback: String? = null
+    // Pending file-chooser callback for <input type="file"> (Storage restore).
+    private var pendingFileChooserCallback: ValueCallback<Array<Uri>>? = null
+    // Pending SAF Create Document state for Storage backup export.
+    private var pendingBackupCallback: String? = null
+    private var pendingBackupIncludeHistory: Boolean = false
     // Last status-bar inset (CSS px) handed to the page as --android-inset-top.
     // Re-applied after each navigation; see applyTopInsetToCss (GH #390).
     private var lastTopInsetCssPx: Int = 0
@@ -78,9 +90,44 @@ class MainActivity : Activity() {
                     tokenProvider = { (application as GraywolfApp).bearerToken },
                     webView = it,
                     requestBtPermission = ::requestBluetoothPermission,
+                    requestBackupSave = ::requestBackupSave,
                 ),
                 "GraywolfWebInterface",
             )
+            it.webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(
+                    webView: WebView,
+                    filePathCallback: ValueCallback<Array<Uri>>,
+                    fileChooserParams: FileChooserParams,
+                ): Boolean {
+                    pendingFileChooserCallback?.onReceiveValue(null)
+                    pendingFileChooserCallback = filePathCallback
+                    val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "*/*"
+                        putExtra(
+                            Intent.EXTRA_MIME_TYPES,
+                            arrayOf(
+                                "application/zip",
+                                "application/x-zip-compressed",
+                                "application/octet-stream",
+                                "application/x-sqlite3",
+                                "application/vnd.sqlite3",
+                            ),
+                        )
+                    }
+                    return try {
+                        @Suppress("DEPRECATION")
+                        startActivityForResult(intent, REQ_FILE_CHOOSER)
+                        true
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "file chooser launch failed: $t")
+                        pendingFileChooserCallback = null
+                        filePathCallback.onReceiveValue(null)
+                        false
+                    }
+                }
+            }
             it.webViewClient = object : WebViewClient() {
                 override fun onReceivedError(view: WebView, req: WebResourceRequest, err: WebResourceError) {
                     Log.w(TAG, "webview error code=${err.errorCode} desc=${err.description}")
@@ -270,6 +317,106 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun requestBackupSave(includeHistory: Boolean, filename: String, callbackId: String) {
+        if (!WebBridgeIds.CALLBACK_ID_RE.matches(callbackId)) {
+            Log.w(TAG, "rejected invalid backup callbackId: $callbackId")
+            return
+        }
+        mainHandler.post {
+            pendingBackupCallback?.let { prev ->
+                postBackupSaveResult(prev, false, "superseded")
+            }
+            pendingBackupCallback = callbackId
+            pendingBackupIncludeHistory = includeHistory
+            val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/zip"
+                putExtra(Intent.EXTRA_TITLE, filename)
+            }
+            try {
+                @Suppress("DEPRECATION")
+                startActivityForResult(intent, REQ_BACKUP_SAVE)
+            } catch (t: Throwable) {
+                Log.w(TAG, "backup save picker failed: $t")
+                pendingBackupCallback = null
+                postBackupSaveResult(callbackId, false, t.message ?: "unable to open save picker")
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_FILE_CHOOSER) {
+            val cb = pendingFileChooserCallback
+            pendingFileChooserCallback = null
+            val uris = if (resultCode == RESULT_OK) {
+                WebChromeClient.FileChooserParams.parseResult(resultCode, data)
+                    ?: data?.data?.let { arrayOf(it) }
+            } else {
+                null
+            }
+            cb?.onReceiveValue(uris)
+            return
+        }
+        if (requestCode == REQ_BACKUP_SAVE) {
+            val cbId = pendingBackupCallback
+            pendingBackupCallback = null
+            val includeHist = pendingBackupIncludeHistory
+            val destUri = if (resultCode == RESULT_OK) data?.data else null
+            if (cbId == null) return
+            if (destUri == null) {
+                postBackupSaveResult(cbId, false, "cancelled")
+                return
+            }
+            val token = (application as GraywolfApp).bearerToken
+            thread(name = "backup-save", isDaemon = true) {
+                var conn: HttpURLConnection? = null
+                try {
+                    val endpoint = "http://127.0.0.1:8080/api/storage/backup?include_history=$includeHist"
+                    conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        setRequestProperty("Authorization", "Bearer $token")
+                        connectTimeout = 10_000
+                        readTimeout = 120_000
+                    }
+                    val code = conn.responseCode
+                    if (code != HttpURLConnection.HTTP_OK) {
+                        val errText = conn.errorStream?.bufferedReader()?.readText()?.take(200) ?: ""
+                        throw IOException("HTTP $code $errText".trim())
+                    }
+                    val out = contentResolver.openOutputStream(destUri)
+                        ?: throw IOException("failed to open destination file")
+                    out.use { dst ->
+                        conn.inputStream.use { src ->
+                            src.copyTo(dst)
+                        }
+                    }
+                    postBackupSaveResult(cbId, true, "")
+                } catch (t: Throwable) {
+                    Log.w(TAG, "backup save failed: $t")
+                    try {
+                        DocumentsContract.deleteDocument(contentResolver, destUri)
+                    } catch (_: Throwable) {
+                        // Best-effort cleanup of empty SAF placeholder.
+                    }
+                    postBackupSaveResult(cbId, false, t.message ?: "backup failed")
+                } finally {
+                    conn?.disconnect()
+                }
+            }
+        }
+    }
+
+    private fun postBackupSaveResult(callbackId: String, ok: Boolean, errorMsg: String) {
+        if (!WebBridgeIds.CALLBACK_ID_RE.matches(callbackId)) return
+        val quotedErr = JSONObject.quote(errorMsg)
+        webView.post {
+            val script = "window.__backupSaveResult && window.__backupSaveResult('$callbackId', $ok, $quotedErr)"
+            webView.evaluateJavascript(script, null)
+        }
+    }
+
     private fun startEverything() {
         // We're committing to running, so clear any prior deliberate-stop marker;
         // future USB attaches should launch normally.
@@ -402,6 +549,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        pendingFileChooserCallback?.onReceiveValue(null)
+        pendingFileChooserCallback = null
         // The USB-attach suppression path finish()es in onCreate before webView
         // is built, which skips straight here -- guard the lateinit.
         if (::webView.isInitialized) webView.destroy()
@@ -415,6 +564,8 @@ class MainActivity : Activity() {
         // onRequestPermissionsResult can route the result to the SPA's
         // pending callback instead of the startup-perms code path.
         private const val REQ_BT_PERMS = 0x102
+        private const val REQ_FILE_CHOOSER = 0x103
+        private const val REQ_BACKUP_SAVE = 0x104
         private const val PREFS_NAME = "graywolf-prefs"
         private const val PREF_BATTERY_OPT_REQUESTED = "battery_opt_whitelist_requested_v1"
         private const val PREF_USER_STOPPED_AT = "user_stopped_at_ms_v1"

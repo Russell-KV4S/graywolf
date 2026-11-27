@@ -29,6 +29,7 @@ class WebAppInterface(
     private val webView: WebView,
     private val adapter: UsbPttAdapter = UsbPttAdapter,
     private val requestBtPermission: (callbackId: String) -> Unit = {},
+    private val requestBackupSave: (includeHistory: Boolean, filename: String, callbackId: String) -> Unit = { _, _, _ -> },
 ) {
     @JavascriptInterface
     fun getBearerToken(): String = tokenProvider()
@@ -98,6 +99,25 @@ class WebAppInterface(
             return
         }
         requestBtPermission(callbackId)
+    }
+
+    /**
+     * Launch Android's Storage Access Framework Create Document picker so the
+     * user can save a backup .zip directly from the local Go HTTP server.
+     * Result is posted back via window.__backupSaveResult(callbackId, ok, error).
+     */
+    @JavascriptInterface
+    fun saveBackup(includeHistory: Boolean, filename: String, callbackId: String) {
+        if (!WebBridgeIds.CALLBACK_ID_RE.matches(callbackId)) {
+            Log.w(TAG, "rejected invalid backup callbackId: $callbackId")
+            return
+        }
+        val cleanName = filename
+            .replace('/', '_')
+            .replace('\\', '_')
+            .trim()
+            .ifEmpty { "graywolf-backup.zip" }
+        requestBackupSave(includeHistory, cleanName, callbackId)
     }
 
     companion object {

@@ -145,6 +145,10 @@ type Server struct {
 	pttDeviceSource PttDeviceSource
 
 	demo bool // true when running in screenshot/demo mode; set from Config.Demo
+
+	// restartFn triggers a clean in-process stop + restart (e.g. after
+	// POST /api/storage/restore stages new SQLite database files).
+	restartFn func()
 }
 
 // ActionsService is the narrow surface the webapi handlers consume
@@ -473,6 +477,10 @@ func (s *Server) SetIgateStatusFn(fn func() *igate.Status) { s.igateStatusFn = f
 // GET /api/updates/status returns a synthesized "pending" response
 // rather than panicking.
 func (s *Server) SetUpdatesChecker(c *updatescheck.Checker) { s.updatesChecker = c }
+
+// SetRestartFn installs the callback used by POST /api/storage/restore to
+// trigger a clean in-process restart after staging replacement databases.
+func (s *Server) SetRestartFn(fn func()) { s.restartFn = fn }
 
 // UpdatesReloadCh exposes the updates reload channel to wiring so the
 // checker goroutine can receive on it. The channel itself is owned by
