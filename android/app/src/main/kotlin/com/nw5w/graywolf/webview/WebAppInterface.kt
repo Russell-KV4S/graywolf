@@ -30,7 +30,13 @@ class WebAppInterface(
     private val adapter: UsbPttAdapter = UsbPttAdapter,
     private val requestBtPermission: (callbackId: String) -> Unit = {},
     private val requestBackupSave: (includeHistory: Boolean, filename: String, callbackId: String) -> Unit = { _, _, _ -> },
+    private val onMapFilterPrefsChanged: (rfOnly: Boolean, directRxOnly: Boolean) -> Unit = { _, _ -> },
 ) {
+    @JavascriptInterface
+    fun setMapFilterPrefs(rfOnly: Boolean, directRxOnly: Boolean) {
+        onMapFilterPrefsChanged(rfOnly, directRxOnly)
+    }
+
     @JavascriptInterface
     fun getBearerToken(): String = tokenProvider()
 

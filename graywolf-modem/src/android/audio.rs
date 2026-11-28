@@ -32,13 +32,13 @@ pub fn set_gain_db(db_value: f32) {
 
 /// Bus for outgoing DeviceLevelUpdate messages. Set by the demod thread
 /// (run_demod) before any JNI ingest call can arrive; cleared on stop.
-static LEVEL_TX: OnceLock<Mutex<Option<SyncSender<DeviceLevelUpdate>>>> = OnceLock::new();
+static LEVEL_TX: OnceLock<Mutex<Option<SyncSender<super::ServeEvent>>>> = OnceLock::new();
 
-fn level_tx_slot() -> &'static Mutex<Option<SyncSender<DeviceLevelUpdate>>> {
+fn level_tx_slot() -> &'static Mutex<Option<SyncSender<super::ServeEvent>>> {
     LEVEL_TX.get_or_init(|| Mutex::new(None))
 }
 
-pub fn install_level_tx(tx: SyncSender<DeviceLevelUpdate>) {
+pub(crate) fn install_level_tx(tx: SyncSender<super::ServeEvent>) {
     *level_tx_slot().lock().unwrap() = Some(tx);
 }
 
@@ -132,7 +132,7 @@ pub fn ingest(samples: &[i16], tx: &SyncSender<Vec<i16>>) -> Result<(), ()> {
             let device_id = super::config_state::input_device_id();
             let msg = DeviceLevelUpdate { device_id, peak_dbfs, rms_dbfs, clipping };
             if let Some(level_tx) = level_tx_slot().lock().unwrap().as_ref() {
-                let _ = level_tx.try_send(msg);
+                let _ = level_tx.try_send(super::ServeEvent::Level(msg));
             }
         }
     }

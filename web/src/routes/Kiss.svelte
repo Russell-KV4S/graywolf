@@ -122,6 +122,7 @@
   // open. Refreshable via the Refresh button next to the picker.
   let bondedDevices = $state([]);
   let bondedLoading = $state(false);
+  let bondedFetched = $state(false);
   let bondedError = $state('');
   // Inline save-time validation error. Surfaced via the bonded-device
   // FormField's `error` prop alongside any network error from the
@@ -185,6 +186,7 @@
   // [{vid_pid, product, manufacturer, has_permission}].
   let usbDevices = $state([]);
   let usbLoading = $state(false);
+  let usbFetched = $state(false);
   let usbError = $state('');
 
   let usbDeviceOptions = $derived(
@@ -227,6 +229,7 @@
   // port path manually in the Serial Device input below the dropdown.
   let serialPorts = $state([]);
   let serialPortsLoading = $state(false);
+  let serialPortsFetched = $state(false);
   let serialPortsError = $state('');
 
   let serialPortOptions = $derived(
@@ -372,6 +375,9 @@
       form.type = 'bluetooth';
     }
     saveError = '';
+    bondedFetched = false;
+    usbFetched = false;
+    serialPortsFetched = false;
     // Default AllowTxFromGovernor=true for new tcp-client rows per
     // plan D4. When the operator flips to tcp-client we pre-check
     // the governor-TX checkbox so the common case (outbound TNC for
@@ -382,6 +388,9 @@
   function openEdit(row) {
     editing = row;
     saveError = '';
+    bondedFetched = false;
+    usbFetched = false;
+    serialPortsFetched = false;
     form = {
       ...row,
       tcp_port: String(row.tcp_port ?? ''),
@@ -452,12 +461,13 @@
       }
       return;
     }
-    if (bondedDevices.length === 0 && !bondedLoading && !bondedError) {
+    if (!bondedFetched && !bondedLoading && !bondedError) {
       loadBondedDevices();
     }
   });
 
   async function loadBondedDevices() {
+    bondedFetched = true;
     bondedLoading = true;
     bondedError = '';
     try {
@@ -526,12 +536,13 @@
       }
       return;
     }
-    if (usbDevices.length === 0 && !usbLoading && !usbError) {
+    if (!usbFetched && !usbLoading && !usbError) {
       loadUsbDevices();
     }
   });
 
   async function loadUsbDevices() {
+    usbFetched = true;
     usbLoading = true;
     usbError = '';
     try {
@@ -551,12 +562,13 @@
   // back to satisfied — the operator can clear an error and click Refresh.
   $effect(() => {
     if (form.type !== 'serial' || !modalOpen) return;
-    if (serialPorts.length === 0 && !serialPortsLoading && !serialPortsError) {
+    if (!serialPortsFetched && !serialPortsLoading && !serialPortsError) {
       loadSerialPorts();
     }
   });
 
   async function loadSerialPorts() {
+    serialPortsFetched = true;
     serialPortsLoading = true;
     serialPortsError = '';
     try {

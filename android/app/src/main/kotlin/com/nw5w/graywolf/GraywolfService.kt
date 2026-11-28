@@ -28,7 +28,11 @@ import com.nw5w.graywolf.audio.AudioTxPump
 import com.nw5w.graywolf.binaries.GoLauncher
 import com.nw5w.graywolf.binaries.Supervisor
 import com.nw5w.graywolf.gps.GpsAdapter
+import com.nw5w.graywolf.jni.AudioRxCallback
 import com.nw5w.graywolf.jni.ModemBridge
+import com.nw5w.graywolf.notify.MessageNotificationManager
+import com.nw5w.graywolf.api.GraywolfLocalApi
+import com.nw5w.graywolf.wear.WearBridgeService
 import com.nw5w.graywolf.platformsvc.BtSerialAdapter
 import com.nw5w.graywolf.platformsvc.BindContendedException
 import com.nw5w.graywolf.platformsvc.PlatformServer
@@ -49,6 +53,7 @@ class GraywolfService : Service() {
     @Volatile private var goLauncher: GoLauncher? = null
     private var platformServer: PlatformServer? = null
     private var gpsAdapter: GpsAdapter? = null
+    private var messageNotificationManager: MessageNotificationManager? = null
     // Worker that runs the blocking audio/USB HAL init off the main thread
     // (see onCreate). onDestroy joins it before tearing those resources down.
     @Volatile private var startupThread: Thread? = null
@@ -200,18 +205,35 @@ class GraywolfService : Service() {
         }
         goLauncher = launcher
         goListenerReady = true
+        startMessageNotifications()
         Log.i(TAG, "poc-b: go_child_up")
         return true
+    }
+
+    private fun startMessageNotifications() {
+        messageNotificationManager?.stop()
+        val api = GraywolfLocalApi(tokenProvider = { (application as GraywolfApp).bearerToken })
+        val mgr = MessageNotificationManager(
+            context = applicationContext,
+            api = api,
+            ownCallProvider = { "Graywolf" },
+            onInboundMessage = { msg ->
+                WearBridgeService.pushInboundMessageToWatches(applicationContext, msg)
+            },
+        )
+        messageNotificationManager = mgr
+        mgr.start()
     }
 
     private fun supervisorRestart(): Boolean {
         Log.i(TAG, "poc-b: supervisor_restart_begin")
         goListenerReady = false
+        messageNotificationManager?.stop()
+        messageNotificationManager = null
         audioPump.stop()
         goLauncher?.stop()
         ModemBridge.modemStop()
         if (!bootModem()) return false
-        audioPump.start()
         return bootGoChild()
     }
 
@@ -341,6 +363,11 @@ class GraywolfService : Service() {
         val txPump = AudioTxPump(applicationContext)
         audioTxPump = txPump
         ModemBridge.installAudioTxCallback(txPump)
+        ModemBridge.installAudioRxCallback(object : AudioRxCallback {
+            override fun setAudioRxActive(active: Boolean) {
+                if (active) audioPump.start() else audioPump.stop()
+            }
+        })
 
         // USB PTT adapter init is cheap (stores context, gets the USB service,
         // registers a receiver) and must precede enumerate(); keep it on the main
@@ -441,7 +468,6 @@ class GraywolfService : Service() {
                 ModemBridge.modemStop()
                 return@thread
             }
-            audioPump.start()
             if (!bootGoChild()) {              // Correction 1: never orphans the Go child now
                 audioPump.stop()
                 ModemBridge.modemStop()
@@ -520,6 +546,8 @@ class GraywolfService : Service() {
         startupThread = null
         gpsAdapter?.stop()
         gpsAdapter = null
+        messageNotificationManager?.stop()
+        messageNotificationManager = null
         goLauncher?.stop()
         audioPump.stop()
         audioTxPump?.stop()

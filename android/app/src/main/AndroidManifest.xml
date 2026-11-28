@@ -23,6 +23,10 @@
         android:maxSdkVersion="30" />
     <!-- BLUETOOTH_SCAN intentionally omitted: bonded-only, no discovery. -->
 
+    <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
+    <uses-permission android:name="androidx.car.app.MAP_TEMPLATES" />
+    <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
+
     <uses-feature android:name="android.hardware.usb.host" android:required="false"/>
 
     <application
@@ -39,6 +43,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:configChanges="orientation|keyboardHidden|screenSize"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -57,5 +62,38 @@
             android:name=".GraywolfService"
             android:exported="false"
             android:foregroundServiceType="microphone|location|mediaPlayback|connectedDevice"/>
+
+        <receiver
+            android:name=".notify.MessageReplyReceiver"
+            android:exported="false" />
+
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+        <meta-data
+            android:name="androidx.car.app.minCarApiLevel"
+            android:value="1" />
+
+        <service
+            android:name=".car.GraywolfCarAppService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.NAVIGATION" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".wear.WearBridgeService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <action android:name="com.google.android.gms.wearable.REQUEST_RECEIVED" />
+                <data
+                    android:scheme="wear"
+                    android:host="*"
+                    android:pathPrefix="/graywolf" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

@@ -3,6 +3,8 @@ package com.nw5w.graywolf.platformsvc
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
+import android.util.Log
+import java.io.IOException
 import java.util.UUID
 
 /** Simple bonded-device record passed up to Go. */
@@ -21,7 +23,31 @@ class SystemBluetoothFacade(
     private val adapter: BluetoothAdapter?,
 ) : BluetoothFacade {
     companion object {
+        private const val TAG = "SystemBluetoothFacade"
         val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+
+        internal fun connectWithFallback(
+            createSecure: () -> BluetoothSocket,
+            createInsecure: () -> BluetoothSocket,
+            onFallback: (IOException) -> Unit = {},
+        ): BluetoothSocket {
+            val secure = createSecure()
+            try {
+                secure.connect() // blocking; caller MUST be on a worker thread
+                return secure
+            } catch (secureErr: IOException) {
+                try { secure.close() } catch (_: Throwable) {}
+                onFallback(secureErr)
+                val insecure = createInsecure()
+                try {
+                    insecure.connect()
+                    return insecure
+                } catch (insecureErr: IOException) {
+                    try { insecure.close() } catch (_: Throwable) {}
+                    throw insecureErr
+                }
+            }
+        }
     }
 
     override suspend fun bondedDevices(): List<BondedDevice> {
@@ -33,15 +59,19 @@ class SystemBluetoothFacade(
 
     override fun isBonded(mac: String): Boolean {
         val a = adapter ?: return false
-        return a.bondedDevices.orEmpty().any { it.address == mac }
+        return a.bondedDevices.orEmpty().any { it.address.equals(mac, ignoreCase = true) }
     }
 
     override suspend fun connectRfcomm(mac: String): BluetoothSocket {
         val a = adapter ?: error("Bluetooth not available on this device")
         val device: BluetoothDevice = a.getRemoteDevice(mac)
-        val socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
-        socket.connect() // blocking; caller MUST be on a worker thread
-        return socket
+        return connectWithFallback(
+            createSecure = { device.createRfcommSocketToServiceRecord(SPP_UUID) },
+            createInsecure = { device.createInsecureRfcommSocketToServiceRecord(SPP_UUID) },
+            onFallback = { err ->
+                Log.i(TAG, "secure RFCOMM connect failed for $mac (${err.message}); retrying insecure SPP")
+            },
+        )
     }
 }
 

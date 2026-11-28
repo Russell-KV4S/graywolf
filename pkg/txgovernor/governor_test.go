@@ -241,3 +241,18 @@ func TestQueueCapacity(t *testing.T) {
 		t.Errorf("queue_dropped=%d", g.Stats().QueueDropped)
 	}
 }
+
+func TestIdleWakeOnSubmitAfterPause(t *testing.T) {
+	sender := &captureSender{}
+	g := newDeterministic(sender)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go g.Run(ctx)
+
+	// Let the governor settle into its empty-queue idle select, then submit.
+	time.Sleep(120 * time.Millisecond)
+	if err := g.Submit(ctx, 1, makeFrame(t, "after-idle"), SubmitSource{Kind: "kiss", Priority: PriorityClient}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return sender.Count() == 1 }, "wake from idle")
+}

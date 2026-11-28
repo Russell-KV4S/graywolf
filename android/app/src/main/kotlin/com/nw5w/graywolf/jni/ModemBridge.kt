@@ -37,6 +37,15 @@ interface AudioTxCallback {
     fun setTone(active: Boolean, hz: Int)
 }
 
+/**
+ * Called by the Rust modem IPC loop when Go sends StartAudio / StopAudio
+ * (or Shutdown) so Android only holds AudioRecord open while at least one
+ * audio-backed radio channel is enabled.
+ */
+interface AudioRxCallback {
+    fun setAudioRxActive(active: Boolean)
+}
+
 object ModemBridge {
     init {
         // System.loadLibrary("graywolfmodem") matches libgraywolfmodem.so.
@@ -54,4 +63,5 @@ object ModemBridge {
     external fun modemBuildTestFrame(): ShortArray
     external fun installPttCallback(cb: UsbPttCallback)
     external fun installAudioTxCallback(cb: AudioTxCallback)
+    external fun installAudioRxCallback(cb: AudioRxCallback)
 }

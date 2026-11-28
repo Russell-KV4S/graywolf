@@ -1007,6 +1007,10 @@
   // property, so Svelte tracks each one as a dependency.
   $effect(() => {
     localStorage.setItem(LAYER_TOGGLES_KEY, JSON.stringify(layerToggles));
+    globalThis.GraywolfWebInterface?.setMapFilterPrefs?.(
+      !!layerToggles.rfOnly,
+      !!layerToggles.directRxOnly,
+    );
   });
   // Push the layer toggles into the layer modules. We MUST read the
   // reactive value before the optional-chain so Svelte 5 tracks it as a

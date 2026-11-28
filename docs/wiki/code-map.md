@@ -440,6 +440,10 @@ section), [`../handbook/kiss-bluetooth.html`](../handbook/kiss-bluetooth.html),
 | RFCOMM byte relay for KISS-over-Bluetooth | `platformsvc/BtSerialAdapter.kt` -- owns one `BluetoothSocket` per handle; pump pair on worker thread; multiplexes through the platform UDS via `SerialOpen` / `SerialData` / `SerialClose` / `SerialError` proto messages |
 | Audio capture / playback pumps | `audio/AudioPump.kt`, `audio/AudioTxPump.kt`, `audio/AudioTxTest.kt` |
 | GPS adapter | `gps/GpsAdapter.kt` |
+| Local Go REST/SSE client & station history filter | `api/GraywolfLocalApi.kt`, `api/StationHistoryFilter.kt` |
+| Native APRS message notifications & inline reply | `notify/MessageNotificationManager.kt`, `notify/MessageReplyReceiver.kt` |
+| Android Auto projection UI & APRS map surface | `car/GraywolfCarAppService.kt`, `car/GraywolfCarMapScreen.kt`, `car/AprsMapSurfaceRenderer.kt`, `car/AprsMapProjection.kt` |
+| Wear OS phone bridge & companion watch app | `wear/WearBridgeService.kt`, `wear/WearProtocol.kt`, and `android/wear/` (`WearMainActivity.kt`, `PhoneBridgeClient.kt`, `WearModels.kt`, `QuickRepliesStore.kt`) |
 
 The blocking-call-on-worker-thread rule that applies to USB and
 Bluetooth code on this surface is [invariant 35](invariants.md).

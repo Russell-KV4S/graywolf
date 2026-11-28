@@ -12,6 +12,7 @@ class AudioPump {
     private var recorder: AudioRecord? = null
     private var thread: Thread? = null
 
+    @Synchronized
     fun start(sampleRate: Int = 22050) {
         if (running) return
         val minBytes = AudioRecord.getMinBufferSize(
@@ -19,20 +20,39 @@ class AudioPump {
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
-        check(minBytes > 0) { "getMinBufferSize=$minBytes" }
+        if (minBytes <= 0) {
+            Log.w(TAG, "AudioRecord.getMinBufferSize=$minBytes; skipping RX start")
+            return
+        }
         val bufBytes = minBytes * 4
-        val rec = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            bufBytes,
-        )
-        check(rec.state == AudioRecord.STATE_INITIALIZED) {
-            "AudioRecord state=${rec.state}"
+        val rec = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufBytes,
+            )
+        } catch (se: SecurityException) {
+            Log.w(TAG, "AudioRecord permission missing; skipping RX start", se)
+            return
+        } catch (t: Throwable) {
+            Log.w(TAG, "AudioRecord construction failed; skipping RX start: $t")
+            return
+        }
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            Log.w(TAG, "AudioRecord state=${rec.state}; releasing and skipping RX start")
+            try { rec.release() } catch (_: Throwable) {}
+            return
+        }
+        try {
+            rec.startRecording()
+        } catch (t: Throwable) {
+            Log.w(TAG, "AudioRecord.startRecording failed; releasing: $t")
+            try { rec.release() } catch (_: Throwable) {}
+            return
         }
         Log.i(TAG, "AudioRecord init rate=$sampleRate bufBytes=$bufBytes (min=$minBytes)")
-        rec.startRecording()
         recorder = rec
         running = true
         val bufShorts = bufBytes / 2
@@ -52,6 +72,7 @@ class AudioPump {
         }
     }
 
+    @Synchronized
     fun stop() {
         running = false
         thread?.join(2000)

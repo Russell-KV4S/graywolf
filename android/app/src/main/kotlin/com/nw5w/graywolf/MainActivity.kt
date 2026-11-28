@@ -53,9 +53,11 @@ class MainActivity : Activity() {
     // Last status-bar inset (CSS px) handed to the page as --android-inset-top.
     // Re-applied after each navigation; see applyTopInsetToCss (GH #390).
     private var lastTopInsetCssPx: Int = 0
+    private var pendingHashRoute: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingHashRoute = sanitizeHashRoute(intent?.getStringExtra(EXTRA_HASH_ROUTE))
         // If the system auto-relaunched us via USB_DEVICE_ATTACHED right after a
         // deliberate swipe-stop, that "attach" is the radio's USB interfaces
         // (CP2102N/C-Media) re-enumerating when our process released them during
@@ -91,6 +93,9 @@ class MainActivity : Activity() {
                     webView = it,
                     requestBtPermission = ::requestBluetoothPermission,
                     requestBackupSave = ::requestBackupSave,
+                    onMapFilterPrefsChanged = { rfOnly, directRxOnly ->
+                        saveMapFilterPrefs(this, rfOnly, directRxOnly)
+                    },
                 ),
                 "GraywolfWebInterface",
             )
@@ -488,13 +493,26 @@ class MainActivity : Activity() {
         webView.loadData(html, "text/html", "utf-8")
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val route = sanitizeHashRoute(intent.getStringExtra(EXTRA_HASH_ROUTE)) ?: return
+        pendingHashRoute = route
+        if (GraywolfService.goListenerReady && ::webView.isInitialized) {
+            pendingHashRoute = null
+            webView.loadUrl("http://127.0.0.1:8080/${route.removePrefix("/")}")
+        }
+    }
+
     private fun startServiceAndAwaitReady() {
         startForegroundService(Intent(this, GraywolfService::class.java))
         val started = System.currentTimeMillis()
         val r = object : Runnable {
             override fun run() {
                 if (GraywolfService.goListenerReady) {
-                    webView.loadUrl("http://127.0.0.1:8080/")
+                    val route = pendingHashRoute?.removePrefix("/") ?: ""
+                    pendingHashRoute = null
+                    webView.loadUrl("http://127.0.0.1:8080/$route")
                     Log.i(TAG, "poc-b: webview_loaded")
                 } else if (System.currentTimeMillis() - started < 30_000) {
                     mainHandler.postDelayed(this, 250)
@@ -609,6 +627,27 @@ class MainActivity : Activity() {
         fun clearUserStopped(ctx: Context) {
             ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit().remove(PREF_USER_STOPPED_AT).apply()
+        }
+
+        const val EXTRA_HASH_ROUTE = "com.nw5w.graywolf.EXTRA_HASH_ROUTE"
+        private const val PREF_RF_ONLY = "map_filter_rf_only"
+        private const val PREF_DIRECT_RX_ONLY = "map_filter_direct_rx_only"
+        private val HASH_ROUTE_REGEX = Regex("^#/messages\\?thread=(dm|tactical):[A-Za-z0-9_.:-]+$")
+
+        internal fun sanitizeHashRoute(raw: String?): String? =
+            raw?.takeIf { HASH_ROUTE_REGEX.matches(it) }
+
+        fun saveMapFilterPrefs(ctx: Context, rfOnly: Boolean, directRxOnly: Boolean) {
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_RF_ONLY, rfOnly)
+                .putBoolean(PREF_DIRECT_RX_ONLY, directRxOnly)
+                .apply()
+        }
+
+        fun loadMapFilterPrefs(ctx: Context): Pair<Boolean, Boolean> {
+            val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(PREF_RF_ONLY, false) to prefs.getBoolean(PREF_DIRECT_RX_ONLY, false)
         }
     }
 }

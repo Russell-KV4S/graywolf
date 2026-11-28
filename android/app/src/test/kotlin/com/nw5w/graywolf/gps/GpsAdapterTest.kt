@@ -1,6 +1,7 @@
 package com.nw5w.graywolf.gps
 
 import android.content.Context
+import android.location.GnssStatus
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -8,6 +9,8 @@ import com.nw5w.graywolf.platformproto.GpsSource
 import com.nw5w.graywolf.platformsvc.PlatformServer
 import org.junit.Test
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
 import org.mockito.Mockito.mock
@@ -16,6 +19,7 @@ import org.mockito.kotlin.any
 import org.mockito.kotlin.doThrow
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.never
+import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 
@@ -132,5 +136,86 @@ class GpsAdapterTest {
 
         val adapter = GpsAdapter(ctx, mock(PlatformServer::class.java))
         adapter.start() // must not throw
+    }
+
+    @Test fun geoidOffsetCache_hitsWithinThresholdAndMissesBeyond() {
+        val cache = GeoidOffsetCache(maxDegDelta = 0.009)
+        assertNull(cache.lookup(39.7392, -104.9903))
+
+        // Ellipsoid 1600m - MSL 1618m = -18m offset
+        cache.store(39.7392, -104.9903, -18.0)
+
+        val hit = cache.lookup(39.7400, -104.9910)
+        assertNotNull(hit)
+        assertEquals(-18.0, hit!!, 1e-9)
+        assertEquals(1618.0, 1600.0 - hit, 1e-9)
+
+        // > 0.009 deg away misses
+        assertNull(cache.lookup(39.7500, -104.9903))
+        assertNull(cache.lookup(39.7392, -105.0050))
+    }
+
+    @Test fun adaptiveGpsPolicy_relaxesWhenStationaryAndSnapsBackOnMotion() {
+        val policy = AdaptiveGpsPolicy()
+        val lat = 39.7392
+        val lon = -104.9903
+
+        // Initial anchor + first 5 stationary fixes stay at 10s.
+        assertEquals(GpsAdapter.ACTIVE_INTERVAL_MS, policy.onFix(lat, lon, 0f, true))
+        repeat(5) {
+            assertEquals(GpsAdapter.ACTIVE_INTERVAL_MS, policy.onFix(lat, lon, 0.1f, true))
+        }
+        // 6th stationary fix relaxes to 30s.
+        assertEquals(GpsAdapter.STATIONARY_INTERVAL_MS, policy.onFix(lat, lon, 0.0f, true))
+
+        // Speed >= 0.5 m/s snaps immediately back to 10s.
+        assertEquals(GpsAdapter.ACTIVE_INTERVAL_MS, policy.onFix(lat, lon, 1.2f, true))
+        assertEquals(GpsAdapter.ACTIVE_INTERVAL_MS, policy.onFix(lat, lon, 0.0f, true))
+
+        // Reach 30s again, then trigger via >=15m displacement without speed.
+        repeat(5) {
+            policy.onFix(lat, lon, null, false)
+        }
+        assertEquals(GpsAdapter.STATIONARY_INTERVAL_MS, policy.onFix(lat, lon, null, false))
+        assertEquals(GpsAdapter.ACTIVE_INTERVAL_MS, policy.onFix(lat + 0.00025, lon, null, false))
+    }
+
+    @Test fun gnssStatus_throttlesDuplicateCountsWithin5sAndEmitsOnChangeOrTimeout() {
+        var clock = 10_000L
+        val server = mock(PlatformServer::class.java)
+        val adapter = GpsAdapter(mock(Context::class.java), server, nowMs = { clock })
+
+        fun mockStatus(inView: Int, used: Int): GnssStatus {
+            val st = mock(GnssStatus::class.java)
+            `when`(st.satelliteCount).thenReturn(inView)
+            for (i in 0 until inView) {
+                `when`(st.usedInFix(i)).thenReturn(i < used)
+                `when`(st.getSvid(i)).thenReturn(i + 1)
+                `when`(st.getConstellationType(i)).thenReturn(GnssStatus.CONSTELLATION_GPS)
+                `when`(st.getCn0DbHz(i)).thenReturn(35.0f)
+                `when`(st.getElevationDegrees(i)).thenReturn(45.0f)
+                `when`(st.getAzimuthDegrees(i)).thenReturn(90.0f)
+            }
+            return st
+        }
+
+        // First status always broadcasts.
+        adapter.onSatelliteStatus(mockStatus(10, 6))
+        verify(server, times(1)).broadcastGnssStatus(any())
+
+        // 1s later, same counts -> throttled.
+        clock += 1_000L
+        adapter.onSatelliteStatus(mockStatus(10, 6))
+        verify(server, times(1)).broadcastGnssStatus(any())
+
+        // 1s later, sat count changed -> emits immediately.
+        clock += 1_000L
+        adapter.onSatelliteStatus(mockStatus(10, 7))
+        verify(server, times(2)).broadcastGnssStatus(any())
+
+        // 5s later, same counts -> emits after throttle window.
+        clock += 5_000L
+        adapter.onSatelliteStatus(mockStatus(10, 7))
+        verify(server, times(3)).broadcastGnssStatus(any())
     }
 }

@@ -9,6 +9,7 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.location.altitude.AltitudeConverter
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
@@ -18,6 +19,9 @@ import com.nw5w.graywolf.platformproto.GpsSource
 import com.nw5w.graywolf.platformproto.SatInfo
 import com.nw5w.graywolf.platformsvc.PlatformServer
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sqrt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,6 +45,7 @@ import kotlinx.coroutines.launch
 class GpsAdapter(
     private val ctx: Context,
     private val server: PlatformServer,
+    private val nowMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
     // lazy so unit tests can construct GpsAdapter with a mocked Context
     // without resolving the system service (toGpsFix doesn't touch it).
@@ -50,6 +55,14 @@ class GpsAdapter(
 
     @Volatile private var lastSatCount: Int = 0
     @Volatile private var started: Boolean = false
+    @Volatile private var currentIntervalMs: Long = ACTIVE_INTERVAL_MS
+
+    private var lastGnssBroadcastMs: Long = Long.MIN_VALUE
+    private var lastGnssSatsUsed: Int = -1
+    private var lastGnssSatsInView: Int = -1
+
+    private val geoidCache = GeoidOffsetCache()
+    private val adaptivePolicy = AdaptiveGpsPolicy()
 
     // Android Location.altitude is WGS84 ellipsoid height, not "meters above
     // sea level". It can differ from MSL by tens of metres depending on location.
@@ -66,26 +79,43 @@ class GpsAdapter(
 
     private val gnssStatusCallback = object : GnssStatus.Callback() {
         override fun onSatelliteStatusChanged(status: GnssStatus) {
-            var used = 0
-            val builder = GnssStatusUpdate.newBuilder()
-            for (i in 0 until status.satelliteCount) {
-                val isUsed = status.usedInFix(i)
-                if (isUsed) used++
-                builder.addSats(SatInfo.newBuilder()
-                    .setSvid(status.getSvid(i))
-                    .setConstellation(constellationName(status.getConstellationType(i)))
-                    .setCn0Dbhz(status.getCn0DbHz(i).toDouble())
-                    .setUsedInFix(isUsed)
-                    .setElevationDeg(status.getElevationDegrees(i).toDouble())
-                    .setAzimuthDeg(status.getAzimuthDegrees(i).toDouble())
-                    .build())
-            }
-            lastSatCount = used
-            server.broadcastGnssStatus(builder
-                .setSatsInView(status.satelliteCount)
-                .setSatsUsed(used)
+            onSatelliteStatus(status)
+        }
+    }
+
+    internal fun onSatelliteStatus(status: GnssStatus) {
+        val satsInView = status.satelliteCount
+        var used = 0
+        for (i in 0 until satsInView) {
+            if (status.usedInFix(i)) used++
+        }
+        lastSatCount = used
+        val now = nowMs()
+        val countsChanged = used != lastGnssSatsUsed || satsInView != lastGnssSatsInView
+        val elapsed = lastGnssBroadcastMs == Long.MIN_VALUE || (now - lastGnssBroadcastMs) >= GNSS_MIN_BROADCAST_MS
+        if (!countsChanged && !elapsed) {
+            return
+        }
+        lastGnssSatsUsed = used
+        lastGnssSatsInView = satsInView
+        lastGnssBroadcastMs = now
+
+        val builder = GnssStatusUpdate.newBuilder()
+        for (i in 0 until satsInView) {
+            val isUsed = status.usedInFix(i)
+            builder.addSats(SatInfo.newBuilder()
+                .setSvid(status.getSvid(i))
+                .setConstellation(constellationName(status.getConstellationType(i)))
+                .setCn0Dbhz(status.getCn0DbHz(i).toDouble())
+                .setUsedInFix(isUsed)
+                .setElevationDeg(status.getElevationDegrees(i).toDouble())
+                .setAzimuthDeg(status.getAzimuthDegrees(i).toDouble())
                 .build())
         }
+        server.broadcastGnssStatus(builder
+            .setSatsInView(satsInView)
+            .setSatsUsed(used)
+            .build())
     }
 
     fun start() {
@@ -106,13 +136,19 @@ class GpsAdapter(
         }
         try {
             altitudeFailureLogged.set(false)
+            currentIntervalMs = ACTIVE_INTERVAL_MS
+            adaptivePolicy.reset()
+            geoidCache.clear()
+            lastGnssBroadcastMs = Long.MIN_VALUE
+            lastGnssSatsUsed = -1
+            lastGnssSatsInView = -1
             locationManager.requestLocationUpdates(
                 LocationManager.GPS_PROVIDER,
-                10_000L, 0f, locationListener
+                currentIntervalMs, 0f, locationListener
             )
             locationManager.registerGnssStatusCallback(gnssStatusCallback, /* handler = */ null)
             started = true
-            Log.i(TAG, "GpsAdapter started: GPS_PROVIDER 10s/0m + GNSS status callback")
+            Log.i(TAG, "GpsAdapter started: GPS_PROVIDER ${currentIntervalMs}ms/0m + GNSS status callback")
         } catch (se: SecurityException) {
             Log.w(TAG, "GpsAdapter start hit SecurityException: $se")
             rollbackPartialStart()
@@ -170,6 +206,26 @@ class GpsAdapter(
 
     private fun onLocation(loc: Location) {
         val satCount = lastSatCount
+        val desiredInterval = adaptivePolicy.onFix(
+            lat = loc.latitude,
+            lon = loc.longitude,
+            speedMps = if (loc.hasSpeed()) loc.speed else null,
+            hasSpeed = loc.hasSpeed(),
+        )
+        if (started && desiredInterval != currentIntervalMs) {
+            try {
+                locationManager.requestLocationUpdates(
+                    LocationManager.GPS_PROVIDER,
+                    desiredInterval, 0f, locationListener,
+                )
+                currentIntervalMs = desiredInterval
+                Log.i(TAG, "GpsAdapter interval adjusted to ${desiredInterval}ms")
+            } catch (se: SecurityException) {
+                Log.w(TAG, "GpsAdapter interval update hit SecurityException: $se")
+            } catch (iae: IllegalArgumentException) {
+                Log.w(TAG, "GpsAdapter interval update hit IllegalArgumentException: $iae")
+            }
+        }
 
         // Keep all Android 14+ fixes on the serial worker, including those
         // with provider-supplied MSL altitude, so none overtake a conversion.
@@ -184,14 +240,26 @@ class GpsAdapter(
         val converted = Location(loc)
         altitudeScope.launch {
             if (!converted.hasMslAltitude() && converted.hasAltitude()) {
-                try {
-                    Api34AltitudeConverter.addMslAltitude(ctx, converted)
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (e: Exception) {
-                    ensureActive()
-                    if (altitudeFailureLogged.compareAndSet(false, true)) {
-                        Log.w(TAG, "MSL altitude conversion failed; omitting altitude for unconverted fixes", e)
+                val cachedOffset = geoidCache.lookup(converted.latitude, converted.longitude)
+                if (cachedOffset != null) {
+                    converted.mslAltitudeMeters = converted.altitude - cachedOffset
+                } else {
+                    try {
+                        Api34AltitudeConverter.addMslAltitude(ctx, converted)
+                        if (converted.hasMslAltitude()) {
+                            geoidCache.store(
+                                converted.latitude,
+                                converted.longitude,
+                                converted.altitude - converted.mslAltitudeMeters,
+                            )
+                        }
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (e: Exception) {
+                        ensureActive()
+                        if (altitudeFailureLogged.compareAndSet(false, true)) {
+                            Log.w(TAG, "MSL altitude conversion failed; omitting altitude for unconverted fixes", e)
+                        }
                     }
                 }
             }
@@ -230,5 +298,95 @@ class GpsAdapter(
         }
     }
 
-    companion object { private const val TAG = "GpsAdapter" }
+    companion object {
+        private const val TAG = "GpsAdapter"
+        internal const val ACTIVE_INTERVAL_MS = 10_000L
+        internal const val STATIONARY_INTERVAL_MS = 30_000L
+        internal const val GNSS_MIN_BROADCAST_MS = 5_000L
+    }
+}
+
+/**
+ * Caches the local geoid separation (ellipsoid - MSL, in metres) within
+ * ~1 km (~0.009 deg) so stationary / neighborhood fixes skip repeated
+ * AltitudeConverter lookups.
+ */
+internal class GeoidOffsetCache(private val maxDegDelta: Double = 0.009) {
+    private var hasEntry = false
+    private var anchorLat = 0.0
+    private var anchorLon = 0.0
+    private var offsetM = 0.0
+
+    @Synchronized
+    fun lookup(lat: Double, lon: Double): Double? {
+        if (!hasEntry) return null
+        if (abs(lat - anchorLat) <= maxDegDelta && abs(lon - anchorLon) <= maxDegDelta) {
+            return offsetM
+        }
+        return null
+    }
+
+    @Synchronized
+    fun store(lat: Double, lon: Double, offsetM: Double) {
+        anchorLat = lat
+        anchorLon = lon
+        this.offsetM = offsetM
+        hasEntry = true
+    }
+
+    @Synchronized
+    fun clear() {
+        hasEntry = false
+    }
+}
+
+/**
+ * Relaxes GPS update interval from 10s to 30s after 6 consecutive stationary
+ * fixes, and snaps immediately back to 10s on movement.
+ */
+internal class AdaptiveGpsPolicy(
+    private val activeIntervalMs: Long = GpsAdapter.ACTIVE_INTERVAL_MS,
+    private val stationaryIntervalMs: Long = GpsAdapter.STATIONARY_INTERVAL_MS,
+    private val stationarySpeedMps: Float = 0.5f,
+    private val stationaryDispM: Double = 15.0,
+    private val stationaryThreshold: Int = 6,
+) {
+    private var hasAnchor = false
+    private var anchorLat = 0.0
+    private var anchorLon = 0.0
+    private var stationaryCount = 0
+
+    @Synchronized
+    fun reset() {
+        hasAnchor = false
+        stationaryCount = 0
+    }
+
+    @Synchronized
+    fun onFix(lat: Double, lon: Double, speedMps: Float?, hasSpeed: Boolean): Long {
+        if (!hasAnchor) {
+            hasAnchor = true
+            anchorLat = lat
+            anchorLon = lon
+            stationaryCount = 0
+            return activeIntervalMs
+        }
+        val movingBySpeed = hasSpeed && speedMps != null && speedMps >= stationarySpeedMps
+        val dispM = approxMeters(anchorLat, anchorLon, lat, lon)
+        if (movingBySpeed || dispM >= stationaryDispM) {
+            anchorLat = lat
+            anchorLon = lon
+            stationaryCount = 0
+            return activeIntervalMs
+        }
+        stationaryCount++
+        return if (stationaryCount >= stationaryThreshold) stationaryIntervalMs else activeIntervalMs
+    }
+
+    private fun approxMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val meanLatRad = Math.toRadians((lat1 + lat2) * 0.5)
+        val dy = (lat2 - lat1) * 111_320.0
+        val dx = (lon2 - lon1) * 111_320.0 * cos(meanLatRad)
+        return sqrt(dx * dx + dy * dy)
+    }
 }

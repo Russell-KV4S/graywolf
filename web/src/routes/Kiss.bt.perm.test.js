@@ -142,3 +142,64 @@ test('previous __btResult dispatcher is restored after the callback fires', () =
   // Restored, not deleted, because there was a prior handler.
   assert.equal(globalThis.__btResult, priorDispatcher);
 });
+
+// Lazy-loader fetch-once guard: prevents Svelte $effect from spinning forever
+// on Loading... when the backend returns [] (e.g. before BLUETOOTH_CONNECT is
+// granted), while still allowing explicit Refresh / modal reopen to fetch again.
+function createLazyLoader({ fetchDevices }) {
+  const state = { devices: [], loading: false, fetched: false, error: '' };
+  async function load() {
+    state.fetched = true;
+    state.loading = true;
+    state.error = '';
+    try {
+      const resp = await fetchDevices();
+      state.devices = resp?.devices ?? [];
+    } catch (err) {
+      state.error = err?.message ?? 'Failed to load';
+    } finally {
+      state.loading = false;
+    }
+  }
+  async function runEffect(modalOpen) {
+    if (!modalOpen) return false;
+    if (!state.fetched && !state.loading && !state.error) {
+      await load();
+      return true;
+    }
+    return false;
+  }
+  function resetOnOpen() {
+    state.fetched = false;
+  }
+  return { state, load, runEffect, resetOnOpen };
+}
+
+test('lazy-loader does not re-trigger on empty device list once fetched', async () => {
+  let calls = 0;
+  const loader = createLazyLoader({
+    fetchDevices: async () => {
+      calls++;
+      return { devices: [] };
+    },
+  });
+
+  // First effect run loads once.
+  assert.equal(await loader.runEffect(true), true);
+  assert.equal(calls, 1);
+  assert.equal(loader.state.loading, false);
+  assert.equal(loader.state.devices.length, 0);
+
+  // Subsequent reactive re-runs with [] must NOT loop.
+  assert.equal(await loader.runEffect(true), false);
+  assert.equal(calls, 1);
+
+  // Explicit refresh still works.
+  await loader.load();
+  assert.equal(calls, 2);
+
+  // Reopening the modal resets fetched and reloads once.
+  loader.resetOnOpen();
+  assert.equal(await loader.runEffect(true), true);
+  assert.equal(calls, 3);
+});

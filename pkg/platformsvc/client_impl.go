@@ -20,10 +20,11 @@ var clientBuildVersion = "v0.0.0-dev"
 type clientImpl struct {
 	socketPath string
 
-	mu      sync.Mutex
-	conn    net.Conn
-	closed  atomic.Bool
-	closeCh chan struct{}
+	mu           sync.Mutex
+	conn         net.Conn
+	closed       atomic.Bool
+	closeCh      chan struct{}
+	disconnectCh chan struct{}
 
 	// writeMu serializes writeFrame calls on c.conn. The frame format is
 	// [4-byte length][payload], split across two Write calls in writeFrame,
@@ -53,8 +54,9 @@ type clientImpl struct {
 
 func newClient(socketPath string) Client {
 	return &clientImpl{
-		socketPath: socketPath,
-		closeCh:    make(chan struct{}),
+		socketPath:   socketPath,
+		closeCh:      make(chan struct{}),
+		disconnectCh: make(chan struct{}, 1),
 	}
 }
 
@@ -75,19 +77,18 @@ func (c *clientImpl) ConnectWithReconnect(ctx context.Context) error {
 
 func (c *clientImpl) reconnectLoop(ctx context.Context) {
 	for {
-		// Wait until current conn drops.
+		// Wait until current conn drops. Block on disconnectCh instead of
+		// polling every 50 ms while connected.
 		c.mu.Lock()
 		conn := c.conn
 		c.mu.Unlock()
-		if conn == nil {
-			// Already disconnected; back off and retry.
-		} else {
+		if conn != nil {
 			select {
 			case <-c.closeCh:
 				return
 			case <-ctx.Done():
 				return
-			case <-time.After(50 * time.Millisecond):
+			case <-c.disconnectCh:
 				continue
 			}
 		}
@@ -237,6 +238,10 @@ func (c *clientImpl) handleDisconnect(_ error) {
 		close(respCh)
 	}
 	c.drainSerialHandles()
+	select {
+	case c.disconnectCh <- struct{}{}:
+	default:
+	}
 }
 
 func (c *clientImpl) Close() error {

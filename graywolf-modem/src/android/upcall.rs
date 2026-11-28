@@ -50,6 +50,20 @@ mod android_impl {
         AUDIO_TX_CB.get_or_init(|| Mutex::new(None))
     }
 
+    // ── AudioRx callback storage ──────────────────────────────────────────────
+
+    struct AudioRxCallback {
+        obj: GlobalRef,
+        method: JMethodID, // setAudioRxActive(Z)V
+    }
+    unsafe impl Send for AudioRxCallback {}
+
+    static AUDIO_RX_CB: OnceLock<Mutex<Option<AudioRxCallback>>> = OnceLock::new();
+
+    fn audio_rx_slot() -> &'static Mutex<Option<AudioRxCallback>> {
+        AUDIO_RX_CB.get_or_init(|| Mutex::new(None))
+    }
+
     // ── Install helpers (called from JNI exports in mod.rs) ──────────────────
 
     /// Store the Kotlin `UsbPttCallback` instance + resolved `pttSet(IZ)Z` method ID.
@@ -120,6 +134,34 @@ mod android_impl {
         };
         *audio_tx_slot().lock().unwrap() = Some(AudioTxCallback { obj: global, method, tone });
         log::info!("installAudioTxCallback: installed");
+    }
+
+    /// Store the Kotlin `AudioRxCallback` instance + resolved `setAudioRxActive(Z)V`
+    /// method ID. Replaces any prior installation.
+    pub(crate) fn install_audio_rx(env: &mut jni::JNIEnv<'_>, obj: JObject<'_>) {
+        let global = match env.new_global_ref(&obj) {
+            Ok(g) => g,
+            Err(e) => {
+                error!("installAudioRxCallback: new_global_ref failed: {e}");
+                return;
+            }
+        };
+        let class = match env.get_object_class(&obj) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("installAudioRxCallback: get_object_class failed: {e}");
+                return;
+            }
+        };
+        let method = match env.get_method_id(&class, "setAudioRxActive", "(Z)V") {
+            Ok(m) => m,
+            Err(e) => {
+                error!("installAudioRxCallback: get_method_id(setAudioRxActive) failed: {e}");
+                return;
+            }
+        };
+        *audio_rx_slot().lock().unwrap() = Some(AudioRxCallback { obj: global, method });
+        log::info!("installAudioRxCallback: installed");
     }
 
     // ── Upcall helpers ────────────────────────────────────────────────────────
@@ -278,6 +320,39 @@ mod android_impl {
 
         Ok(())
     }
+
+    /// Invoke `AudioRxCallback.setAudioRxActive(active) -> void`.
+    pub(crate) fn jni_audio_rx_set_active(active: bool) -> Result<(), String> {
+        let vm = get_vm()?;
+
+        let (callback, method_id) = {
+            let slot = audio_rx_slot().lock().unwrap();
+            let cb = slot
+                .as_ref()
+                .ok_or_else(|| "no AudioRx callback installed".to_string())?;
+            (cb.obj.clone(), cb.method)
+        };
+
+        let mut env = vm
+            .attach_current_thread()
+            .map_err(|e| format!("setAudioRxActive: attach_current_thread: {e}"))?;
+
+        let active_jni: jni::sys::jboolean = active as u8;
+
+        // SAFETY: method ID was resolved against the same object class at
+        // install time; GlobalRef keeps the object alive.
+        unsafe {
+            env.call_method_unchecked(
+                callback.as_obj(),
+                method_id,
+                jni::signature::ReturnType::Primitive(jni::signature::Primitive::Void),
+                &[jni::sys::jvalue { z: active_jni }],
+            )
+        }
+        .map_err(|e| format!("setAudioRxActive JNI call failed: {e}"))?;
+
+        Ok(())
+    }
 }
 
 // ── Host stub (android-test-stub feature) ────────────────────────────────────
@@ -291,6 +366,7 @@ mod stub_impl {
     static AUDIO_TX_MOCK: Mutex<Option<Box<dyn Fn(&[i16]) -> i32 + Send + Sync>>> =
         Mutex::new(None);
     static TONE_MOCK: Mutex<Option<Box<dyn Fn(bool, i32) + Send + Sync>>> = Mutex::new(None);
+    static AUDIO_RX_MOCK: Mutex<Option<Box<dyn Fn(bool) + Send + Sync>>> = Mutex::new(None);
 
     /// Test-only: install a closure that receives `pttSet(method, keyed)` calls.
     /// Returns the `bool` the closure produces; `true` → `Ok(())`, `false` → `Err`.
@@ -318,11 +394,20 @@ mod stub_impl {
         *TONE_MOCK.lock().unwrap() = Some(Box::new(f));
     }
 
+    /// Test-only: install a closure that receives `setAudioRxActive(active)` calls.
+    pub fn install_audio_rx_mock<F>(f: F)
+    where
+        F: Fn(bool) + Send + Sync + 'static,
+    {
+        *AUDIO_RX_MOCK.lock().unwrap() = Some(Box::new(f));
+    }
+
     /// Test-only: clear all mocks. Call between test cases to reset state.
     pub fn clear_mocks() {
         *PTT_MOCK.lock().unwrap() = None;
         *AUDIO_TX_MOCK.lock().unwrap() = None;
         *TONE_MOCK.lock().unwrap() = None;
+        *AUDIO_RX_MOCK.lock().unwrap() = None;
     }
 
     pub(crate) fn jni_ptt_set(method: i32, keyed: bool) -> Result<(), String> {
@@ -353,19 +438,33 @@ mod stub_impl {
         f(active, hz);
         Ok(())
     }
+
+    pub(crate) fn jni_audio_rx_set_active(active: bool) -> Result<(), String> {
+        let guard = AUDIO_RX_MOCK.lock().unwrap();
+        let f = guard
+            .as_ref()
+            .ok_or_else(|| "no AudioRx callback installed".to_string())?;
+        f(active);
+        Ok(())
+    }
 }
 
 // ── Public surface — re-export whichever impl is active ──────────────────────
 
 #[cfg(all(target_os = "android", not(feature = "android-test-stub")))]
 pub(crate) use android_impl::{
-    install_audio_tx, install_ptt, jni_audio_set_tone, jni_ptt_set, jni_tx_push_samples,
+    install_audio_rx, install_audio_tx, install_ptt, jni_audio_rx_set_active, jni_audio_set_tone,
+    jni_ptt_set, jni_tx_push_samples,
 };
 
 #[cfg(feature = "android-test-stub")]
-pub(crate) use stub_impl::{jni_audio_set_tone, jni_ptt_set, jni_tx_push_samples};
+pub(crate) use stub_impl::{
+    jni_audio_rx_set_active, jni_audio_set_tone, jni_ptt_set, jni_tx_push_samples,
+};
 #[cfg(feature = "android-test-stub")]
-pub use stub_impl::{clear_mocks, install_audio_tx_mock, install_ptt_mock, install_tone_mock};
+pub use stub_impl::{
+    clear_mocks, install_audio_rx_mock, install_audio_tx_mock, install_ptt_mock, install_tone_mock,
+};
 
 // (When building on the host without either flag, this module exposes nothing
 //  and the android/ pub mod declaration below is itself cfg-gated, so the
@@ -376,10 +475,41 @@ pub use stub_impl::{clear_mocks, install_audio_tx_mock, install_ptt_mock, instal
 #[cfg(all(test, feature = "android-test-stub"))]
 mod tests {
     use super::stub_impl::{
-        clear_mocks, install_audio_tx_mock, install_ptt_mock, install_tone_mock,
+        clear_mocks, install_audio_rx_mock, install_audio_tx_mock, install_ptt_mock,
+        install_tone_mock,
     };
-    use super::{jni_audio_set_tone, jni_ptt_set, jni_tx_push_samples};
+    use super::{
+        jni_audio_rx_set_active, jni_audio_set_tone, jni_ptt_set, jni_tx_push_samples,
+    };
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn audio_rx_set_active_without_mock_returns_err() {
+        clear_mocks();
+        let err = jni_audio_rx_set_active(true).unwrap_err();
+        assert!(
+            err.contains("no AudioRx callback installed"),
+            "unexpected message: {err}"
+        );
+        clear_mocks();
+    }
+
+    #[test]
+    #[serial]
+    fn audio_rx_set_active_forwards_flag_to_mock() {
+        use std::sync::{Arc, Mutex};
+        clear_mocks();
+        let seen: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        install_audio_rx_mock(move |active| {
+            seen2.lock().unwrap().push(active);
+        });
+        jni_audio_rx_set_active(true).expect("ok when mock installed");
+        jni_audio_rx_set_active(false).expect("ok when mock installed");
+        assert_eq!(*seen.lock().unwrap(), vec![true, false]);
+        clear_mocks();
+    }
 
     #[test]
     #[serial]
@@ -498,8 +628,10 @@ mod tests {
     fn clear_mocks_resets_both_callbacks() {
         install_ptt_mock(|_, _| true);
         install_audio_tx_mock(|_| 0);
+        install_audio_rx_mock(|_| {});
         clear_mocks();
         assert!(jni_ptt_set(1, true).is_err());
         assert!(jni_tx_push_samples(&[1]).is_err());
+        assert!(jni_audio_rx_set_active(true).is_err());
     }
 }

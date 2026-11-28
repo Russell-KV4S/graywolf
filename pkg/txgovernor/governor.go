@@ -350,11 +350,43 @@ func (g *Governor) Run(ctx context.Context) error {
 	// Fan in DCD events into the governor state.
 	go g.dcdWatcher(ctx)
 
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
+	var retryTimer *time.Timer
+	stopTimer := func() {
+		if retryTimer != nil {
+			if !retryTimer.Stop() {
+				select {
+				case <-retryTimer.C:
+				default:
+				}
+			}
+		}
+	}
+	defer stopTimer()
+
 	for {
 		g.processOne(ctx)
 
+		if !g.hasPending() {
+			stopTimer()
+			select {
+			case <-ctx.Done():
+				g.mu.Lock()
+				g.closed = true
+				g.mu.Unlock()
+				return nil
+			case <-g.wake:
+			}
+			continue
+		}
+
+		// Items remain queued (DCD-blocked or rate-limited): poll at 50 ms
+		// until they clear, while still waking immediately on DCD drop or Submit.
+		if retryTimer == nil {
+			retryTimer = time.NewTimer(50 * time.Millisecond)
+		} else {
+			stopTimer()
+			retryTimer.Reset(50 * time.Millisecond)
+		}
 		select {
 		case <-ctx.Done():
 			g.mu.Lock()
@@ -362,9 +394,15 @@ func (g *Governor) Run(ctx context.Context) error {
 			g.mu.Unlock()
 			return nil
 		case <-g.wake:
-		case <-ticker.C:
+		case <-retryTimer.C:
 		}
 	}
+}
+
+func (g *Governor) hasPending() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.q) > 0
 }
 
 func (g *Governor) dcdWatcher(ctx context.Context) {

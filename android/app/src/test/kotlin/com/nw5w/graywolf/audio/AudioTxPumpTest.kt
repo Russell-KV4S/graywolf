@@ -9,6 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.inOrder
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
@@ -60,8 +61,8 @@ class AudioTxPumpTest {
 
         // setPreferredDevice must NOT be called when there is no USB device.
         verify(track, never()).setPreferredDevice(any())
-        // The pump must still call play() — it falls back, not fails.
-        verify(track).play()
+        // Idle-paused at start: play() is deferred until pushSamples().
+        verify(track, never()).play()
     }
 
     // -----------------------------------------------------------------------
@@ -76,7 +77,7 @@ class AudioTxPumpTest {
         pump.start()
 
         verify(track).setPreferredDevice(usbDevice)
-        verify(track).play()
+        verify(track, never()).play()
         // routedDevice is private; we verify indirectly via stop not crashing
         // and via the setPreferredDevice call above reflecting the USB name.
         // No assertion on the field itself — keep production class clean.
@@ -166,5 +167,37 @@ class AudioTxPumpTest {
         pump.pushSamples(shortArrayOf(100, 200, 300), 3)
 
         assertEquals(listOf<Short>(100, 200, 300), written)
+    }
+
+    @Test fun `pushSamples plays before write and stops after write`() {
+        val (ctx, _) = contextWith()
+        val track = mock<AudioTrack>()
+        whenever(track.write(any<ShortArray>(), any(), any(), any())).thenReturn(3)
+        val pump = AudioTxPump(ctx) { _ -> track }
+
+        pump.start(22050)
+        pump.pushSamples(shortArrayOf(1, 2, 3), 3)
+
+        val ordered = inOrder(track)
+        ordered.verify(track).play()
+        ordered.verify(track).write(any<ShortArray>(), any(), any(), any())
+        ordered.verify(track).stop()
+    }
+
+    @Test fun `pushSamples still stops track when write throws`() {
+        val (ctx, _) = contextWith()
+        val track = mock<AudioTrack>()
+        whenever(track.write(any<ShortArray>(), any(), any(), any())).thenThrow(IllegalStateException("boom"))
+        val pump = AudioTxPump(ctx) { _ -> track }
+
+        pump.start(22050)
+        try {
+            pump.pushSamples(shortArrayOf(1, 2, 3), 3)
+        } catch (_: IllegalStateException) {
+            // expected
+        }
+
+        verify(track).play()
+        verify(track).stop()
     }
 }

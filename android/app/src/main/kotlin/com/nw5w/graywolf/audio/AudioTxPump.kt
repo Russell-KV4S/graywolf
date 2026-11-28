@@ -11,10 +11,10 @@ import android.util.Log
 import com.nw5w.graywolf.jni.AudioTxCallback
 
 /**
- * Streaming AudioTrack TX pump. Symmetric to AudioPump (RX). Stays in PLAY
- * state from Service boot; PCM only flows when the Rust modem TX governor
- * pushes samples via pushSamples(). Auto-routes to the first USB audio output;
- * falls back to system default if none is found. Hot-swap is handled via an
+ * Streaming AudioTrack TX pump. Symmetric to AudioPump (RX). Stays constructed
+ * and USB-routed from Service boot, but idles stopped until pushSamples()
+ * enters play() and returns to stop() once the write drains, so AudioFlinger
+ * and USB audio output don't stay active 24/7. Hot-swap is handled via an
  * AudioManager.AudioDeviceCallback registered in start().
  *
  * Pass an Application context to avoid leaking the Service.
@@ -83,7 +83,6 @@ class AudioTxPump(
 
         val t = buildTrack(stereo)
         routeToUsb(t)
-        t.play()
         track = t
 
         // Register for hot-swap notifications.
@@ -191,7 +190,6 @@ class AudioTxPump(
         osc = if (wantStereo) ToneOscillator(sampleRate) else null
         val t = buildTrack(wantStereo)
         routeToUsb(t)
-        t.play()
         track = t
         Log.i(TAG, "AudioTxPump rebuilt stereo=$wantStereo routed=$routedDevice")
     }
@@ -214,19 +212,26 @@ class AudioTxPump(
     @Synchronized
     override fun pushSamples(samples: ShortArray, count: Int): Int {
         val t = track ?: return -1
-        if (!stereo) {
-            return t.write(samples, 0, count, AudioTrack.WRITE_BLOCKING)
+        t.play()
+        try {
+            if (!stereo) {
+                return t.write(samples, 0, count, AudioTrack.WRITE_BLOCKING)
+            }
+            // Stereo (Digirig Lite tone PTT): L = AFSK, R = keying tone (while
+            // active) or silence (idle). The radio keys on the right channel.
+            if (stereoScratch.size < count * 2) stereoScratch = ShortArray(count * 2)
+            val o = osc
+            val emitTone = toneActive && o != null
+            for (i in 0 until count) {
+                stereoScratch[i * 2] = samples[i]
+                stereoScratch[i * 2 + 1] = if (emitTone) o!!.nextI16() else 0
+            }
+            return t.write(stereoScratch, 0, count * 2, AudioTrack.WRITE_BLOCKING)
+        } finally {
+            // In MODE_STREAM, stop() lets already-written tail samples drain
+            // before pausing the AudioFlinger / USB output stream.
+            try { t.stop() } catch (_: Throwable) {}
         }
-        // Stereo (Digirig Lite tone PTT): L = AFSK, R = keying tone (while
-        // active) or silence (idle). The radio keys on the right channel.
-        if (stereoScratch.size < count * 2) stereoScratch = ShortArray(count * 2)
-        val o = osc
-        val emitTone = toneActive && o != null
-        for (i in 0 until count) {
-            stereoScratch[i * 2] = samples[i]
-            stereoScratch[i * 2 + 1] = if (emitTone) o!!.nextI16() else 0
-        }
-        return t.write(stereoScratch, 0, count * 2, AudioTrack.WRITE_BLOCKING)
     }
 
     @Synchronized

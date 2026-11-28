@@ -2,9 +2,10 @@
 
 #![cfg(target_os = "android")]
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -22,9 +23,9 @@ use crate::demod_afsk_multi::{MultiAfskDemodulator, RECOMMENDED_3DEMOD};
 use crate::ipc::proto::{
     ipc_message, DeviceLevelUpdate, IpcMessage, ReceivedFrame, StatusUpdate, TestSignalResult,
 };
-use crate::ipc::server::{IpcInbound, IpcServer};
+use crate::ipc::server::{IpcHandle, IpcInbound, IpcServer};
 use crate::modem::tx_worker::{TxJob, TxWorker};
-use crate::rxonly::feed_chunk;
+use crate::rxonly::SquelchGate;
 use crate::tx::ptt::PortRegistry;
 
 pub mod audio;
@@ -35,8 +36,17 @@ pub mod upcall;
 const LOG_TAG: &str = "graywolfmodem";
 const TARGET_SAMPLE_RATE: u32 = 22_050;
 
+pub(crate) enum ServeEvent {
+    Frame(ReceivedFrame),
+    Level(DeviceLevelUpdate),
+    Inbound(IpcInbound),
+    IpcClosed,
+    Stop,
+}
+
 struct ModemState {
     audio_tx: SyncSender<Vec<i16>>,
+    serve_tx: SyncSender<ServeEvent>,
     stop: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
     demod_join: Option<JoinHandle<()>>,
@@ -103,15 +113,17 @@ pub extern "system" fn Java_com_nw5w_graywolf_jni_ModemBridge_modemStart<'local>
     audio::set_gain_db(initial_gain_db as f32);
 
     let (tx, rx) = sync_channel::<Vec<i16>>(64);
+    let (serve_tx, serve_rx) = sync_channel::<ServeEvent>(128);
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(AtomicBool::new(false));
     let stop_for_thread = stop.clone();
     let ready_for_thread = ready.clone();
+    let serve_tx_for_thread = serve_tx.clone();
 
     let join = thread::Builder::new()
         .name("graywolfmodem-demod".into())
         .spawn(move || {
-            if let Err(e) = run_demod(path, rx, stop_for_thread, ready_for_thread) {
+            if let Err(e) = run_demod(path, rx, serve_tx_for_thread, serve_rx, stop_for_thread, ready_for_thread) {
                 error!("demod thread exited: {}", e);
             }
         });
@@ -125,6 +137,7 @@ pub extern "system" fn Java_com_nw5w_graywolf_jni_ModemBridge_modemStart<'local>
 
     *slot = Some(ModemState {
         audio_tx: tx,
+        serve_tx,
         stop,
         ready,
         demod_join: Some(join),
@@ -168,22 +181,28 @@ pub extern "system" fn Java_com_nw5w_graywolf_jni_ModemBridge_modemPushSamples<'
     if len <= 0 {
         return;
     }
+    thread_local! {
+        static SCRATCH: RefCell<Vec<i16>> = const { RefCell::new(Vec::new()) };
+    }
     // SAFETY: jshortArray is a borrow we read region-wise; Kotlin retains
     // ownership of the underlying short[].
     let arr = unsafe { jni::objects::JShortArray::from_raw(buf) };
-    let mut scratch = vec![0i16; len as usize];
-    if let Err(e) = env.get_short_array_region(&arr, 0, &mut scratch) {
-        error!("get_short_array_region: {}", e);
-        return;
-    }
-    let tx = {
-        let slot = state_slot().lock().unwrap();
-        match slot.as_ref() {
-            Some(s) => s.audio_tx.clone(),
-            None => return,
+    SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        scratch.resize(len as usize, 0);
+        if let Err(e) = env.get_short_array_region(&arr, 0, &mut scratch) {
+            error!("get_short_array_region: {}", e);
+            return;
         }
-    };
-    let _ = audio::ingest(&scratch, &tx);
+        let tx = {
+            let slot = state_slot().lock().unwrap();
+            match slot.as_ref() {
+                Some(s) => s.audio_tx.clone(),
+                None => return,
+            }
+        };
+        let _ = audio::ingest(&scratch, &tx);
+    });
 }
 
 #[no_mangle]
@@ -208,6 +227,7 @@ pub extern "system" fn Java_com_nw5w_graywolf_jni_ModemBridge_modemStop<'local>(
             None => return,
         };
         state.stop.store(true, Ordering::Release);
+        let _ = state.serve_tx.try_send(ServeEvent::Stop);
         // Drop the sender so the demod loop's recv unblocks.
         drop(state.audio_tx);
         state.demod_join.take()
@@ -247,23 +267,41 @@ pub extern "system" fn Java_com_nw5w_graywolf_jni_ModemBridge_modemBuildTestFram
     arr.into_raw()
 }
 
+fn emit_status(handle: &IpcHandle) -> bool {
+    let s = StatusUpdate {
+        channel: config_state::channel_id(),
+        rx_frames: config_state::rx_frames(),
+        rx_bad_fcs: 0,
+        tx_frames: config_state::tx_frames(),
+        dcd_transitions: 0,
+        audio_level_mark: 0.0,
+        audio_level_space: 0.0,
+        audio_level_peak: 0.0,
+        dcd_state: false,
+        shutdown_complete: false,
+        timestamp_ns: Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64,
+    };
+    if let Err(e) = handle.send(&IpcMessage::status_update(s)) {
+        warn!("ipc send (status): {}; awaiting reconnect", e);
+        return false;
+    }
+    true
+}
+
 fn run_demod(
     socket_path: String,
     rx: std::sync::mpsc::Receiver<Vec<i16>>,
+    serve_tx: SyncSender<ServeEvent>,
+    serve_rx: std::sync::mpsc::Receiver<ServeEvent>,
     stop: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
 ) -> Result<(), String> {
     // Bind the IPC server first so `ready` flips true the moment the
     // socket is accepting. Then split into two threads:
     //   - DSP thread: always drains `rx` and feeds the demodulator.
-    //     Decoded frames go onto a bounded `frames_out` queue. Drops
-    //     silently when full so the audio pump never blocks.
-    //   - IPC thread: blocks on `accept`, then forwards `frames_out`
-    //     to the connected Go child. Drops when no client.
-    // This decouples DSP from IPC — the audio pump always has somewhere
-    // to push samples, and the demod always runs even if the Go child
-    // is restarting. Without this split, the first ~1.5 s of audio
-    // after every restart fills the rx sync_channel and gets dropped.
+    //     Decoded frames go onto the shared `serve_tx` event channel.
+    //   - IPC thread: blocks on `accept`, then multiplexes frames, levels,
+    //     and inbound commands on `serve_rx` without idle busy-polling.
     let server =
         IpcServer::bind(&socket_path).map_err(|e| format!("bind {}: {}", socket_path, e))?;
     info!("ipc server bound at {}", socket_path);
@@ -276,17 +314,11 @@ fn run_demod(
     let tx_worker = TxWorker::spawn().map_err(|e| format!("spawn tx worker: {}", e))?;
     let mut ptt_registry = PortRegistry::new();
 
-    let (frames_tx, frames_rx) = sync_channel::<ReceivedFrame>(64);
-    // Bounded level queue. ingest() runs at audio rate but only emits at
-    // ~5 Hz, so 32 slots is more than enough; try_send drops on full to
-    // protect the JNI audio thread.
-    let (level_tx, level_rx) = sync_channel::<DeviceLevelUpdate>(32);
-    audio::install_level_tx(level_tx);
+    audio::install_level_tx(serve_tx.clone());
     let stop_dsp = stop.clone();
+    let serve_tx_dsp = serve_tx.clone();
     // Counts frames the DSP decoded but couldn't hand to the IPC link
-    // (queue full because no Go client is draining). Moved into the DSP
-    // closure; a periodic warn! makes a deaf-but-decoding modem visible
-    // in logcat instead of silently dropping.
+    // (queue full because no Go client is draining).
     let dropped_frames = Arc::new(AtomicU64::new(0));
     let dsp_join = thread::Builder::new()
         .name("graywolfmodem-dsp".into())
@@ -299,21 +331,16 @@ fn run_demod(
                 0,
                 &RECOMMENDED_3DEMOD,
             );
+            let mut squelch = SquelchGate::new(TARGET_SAMPLE_RATE);
             let mut first_frame_logged = false;
             while !stop_dsp.load(Ordering::Relaxed) {
                 match rx.recv_timeout(Duration::from_millis(250)) {
                     Ok(chunk) => {
-                        for frame in feed_chunk(&mut demod, &chunk) {
+                        for frame in squelch.feed_chunk(&mut demod, &chunk) {
                             if !first_frame_logged {
                                 info!("poc-b: first_frame_decoded");
                                 first_frame_logged = true;
                             }
-                            // Tag the frame with the operator-configured
-                            // channel id (captured from ConfigureChannel
-                            // IPC) instead of the demodulator's internal
-                            // 0-indexed `frame.chan`. Without this tag
-                            // the Go dispatcher can't attribute frames
-                            // to a per-channel rx_frames counter.
                             let pb = ReceivedFrame {
                                 channel: config_state::channel_id(),
                                 subchan: frame.subchan as u32,
@@ -327,10 +354,7 @@ fn run_demod(
                                 timestamp_ns: Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64,
                             };
                             config_state::increment_rx_frames();
-                            // Drop on full — IPC thread will catch up when the
-                            // Go child connects. Count drops so a deaf modem
-                            // (decoding but no client draining) is diagnosable.
-                            if frames_tx.try_send(pb).is_err() {
+                            if serve_tx_dsp.try_send(ServeEvent::Frame(pb)).is_err() {
                                 let n = dropped_frames.fetch_add(1, Ordering::Relaxed) + 1;
                                 if n % 50 == 0 {
                                     warn!(
@@ -350,12 +374,9 @@ fn run_demod(
         .map_err(|e| format!("spawn dsp: {}", e))?;
 
     // Outer loop: (re)accept a Go client and serve it until the link drops,
-    // then loop back and wait for reconnect. A transient Go disconnect must
-    // NOT make RX go deaf — the DSP thread keeps decoding throughout; only
-    // the outbound IPC link is re-established. `ready` stays true the whole
-    // time (the modem is alive), so the supervisor's modemWatcher does not
-    // trigger a full restart on a mere reconnect.
+    // then loop back and wait for reconnect.
     let accept_poll = Duration::from_millis(100);
+    let mut audio_active = false;
     'serve: while !stop.load(Ordering::Relaxed) {
         let (handle, ipc_rx, ipc_join) = match server.accept_interruptible(&stop, accept_poll) {
             Ok(Some(triple)) => triple,
@@ -367,333 +388,298 @@ fn run_demod(
         };
         info!("poc-b: ipc_client_connected");
 
-        let mut last_status_emit = Instant::now();
-        // Inner loop: serve this connection. On any send error, drop the
-        // handle and break to the outer loop to await reconnect (do NOT
-        // exit run_demod — that was the bug that dropped all frames+levels
-        // while audio capture stayed healthy).
-        let link_alive = loop {
-            if stop.load(Ordering::Relaxed) {
-                break false;
-            }
-            // Short timeout so the loop pumps both frame and level queues
-            // without head-of-line blocking on either.
-            match frames_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(pb) => {
-                    if let Err(e) = handle.send(&IpcMessage::received_frame(pb)) {
-                        warn!("ipc send (frame): {}; awaiting reconnect", e);
-                        break true;
+        let serve_tx_ipc = serve_tx.clone();
+        let fwd_join = thread::Builder::new()
+            .name("graywolfmodem-ipc-fwd".into())
+            .spawn(move || {
+                while let Ok(inbound) = ipc_rx.recv() {
+                    let closed = matches!(
+                        inbound,
+                        IpcInbound::Disconnected | IpcInbound::ReadError(_)
+                    );
+                    if serve_tx_ipc.send(ServeEvent::Inbound(inbound)).is_err() {
+                        return;
+                    }
+                    if closed {
+                        return;
                     }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break false,
-            }
+                let _ = serve_tx_ipc.send(ServeEvent::IpcClosed);
+            })
+            .map_err(|e| format!("spawn ipc-fwd: {}", e))?;
 
-            // Drain queued level updates (~5 Hz cadence; usually 0 or 1 per
-            // tick). Non-blocking; never head-of-line-blocks the frame path.
-            let mut send_failed = false;
-            while let Ok(level) = level_rx.try_recv() {
-                if let Err(e) = handle.send(&IpcMessage::device_level_update(level)) {
-                    warn!("ipc send (level): {}; awaiting reconnect", e);
-                    send_failed = true;
-                    break;
+        let mut last_status_emit = Instant::now();
+        let initial_ok = emit_status(&handle);
+
+        let link_alive = if !initial_ok {
+            true
+        } else {
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break false;
                 }
-            }
-            if send_failed {
-                break true;
-            }
-
-            // Emit StatusUpdate once per second so the Go modembridge
-            // status_cache gets the cumulative rx_frames counter that
-            // backs the SPA Dashboard's per-channel RX counter. Audio
-            // levels are zero here -- the per-device DeviceLevelUpdate
-            // path above is the source of truth on Android.
-            let now = Instant::now();
-            if now.duration_since(last_status_emit) >= Duration::from_millis(1000) {
-                let s = StatusUpdate {
-                    channel: config_state::channel_id(),
-                    rx_frames: config_state::rx_frames(),
-                    rx_bad_fcs: 0,
-                    tx_frames: config_state::tx_frames(),
-                    dcd_transitions: 0,
-                    audio_level_mark: 0.0,
-                    audio_level_space: 0.0,
-                    audio_level_peak: 0.0,
-                    dcd_state: false,
-                    shutdown_complete: false,
-                    timestamp_ns: Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64,
+                let status_interval = if audio_active {
+                    Duration::from_millis(1_000)
+                } else {
+                    Duration::from_millis(10_000)
                 };
-                if let Err(e) = handle.send(&IpcMessage::status_update(s)) {
-                    warn!("ipc send (status): {}; awaiting reconnect", e);
-                    break true;
+                if last_status_emit.elapsed() >= status_interval {
+                    if !emit_status(&handle) {
+                        break true;
+                    }
+                    last_status_emit = Instant::now();
                 }
-                last_status_emit = now;
-            }
+                let wait = status_interval.saturating_sub(last_status_emit.elapsed());
 
-            // Drain inbound IPC messages from the Go side. Previously only
-            // ConfigureChannel was handled; now the full TX dispatch is wired.
-            // Set when a reply send fails so we break to await reconnect after
-            // the drain loop (a `while let` can't `break` with a value).
-            let mut reply_send_failed = false;
-            while let Ok(inbound) = ipc_rx.try_recv() {
-                if let IpcInbound::Message(msg) = inbound {
-                    match msg.payload {
-                        Some(ipc_message::Payload::ConfigureChannel(cc)) => {
-                            let chan = cc.channel;
-                            let dev = if cc.input_device_id != 0 {
-                                cc.input_device_id
-                            } else {
-                                cc.device_id
-                            };
-                            info!(
-                                "configure channel: channel={} input_device_id={}",
-                                chan, dev
-                            );
-                            config_state::set_from_configure(chan, dev);
-                            // Capture DSP params so TransmitFrame can call
-                            // build_samples with the same baud / tone pair.
-                            config_state::set_channel_dsp(cc.baud, cc.mark_freq, cc.space_freq);
-                            // If this channel already uses Digirig tone PTT,
-                            // re-pre-warm the sink at the (possibly new) mark
-                            // frequency. Covers the ConfigurePtt-before-
-                            // ConfigureChannel ordering, where the earlier
-                            // pre-warm ran at the default mark and would
-                            // otherwise force a track rebuild on the first key.
-                            if config_state::digirig_tone() {
-                                if let Err(e) =
-                                    crate::jni_audio_set_tone(false, cc.mark_freq as i32)
-                                {
-                                    warn!("re-pre-warm setTone(hz={}): {e}", cc.mark_freq);
+                match serve_rx.recv_timeout(wait) {
+                    Ok(ServeEvent::Stop) => break false,
+                    Ok(ServeEvent::Frame(pb)) => {
+                        if let Err(e) = handle.send(&IpcMessage::received_frame(pb)) {
+                            warn!("ipc send (frame): {}; awaiting reconnect", e);
+                            break true;
+                        }
+                    }
+                    Ok(ServeEvent::Level(level)) => {
+                        if let Err(e) = handle.send(&IpcMessage::device_level_update(level)) {
+                            warn!("ipc send (level): {}; awaiting reconnect", e);
+                            break true;
+                        }
+                    }
+                    Ok(ServeEvent::Inbound(IpcInbound::Message(msg))) => {
+                        let mut reply_send_failed = false;
+                        match msg.payload {
+                            Some(ipc_message::Payload::StartAudio(_)) => {
+                                audio_active = true;
+                                if let Err(e) = crate::jni_audio_rx_set_active(true) {
+                                    warn!("setAudioRxActive(true): {e}");
                                 }
                             }
-                        }
-                        Some(ipc_message::Payload::ConfigurePtt(cfg)) => {
-                            let chan = cfg.channel;
-                            // Persist timing for later TransmitFrame use.
-                            config_state::set_ptt_timing(cfg.txdelay_ms, cfg.txtail_ms);
-                            // Digirig Lite tone PTT (Android method 5): record
-                            // the flag so TransmitFrame prepends the silent
-                            // lead-in, and pre-warm the Kotlin sink so it
-                            // rebuilds a stereo track (tone hz) — or mono
-                            // (hz=0) — before the first TX, avoiding a
-                            // track-rebuild stall on the first key.
-                            let is_tone = cfg.method == "android"
-                                && cfg.ptt_method as i32
-                                    == crate::tx::ptt_android_consts::PTT_METHOD_DIGIRIG_TONE;
-                            config_state::set_digirig_tone(is_tone);
-                            let warm_hz =
-                                if is_tone { config_state::mark_freq() as i32 } else { 0 };
-                            if let Err(e) = crate::jni_audio_set_tone(false, warm_hz) {
-                                warn!("pre-warm setTone(hz={warm_hz}): {e}");
+                            Some(ipc_message::Payload::StopAudio(_)) => {
+                                audio_active = false;
+                                if let Err(e) = crate::jni_audio_rx_set_active(false) {
+                                    warn!("setAudioRxActive(false): {e}");
+                                }
                             }
-                            match ptt_registry.build_driver(&cfg) {
-                                Ok(driver) => {
-                                    if let Err(e) = tx_worker.register_driver(chan, driver) {
-                                        warn!("register_driver(channel={}): {}", chan, e);
-                                    } else {
-                                        info!(
-                                            "ptt driver registered channel={} method={}",
-                                            chan, cfg.method
+                            Some(ipc_message::Payload::Shutdown(_)) => {
+                                audio_active = false;
+                                let _ = crate::jni_audio_rx_set_active(false);
+                            }
+                            Some(ipc_message::Payload::ConfigureChannel(cc)) => {
+                                let chan = cc.channel;
+                                let dev = if cc.input_device_id != 0 {
+                                    cc.input_device_id
+                                } else {
+                                    cc.device_id
+                                };
+                                info!(
+                                    "configure channel: channel={} input_device_id={}",
+                                    chan, dev
+                                );
+                                config_state::set_from_configure(chan, dev);
+                                config_state::set_channel_dsp(cc.baud, cc.mark_freq, cc.space_freq);
+                                if config_state::digirig_tone() {
+                                    if let Err(e) =
+                                        crate::jni_audio_set_tone(false, cc.mark_freq as i32)
+                                    {
+                                        warn!("re-pre-warm setTone(hz={}): {e}", cc.mark_freq);
+                                    }
+                                }
+                            }
+                            Some(ipc_message::Payload::ConfigurePtt(cfg)) => {
+                                let chan = cfg.channel;
+                                config_state::set_ptt_timing(cfg.txdelay_ms, cfg.txtail_ms);
+                                let is_tone = cfg.method == "android"
+                                    && cfg.ptt_method as i32
+                                        == crate::tx::ptt_android_consts::PTT_METHOD_DIGIRIG_TONE;
+                                config_state::set_digirig_tone(is_tone);
+                                let warm_hz =
+                                    if is_tone { config_state::mark_freq() as i32 } else { 0 };
+                                if let Err(e) = crate::jni_audio_set_tone(false, warm_hz) {
+                                    warn!("pre-warm setTone(hz={warm_hz}): {e}");
+                                }
+                                match ptt_registry.build_driver(&cfg) {
+                                    Ok(driver) => {
+                                        if let Err(e) = tx_worker.register_driver(chan, driver) {
+                                            warn!("register_driver(channel={}): {}", chan, e);
+                                        } else {
+                                            info!(
+                                                "ptt driver registered channel={} method={}",
+                                                chan, cfg.method
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "build_driver(channel={} method={}): {}",
+                                            chan, cfg.method, e
                                         );
                                     }
                                 }
-                                Err(e) => {
+                            }
+                            Some(ipc_message::Payload::ManualPtt(mp)) => {
+                                if let Err(e) = tx_worker.manual_key(mp.channel, mp.keyed) {
                                     warn!(
-                                        "build_driver(channel={} method={}): {}",
-                                        chan, cfg.method, e
+                                        "manual_key(channel={} keyed={}): {}",
+                                        mp.channel, mp.keyed, e
                                     );
                                 }
                             }
-                        }
-                        Some(ipc_message::Payload::ManualPtt(mp)) => {
-                            if let Err(e) = tx_worker.manual_key(mp.channel, mp.keyed) {
-                                warn!(
-                                    "manual_key(channel={} keyed={}): {}",
-                                    mp.channel, mp.keyed, e
-                                );
-                            }
-                        }
-                        Some(ipc_message::Payload::TransmitFrame(tf)) => {
-                            let txdelay = if tf.txdelay_override_ms != 0 {
-                                tf.txdelay_override_ms
-                            } else {
-                                config_state::txdelay_ms()
-                            };
-                            let txtail = if tf.txtail_override_ms != 0 {
-                                tf.txtail_override_ms
-                            } else {
-                                config_state::txtail_ms()
-                            };
-                            match crate::tx::build_samples(
-                                &tf.data,
-                                txdelay,
-                                txtail,
-                                TARGET_SAMPLE_RATE,
-                                config_state::baud(),
-                                config_state::mark_freq(),
-                                config_state::space_freq(),
-                            ) {
-                                Ok(samples) => {
-                                    // Digirig Lite tone PTT: prepend a 500 ms
-                                    // silent left-channel lead-in so the
-                                    // right-channel keying tone (gated on at
-                                    // key) leads the packet, mirroring desktop's
-                                    // DIGIRIG_TONE_LEAD_MS.
-                                    let samples = if config_state::digirig_tone() {
-                                        crate::tx::prepend_silence(samples, TARGET_SAMPLE_RATE, 500)
-                                    } else {
-                                        samples
-                                    };
-                                    let job = TxJob {
-                                        channel: tf.channel,
-                                        samples,
-                                        sample_rate: TARGET_SAMPLE_RATE,
-                                        // unused by the Android arm of process_job
-                                        // (AndroidTxSink handles audio routing via JNI)
-                                        output_device_id: 0,
-                                        sink_config:
-                                            crate::audio::soundcard::SoundcardOutputConfig {
-                                                device_name: String::new(),
-                                                sample_rate: TARGET_SAMPLE_RATE,
-                                                channels: 1,
-                                                audio_channel: 0,
-                                                // Android keys PTT via JNI, never via a companion-channel tone.
-                                                ptt_tone_hz: 0,
-                                            },
-                                    };
-                                    if let Err(e) = tx_worker.transmit(job) {
-                                        warn!("transmit(channel={}): {}", tf.channel, e);
-                                    } else {
-                                        config_state::increment_tx_frames();
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("build_samples(channel={}): {}", tf.channel, e);
-                                }
-                            }
-                        }
-                        Some(ipc_message::Payload::TransmitTestSignal(req)) => {
-                            // Build test-signal PCM the same way the desktop
-                            // modem does (modem::handle_transmit_test_signal),
-                            // then submit it through the shared TxWorker and
-                            // reply with TestSignalResult. Without this arm the
-                            // payload hit the catch-all below and was dropped,
-                            // so the Go side's 5s wait expired -- the "test
-                            // signal timeout" operators saw on Android
-                            // (graywolf#267). Gain is applied by AndroidTxSink,
-                            // so samples are submitted unscaled like TransmitFrame.
-                            let built = match req.kind {
-                                0 => {
-                                    let s = crate::txtest::cw_samples(
-                                        &req.callsign,
-                                        TARGET_SAMPLE_RATE,
-                                        req.cw_wpm.max(1),
-                                        req.freq_a_hz as f32,
-                                    );
-                                    if s.is_empty() {
-                                        Err("callsign produced no CW symbols".to_string())
-                                    } else {
-                                        Ok(s)
-                                    }
-                                }
-                                1 => Ok(crate::txtest::tone_samples(
+                            Some(ipc_message::Payload::TransmitFrame(tf)) => {
+                                let txdelay = if tf.txdelay_override_ms != 0 {
+                                    tf.txdelay_override_ms
+                                } else {
+                                    config_state::txdelay_ms()
+                                };
+                                let txtail = if tf.txtail_override_ms != 0 {
+                                    tf.txtail_override_ms
+                                } else {
+                                    config_state::txtail_ms()
+                                };
+                                match crate::tx::build_samples(
+                                    &tf.data,
+                                    txdelay,
+                                    txtail,
                                     TARGET_SAMPLE_RATE,
-                                    req.freq_a_hz as f32,
-                                    req.duration_ms,
-                                )),
-                                2 => Ok(crate::txtest::alternating_samples(
-                                    TARGET_SAMPLE_RATE,
-                                    req.freq_a_hz as f32,
-                                    req.freq_b_hz as f32,
-                                    req.duration_ms,
-                                    req.alt_period_ms,
-                                )),
-                                other => Err(format!("unknown test signal kind {}", other)),
-                            };
-
-                            let (success, error) = match built {
-                                Ok(samples) => {
-                                    let job = TxJob {
-                                        channel: req.channel,
-                                        samples,
-                                        sample_rate: TARGET_SAMPLE_RATE,
-                                        // unused by the Android arm of process_job
-                                        output_device_id: 0,
-                                        sink_config:
-                                            crate::audio::soundcard::SoundcardOutputConfig {
-                                                device_name: String::new(),
-                                                sample_rate: TARGET_SAMPLE_RATE,
-                                                channels: 1,
-                                                audio_channel: 0,
-                                                // Android keys PTT via JNI, never via a companion-channel tone.
-                                                ptt_tone_hz: 0,
-                                            },
-                                    };
-                                    // Ok here means "enqueued on the TX
-                                    // worker", not "played out" -- PTT keying
-                                    // and audio happen async in process_job.
-                                    // Matches the desktop handler's reply
-                                    // semantics (modem::handle_transmit_test_signal).
-                                    match tx_worker.transmit(job) {
-                                        Ok(()) => {
+                                    config_state::baud(),
+                                    config_state::mark_freq(),
+                                    config_state::space_freq(),
+                                ) {
+                                    Ok(samples) => {
+                                        let samples = if config_state::digirig_tone() {
+                                            crate::tx::prepend_silence(samples, TARGET_SAMPLE_RATE, 500)
+                                        } else {
+                                            samples
+                                        };
+                                        let job = TxJob {
+                                            channel: tf.channel,
+                                            samples,
+                                            sample_rate: TARGET_SAMPLE_RATE,
+                                            output_device_id: 0,
+                                            sink_config:
+                                                crate::audio::soundcard::SoundcardOutputConfig {
+                                                    device_name: String::new(),
+                                                    sample_rate: TARGET_SAMPLE_RATE,
+                                                    channels: 1,
+                                                    audio_channel: 0,
+                                                    ptt_tone_hz: 0,
+                                                },
+                                        };
+                                        if let Err(e) = tx_worker.transmit(job) {
+                                            warn!("transmit(channel={}): {}", tf.channel, e);
+                                        } else {
                                             config_state::increment_tx_frames();
-                                            (true, String::new())
                                         }
-                                        Err(e) => (false, e),
+                                    }
+                                    Err(e) => {
+                                        warn!("build_samples(channel={}): {}", tf.channel, e);
                                     }
                                 }
-                                Err(e) => (false, e),
-                            };
-
-                            if let Err(e) = handle.send(&IpcMessage::test_signal_result(
-                                TestSignalResult { request_id: req.request_id, success, error },
-                            )) {
-                                warn!(
-                                    "ipc send (test signal result): {}; awaiting reconnect",
-                                    e
-                                );
-                                reply_send_failed = true;
-                                break;
                             }
+                            Some(ipc_message::Payload::TransmitTestSignal(req)) => {
+                                let built = match req.kind {
+                                    0 => {
+                                        let s = crate::txtest::cw_samples(
+                                            &req.callsign,
+                                            TARGET_SAMPLE_RATE,
+                                            req.cw_wpm.max(1),
+                                            req.freq_a_hz as f32,
+                                        );
+                                        if s.is_empty() {
+                                            Err("callsign produced no CW symbols".to_string())
+                                        } else {
+                                            Ok(s)
+                                        }
+                                    }
+                                    1 => Ok(crate::txtest::tone_samples(
+                                        TARGET_SAMPLE_RATE,
+                                        req.freq_a_hz as f32,
+                                        req.duration_ms,
+                                    )),
+                                    2 => Ok(crate::txtest::alternating_samples(
+                                        TARGET_SAMPLE_RATE,
+                                        req.freq_a_hz as f32,
+                                        req.freq_b_hz as f32,
+                                        req.duration_ms,
+                                        req.alt_period_ms,
+                                    )),
+                                    other => Err(format!("unknown test signal kind {}", other)),
+                                };
+
+                                let (success, error) = match built {
+                                    Ok(samples) => {
+                                        let job = TxJob {
+                                            channel: req.channel,
+                                            samples,
+                                            sample_rate: TARGET_SAMPLE_RATE,
+                                            output_device_id: 0,
+                                            sink_config:
+                                                crate::audio::soundcard::SoundcardOutputConfig {
+                                                    device_name: String::new(),
+                                                    sample_rate: TARGET_SAMPLE_RATE,
+                                                    channels: 1,
+                                                    audio_channel: 0,
+                                                    ptt_tone_hz: 0,
+                                                },
+                                        };
+                                        match tx_worker.transmit(job) {
+                                            Ok(()) => {
+                                                config_state::increment_tx_frames();
+                                                (true, String::new())
+                                            }
+                                            Err(e) => (false, e),
+                                        }
+                                    }
+                                    Err(e) => (false, e),
+                                };
+
+                                if let Err(e) = handle.send(&IpcMessage::test_signal_result(
+                                    TestSignalResult { request_id: req.request_id, success, error },
+                                )) {
+                                    warn!(
+                                        "ipc send (test signal result): {}; awaiting reconnect",
+                                        e
+                                    );
+                                    reply_send_failed = true;
+                                }
+                            }
+                            Some(ipc_message::Payload::SetDeviceGain(sg)) => {
+                                audio::set_gain_db(sg.gain_db);
+                                info!(
+                                    "gain set to {:.1} dB (device_id={})",
+                                    sg.gain_db, sg.device_id
+                                );
+                            }
+                            _ => {}
                         }
-                        Some(ipc_message::Payload::SetDeviceGain(sg)) => {
-                            // Live gain from the operator slider. Without this
-                            // arm it was a silent no-op on Android (gain frozen
-                            // at the modemStart boot value). Parity with the JNI
-                            // modemSetGainDb path; single global software gain so
-                            // device_id is informational.
-                            audio::set_gain_db(sg.gain_db);
-                            info!(
-                                "gain set to {:.1} dB (device_id={})",
-                                sg.gain_db, sg.device_id
-                            );
+                        if reply_send_failed {
+                            break true;
                         }
-                        _ => {}
                     }
+                    Ok(ServeEvent::Inbound(
+                        IpcInbound::Disconnected | IpcInbound::ReadError(_),
+                    ))
+                    | Ok(ServeEvent::IpcClosed) => {
+                        break true;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break false,
                 }
-            }
-            if reply_send_failed {
-                break true;
             }
         };
 
-        // Tear down this connection before re-accepting (or exiting). On a
-        // transient send error (link_alive == true) we loop back and await
-        // the Go child's reconnect; the DSP thread keeps decoding meanwhile.
         drop(handle);
         let _ = ipc_join.join();
+        let _ = fwd_join.join();
         if !link_alive {
             break 'serve;
         }
         info!("ipc client disconnected; awaiting reconnect");
     }
 
-    // Single exit path (stop requested or audio channel disconnected). The
-    // stop.store(true) before joining the DSP thread fixes the latent hang
-    // where a bare break left the DSP thread running forever.
+    let _ = crate::jni_audio_rx_set_active(false);
     audio::clear_level_tx();
     ready.store(false, Ordering::Release);
-    stop.store(true, Ordering::Release); // ensure DSP thread wakes and exits
+    stop.store(true, Ordering::Release);
     let _ = dsp_join.join();
     info!("demod loop exiting");
     Ok(())
@@ -742,4 +728,14 @@ pub extern "system" fn Java_com_nw5w_graywolf_jni_ModemBridge_installAudioTxCall
     callback: JObject<'local>,
 ) {
     upcall::install_audio_tx(&mut env, callback);
+}
+
+/// Install the Kotlin `AudioRxCallback` implementation.
+#[no_mangle]
+pub extern "system" fn Java_com_nw5w_graywolf_jni_ModemBridge_installAudioRxCallback<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    callback: JObject<'local>,
+) {
+    upcall::install_audio_rx(&mut env, callback);
 }

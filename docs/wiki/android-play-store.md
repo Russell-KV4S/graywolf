@@ -10,14 +10,15 @@ and [`../../android/app/build.gradle.kts`](../../android/app/build.gradle.kts).
 
 `make bump-point` (or `bump-minor`) is the only manual action a release
 needs. It writes `VERSION`, commits, tags `vX.Y.Z`, and pushes. The tag
-push fires two workflows in parallel: `release.yml` (goreleaser:
-Linux/macOS/Windows binaries, Docker, `.deb`/`.rpm`, NSIS) and
-`android.yml`. The Android workflow builds a release-signed `.aab` +
-`.apk`, attaches both to the GitHub Release goreleaser created, and
-uploads the `.aab` to the Play **Closed Testing** track (Play's `alpha`
-track), where the ~15-person private beta lives. Promotion onward to
-**Open Testing** (the `beta` track) is a separate, deliberate manual step
-(`gh workflow run android.yml --field version=X.Y.Z --field track=beta`).
+push fires two workflows in parallel: `release.yml` (goreleaser: Linux/macOS/Windows binaries, Docker, `.deb`/`.rpm`, NSIS) and
+`android.yml`. The Android workflow builds a release-signed `:app` `.aab` +
+`.apk` plus the release-signed Wear OS companion `:wear` APK
+(`graywolf-wear-X.Y.Z.apk`, signed with the identical upload keystore so
+Play Services Wearable Data Layer RPCs authenticate cleanly), attaches all
+three to the GitHub Release goreleaser created, and uploads `:app`'s `.aab`
+to the Play **Closed Testing** track (Play's `alpha` track), where the ~15-person
+private beta lives. Promotion onward to **Open Testing** (the `beta` track) is
+a separate, deliberate manual step (`gh workflow run android.yml --field version=X.Y.Z --field track=beta`).
 Production is never targeted -- the service account lacks the permission.
 **One caveat right now:** the app is still a draft in the Play Console, so
 the upload lands as a *draft* release and a human has to roll it out

@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "graywolf-android"
-include(":app")
+include(":app", ":wear")

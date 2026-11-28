@@ -153,13 +153,20 @@ jobs:
         # Exec task would otherwise buffer and discard. On failure the
         # actual error message lands in the run log instead of just
         # "Process 'command 'go'' finished with non-zero exit value 1".
-        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace --info
+        run: ./gradlew :app:assembleDebug :wear:assembleDebug --no-daemon --stacktrace --info
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v5
         with:
           name: graywolf-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
+
+      - name: Upload wear debug APK
+        uses: actions/upload-artifact@v5
+        with:
+          name: graywolf-wear-debug-apk
+          path: android/wear/build/outputs/apk/debug/wear-debug.apk
           retention-days: 7
 
   # ------------------------------------------------------------------
@@ -257,7 +264,7 @@ jobs:
         # --info kept (matches the build job) so any go/cargo failure
         # in this signed path lands a real error message in the log,
         # not just Gradle's wrapped exit-code-1 message.
-        run: ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon --stacktrace --info
+        run: ./gradlew :app:bundleRelease :app:assembleRelease :wear:assembleRelease --no-daemon --stacktrace --info
 
       - name: Stage release artifacts
         id: stage
@@ -267,6 +274,7 @@ jobs:
           mkdir -p staging
           cp android/app/build/outputs/bundle/release/app-release.aab "staging/graywolf-${version}.aab"
           cp android/app/build/outputs/apk/release/app-release.apk     "staging/graywolf-${version}.apk"
+          cp android/wear/build/outputs/apk/release/wear-release.apk   "staging/graywolf-wear-${version}.apk"
           ls -la staging/
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
@@ -276,6 +284,9 @@ jobs:
           v="${{ steps.stage.outputs.version }}"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs \
             "staging/graywolf-${v}.apk" \
+            | grep -E "SHA-256 digest|Signer #1 certificate"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs \
+            "staging/graywolf-wear-${v}.apk" \
             | grep -E "SHA-256 digest|Signer #1 certificate"
 
       - name: Upload signed AAB + APK to the GitHub Release
@@ -293,6 +304,7 @@ jobs:
             if gh release upload "${GITHUB_REF_NAME}" \
                  "staging/graywolf-${v}.aab" \
                  "staging/graywolf-${v}.apk" \
+                 "staging/graywolf-wear-${v}.apk" \
                  --clobber; then
               echo "uploaded on attempt $i"
               exit 0

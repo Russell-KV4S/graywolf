@@ -9,6 +9,7 @@ import (
 	httppprof "net/http/pprof"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1913,13 +1914,19 @@ func (a *App) ax25connComponent() namedComponent {
 // cancellation, and neither has a meaningful stop signal beyond "the
 // context is dead".
 func (a *App) backgroundStatsComponent() namedComponent {
+	govInterval := 2 * time.Second
+	plogInterval := 5 * time.Second
+	if runtime.GOOS == "android" {
+		govInterval = 60 * time.Second
+		plogInterval = 60 * time.Second
+	}
 	return namedComponent{
 		name: "background stats",
 		start: func(ctx context.Context) error {
 			a.statsWG.Add(2)
 			go func() {
 				defer a.statsWG.Done()
-				t := time.NewTicker(2 * time.Second)
+				t := time.NewTicker(govInterval)
 				defer t.Stop()
 				var prev txgovernor.Stats
 				// KISS-TNC drop counters are cumulative at the source
@@ -1958,7 +1965,7 @@ func (a *App) backgroundStatsComponent() namedComponent {
 			}()
 			go func() {
 				defer a.statsWG.Done()
-				t := time.NewTicker(5 * time.Second)
+				t := time.NewTicker(plogInterval)
 				defer t.Stop()
 				for {
 					select {
