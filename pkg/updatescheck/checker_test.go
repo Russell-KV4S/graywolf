@@ -295,6 +295,36 @@ func TestPathHitsReleasesLatest(t *testing.T) {
 	}
 }
 
+func TestCustomGitHubOwnerOverride(t *testing.T) {
+	origOwner, origRepo := githubOwner, githubRepo
+	t.Cleanup(func() {
+		githubOwner = origOwner
+		githubRepo = origRepo
+	})
+	githubOwner = "Russell-KV4S"
+	githubRepo = "graywolf"
+
+	var gotPath, gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = io.WriteString(w, `{"tag_name":"v0.14.15","html_url":"https://github.com/Russell-KV4S/graywolf/releases/tag/v0.14.15"}`)
+	}))
+	defer srv.Close()
+
+	store := &stubStore{cfg: configstore.UpdatesConfig{Enabled: true}}
+	c, _ := newTestChecker(t, "0.14.15", store, srv.URL)
+	c.evaluate(context.Background())
+
+	wantPath := "/repos/Russell-KV4S/graywolf/releases/latest"
+	if gotPath != wantPath {
+		t.Errorf("path: got %q, want %q", gotPath, wantPath)
+	}
+	if !strings.Contains(gotUA, "(+https://github.com/Russell-KV4S/graywolf)") {
+		t.Errorf("User-Agent missing custom repo URL: got %q", gotUA)
+	}
+}
+
 // waitForCalls polls spy.calls until it reaches n or the deadline
 // expires. Preferable to a fixed sleep because it latches the moment
 // the background goroutine's evaluate() completes.

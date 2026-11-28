@@ -17,6 +17,23 @@ val graywolfVersionCode: Int = run {
     val (major, minor, patch) = parts.map { it.toInt() }
     major * 1_000_000 + minor * 10_000 + patch * 100
 }
+val graywolfGitCommit: String = System.getenv("GRAYWOLF_GIT_COMMIT")?.takeIf { it.isNotBlank() } ?: run {
+    try {
+        val proc = ProcessBuilder("git", "rev-parse", "HEAD")
+            .directory(rootProject.projectDir.parentFile)
+            .redirectErrorStream(true)
+            .start()
+        val out = proc.inputStream.bufferedReader().readText().trim()
+        if (proc.waitFor() == 0 && out.length >= 8) out.substring(0, 8) else "unknown"
+    } catch (_: Throwable) {
+        "unknown"
+    }
+}
+val graywolfGitHubOwner: String = System.getenv("GRAYWOLF_GITHUB_OWNER")?.takeIf { it.isNotBlank() }
+    ?: System.getenv("GITHUB_REPOSITORY_OWNER")?.takeIf { it.isNotBlank() }
+    ?: "chrissnell"
+val graywolfGitHubRepo: String = System.getenv("GRAYWOLF_GITHUB_REPO")?.takeIf { it.isNotBlank() }
+    ?: "graywolf"
 
 plugins {
     id("com.android.application")
@@ -286,10 +303,27 @@ goAbiMatrix.forEach { (abi, info) ->
         })
         inputs.file(repoRoot.resolve("go.mod"))
         inputs.file(repoRoot.resolve("go.sum"))
+        inputs.property("version", graywolfVersionName)
+        inputs.property("gitCommit", graywolfGitCommit)
+        inputs.property("githubOwner", graywolfGitHubOwner)
+        inputs.property("githubRepo", graywolfGitHubRepo)
         outputs.file(outDir.resolve("libgraywolf.so"))
         doFirst { outDir.mkdirs() }
+        val goLdflags = listOf(
+            "-w",
+            "-s",
+            "-X",
+            "main.Version=$graywolfVersionName",
+            "-X",
+            "main.GitCommit=$graywolfGitCommit",
+            "-X",
+            "github.com/chrissnell/graywolf/pkg/updatescheck.githubOwner=$graywolfGitHubOwner",
+            "-X",
+            "github.com/chrissnell/graywolf/pkg/updatescheck.githubRepo=$graywolfGitHubRepo",
+        ).joinToString(" ")
         commandLine = listOf(
             "go", "build",
+            "-ldflags", goLdflags,
             "-o", outDir.resolve("libgraywolf.so").absolutePath,
             "./cmd/graywolf",
         )

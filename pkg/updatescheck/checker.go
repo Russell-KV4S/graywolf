@@ -52,17 +52,19 @@ const defaultTickInterval = 10 * time.Minute
 const defaultHTTPTimeout = 10 * time.Second
 
 // githubOwner and githubRepo locate the upstream release feed. Kept
-// as named constants so a fork only needs to edit two lines instead
-// of hunting the release path and the User-Agent URL separately.
-const (
+// as named variables so link-time -ldflags can override the release feed
+// for fork builds (e.g. -X github.com/chrissnell/graywolf/pkg/updatescheck.githubOwner=...).
+var (
 	githubOwner = "chrissnell"
 	githubRepo  = "graywolf"
 )
 
-// githubReleasePath is the relative path hit on c.baseURL. Note this
+// releasePath returns the relative path hit on c.baseURL. Note this
 // is specifically /releases/latest, which excludes prereleases by
 // design — beta tags on GitHub never trigger a banner for GA users.
-var githubReleasePath = "/repos/" + githubOwner + "/" + githubRepo + "/releases/latest"
+func releasePath() string {
+	return "/repos/" + githubOwner + "/" + githubRepo + "/releases/latest"
+}
 
 // Status is the publicly-visible shape of the cached check result.
 // Returned by Snapshot() and projected one-to-one into the /api/updates/status
@@ -212,7 +214,7 @@ func (c *Checker) evaluate(ctx context.Context) {
 // "pending" and a Checker with a prior known-good "available" retains
 // that value across a transient blip.
 func (c *Checker) check(ctx context.Context) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+githubReleasePath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+releasePath(), nil)
 	if err != nil {
 		c.logger.Debug("updatescheck: build request failed", "err", err)
 		return
@@ -309,3 +311,10 @@ func stripTagPrefix(tag string) string {
 // accidentally shorten the cadence.
 func (c *Checker) setStartupDelay(d time.Duration) { c.startupDelay = d }
 func (c *Checker) setTickInterval(d time.Duration) { c.tickInterval = d }
+
+// SetTickInterval overrides the polling cadence before Run is called.
+func (c *Checker) SetTickInterval(d time.Duration) {
+	if d > 0 {
+		c.tickInterval = d
+	}
+}

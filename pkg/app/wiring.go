@@ -1586,21 +1586,17 @@ func (a *App) wireHTTP(ctx context.Context) error {
 	// The checker's Run goroutine is launched by updatesCheckComponent;
 	// the reload channel it selects on is owned by apiSrv and surfaced
 	// via UpdatesReloadCh(). See pkg/updatescheck and plan D4.
-	//
-	// Skipped on Android: Play Store handles upgrades there; an
-	// in-process GitHub poll has no purpose and would generate
-	// unwanted background traffic.
-	if platform.Kind != "android" {
-		a.updatesChecker = updatescheck.NewChecker(
-			a.cfg.Version,
-			a.store,
-			updatescheck.DefaultBaseURL,
-			a.logger.With("component", "updatescheck"),
-		)
-		apiSrv.SetUpdatesChecker(a.updatesChecker)
-	} else {
-		a.logger.Info("updatescheck: disabled on android (Play Store handles updates)")
+	a.updatesChecker = updatescheck.NewChecker(
+		a.cfg.Version,
+		a.store,
+		updatescheck.DefaultBaseURL,
+		a.logger.With("component", "updatescheck"),
+	)
+	if platform.Kind == "android" {
+		a.updatesChecker.SetTickInterval(6 * time.Hour)
+		a.logger.Info("updatescheck: enabled on android (6h interval)")
 	}
+	apiSrv.SetUpdatesChecker(a.updatesChecker)
 
 	// /api/version is public (the UI reads it before login to pick
 	// which screens to show). It is mounted on the outer mux so it

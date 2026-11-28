@@ -140,6 +140,8 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
+        env:
+          GRAYWOLF_GITHUB_OWNER: ${{ github.repository_owner }}
         # Do NOT use `env: ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_HOME }}`
         # here. `${{ env.X }}` evaluates against the workflow-context env,
         # which doesn't reflect variables setup-android exports at the
@@ -257,6 +259,7 @@ jobs:
       - name: Build signed AAB and APK
         working-directory: android
         env:
+          GRAYWOLF_GITHUB_OWNER: ${{ github.repository_owner }}
           GRAYWOLF_KEYSTORE_BASE64: ${{ secrets.GRAYWOLF_KEYSTORE_BASE64 }}
           GRAYWOLF_KEYSTORE_PASSWORD: ${{ secrets.GRAYWOLF_KEYSTORE_PASSWORD }}
           GRAYWOLF_KEY_ALIAS: ${{ secrets.GRAYWOLF_KEY_ALIAS }}
